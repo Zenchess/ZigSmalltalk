@@ -1,0 +1,1351 @@
+================================================================================
+                         ZIG SMALLTALK IMPLEMENTATION PLAN
+                              Version 0.1 - REPL First
+================================================================================
+
+OVERVIEW
+--------
+A minimal Smalltalk implementation in Zig with:
+- Simple bytecode interpreter (no JIT)
+- Automatic C library binding via Zig's @cImport
+- REPL workspace for interactive development
+- Class library bootstrapped from Dolphin Smalltalk source
+
+Target: Get to "Hello World" and basic object manipulation ASAP, then iterate.
+
+
+================================================================================
+                              PHASE 1: FOUNDATION
+                           (Estimated: Core VM Shell)
+================================================================================
+
+1.1 PROJECT SETUP
+-----------------
+Directory structure:
+    zig-smalltalk/
+    ├── build.zig                 # Build configuration
+    ├── src/
+    │   ├── main.zig              # Entry point, REPL loop
+    │   ├── vm/
+    │   │   ├── object.zig        # Object model, tagged values
+    │   │   ├── memory.zig        # Heap, garbage collector
+    │   │   ├── interpreter.zig   # Bytecode interpreter
+    │   │   ├── primitives.zig    # Built-in primitive methods
+    │   │   └── method.zig        # CompiledMethod representation
+    │   ├── compiler/
+    │   │   ├── lexer.zig         # Tokenizer
+    │   │   ├── parser.zig        # Smalltalk parser
+    │   │   └── codegen.zig       # Bytecode generator
+    │   ├── ffi/
+    │   │   ├── bindings.zig      # Auto-generated C bindings
+    │   │   ├── marshal.zig       # Smalltalk <-> C conversion
+    │   │   └── callbacks.zig     # C callback trampolines
+    │   └── image/
+    │       ├── bootstrap.zig     # Initial image creation
+    │       ├── loader.zig        # Image file loading
+    │       └── saver.zig         # Image file saving
+    ├── lib/
+    │   └── core/                 # Core Smalltalk classes (.st files)
+    ├── dolphin-source/           # Dolphin source for reference/porting
+    └── test/
+
+
+1.2 OBJECT MODEL
+----------------
+File: src/vm/object.zig
+
+Tagged pointer scheme (64-bit):
+
+    Bit 0 = 0: Pointer to heap object (aligned, so bit 0 always 0)
+    Bit 0 = 1: Immediate SmallInteger (63-bit signed, shifted right 1)
+
+    Special objects (use low 3 bits as tag):
+    xxx000 = Heap pointer
+    xxx001 = SmallInteger
+    xxx010 = Character (21-bit Unicode + tag)
+    xxx011 = Special (nil, true, false)
+
+```zig
+pub const Value = packed struct {
+    bits: u64,
+
+    pub fn isSmallInt(self: Value) bool {
+        return (self.bits & 1) == 1;
+    }
+
+    pub fn asSmallInt(self: Value) i63 {
+        return @intCast(i63, @bitCast(i64, self.bits) >> 1);
+    }
+
+    pub fn fromSmallInt(n: i63) Value {
+        return .{ .bits = (@intCast(u64, @bitCast(u63, n)) << 1) | 1 };
+    }
+
+    pub fn asObject(self: Value) *Object {
+        return @intToPtr(*Object, self.bits);
+    }
+
+    pub fn fromObject(obj: *Object) Value {
+        return .{ .bits = @ptrToInt(obj) };
+    }
+};
+
+pub const Object = struct {
+    header: ObjectHeader,
+    fields: [*]Value,  // Flexible array of instance variables
+};
+
+pub const ObjectHeader = packed struct {
+    class: u32,        // Index into class table
+    hash: u22,         // Identity hash
+    flags: u8,         // GC mark, immutable, etc.
+    size: u2,          // Size encoding
+};
+```
+
+Special objects (global constants):
+    - nil:   Index 0 in special objects table
+    - true:  Index 1
+    - false: Index 2
+
+
+1.3 MEMORY / HEAP
+-----------------
+File: src/vm/memory.zig
+
+Simple semi-space copying collector for v0.1:
+
+```zig
+pub const Heap = struct {
+    fromSpace: []u8,
+    toSpace: []u8,
+    allocPtr: [*]u8,
+    limit: [*]u8,
+
+    // Class table - maps class index to Class object
+    classTable: std.ArrayList(*Object),
+
+    // Symbol table - interned strings
+    symbolTable: std.StringHashMap(Value),
+
+    // Special objects
+    nilObj: Value,
+    trueObj: Value,
+    falseObj: Value,
+
+    pub fn allocate(self: *Heap, class: *Object, numFields: usize) !*Object {
+        const size = @sizeOf(ObjectHeader) + numFields * @sizeOf(Value);
+
+        if (@ptrToInt(self.allocPtr) + size > @ptrToInt(self.limit)) {
+            try self.collectGarbage();
+        }
+
+        const obj = @ptrCast(*Object, self.allocPtr);
+        self.allocPtr += size;
+
+        obj.header = .{
+            .class = self.classIndex(class),
+            .hash = self.nextHash(),
+            .flags = 0,
+            .size = encodedSize(numFields),
+        };
+
+        // Initialize fields to nil
+        for (obj.fields[0..numFields]) |*field| {
+            field.* = self.nilObj;
+        }
+
+        return obj;
+    }
+
+    pub fn collectGarbage(self: *Heap) !void {
+        // Cheney's algorithm - copy reachable objects to toSpace
+        // Then swap spaces
+    }
+};
+```
+
+Initial heap size: 64MB (configurable)
+
+
+1.4 CLASS STRUCTURE
+-------------------
+Smalltalk classes are themselves objects. Minimal class structure:
+
+Instance variables of Class:
+    1. superclass       - Parent class (or nil for ProtoObject)
+    2. methodDict       - Dictionary of selector -> CompiledMethod
+    3. instanceVariables - Array of instance variable names (symbols)
+    4. name             - Symbol with class name
+    5. format           - How instances are stored (pointers, bytes, etc.)
+
+Instance variables of Metaclass:
+    1. (same as Class)
+    2. thisClass        - The class this is a metaclass of
+
+```zig
+pub const ClassFormat = enum(u8) {
+    normal,           // Fixed fields, all pointers
+    variable,         // Like Array - indexed + named fields
+    bytes,            // Like ByteArray - raw bytes
+    words,            // Like WordArray - raw 32-bit words
+    compiledMethod,   // Special format for methods
+};
+```
+
+
+1.5 COMPILED METHOD FORMAT
+--------------------------
+File: src/vm/method.zig
+
+```zig
+pub const CompiledMethod = struct {
+    header: MethodHeader,
+    literals: []Value,      // Constants, class refs, selectors for sends
+    bytecodes: []u8,        // The actual bytecode
+};
+
+pub const MethodHeader = packed struct {
+    numArgs: u8,            // Number of arguments
+    numTemps: u8,           // Number of temporaries
+    numLiterals: u16,       // Number of literals
+    primitive: u16,         // Primitive index (0 = none)
+    flags: u16,             // Various flags
+};
+```
+
+
+================================================================================
+                              PHASE 2: BYTECODE
+                           (The Instruction Set)
+================================================================================
+
+2.1 BYTECODE DESIGN
+-------------------
+Simple stack-based bytecode, similar to Squeak/Pharo but simplified:
+
+PUSH OPERATIONS (0x00-0x1F):
+    0x00-0x0F  pushReceiverVariable: n    Push inst var n of self
+    0x10-0x1F  pushTemporary: n           Push temporary/arg n
+
+PUSH EXTENDED (0x20-0x3F):
+    0x20       pushLiteral: n             Push literal[n] (next byte is n)
+    0x21       pushLiteralVariable: n     Push global/class var
+    0x22       pushReceiver               Push self
+    0x23       pushNil                    Push nil
+    0x24       pushTrue                   Push true
+    0x25       pushFalse                  Push false
+    0x26       pushInteger: n             Push SmallInteger (signed byte follows)
+    0x27       pushContext                Push thisContext
+
+STORE OPERATIONS (0x40-0x5F):
+    0x40-0x4F  storeReceiverVariable: n   Store into inst var n
+    0x50-0x5F  storeTemporary: n          Store into temp n
+
+POP AND STORE (0x60-0x7F):
+    0x60-0x6F  popReceiverVariable: n     Pop and store inst var
+    0x70-0x7F  popTemporary: n            Pop and store temp
+
+SENDS (0x80-0x9F):
+    0x80       send: selector args: n     Send (literal index, numArgs follow)
+    0x81       superSend: selector args: n
+    0x82       sendPlus                   Optimized +
+    0x83       sendMinus                  Optimized -
+    0x84       sendTimes                  Optimized *
+    0x85       sendDivide                 Optimized /
+    0x86       sendLessThan               Optimized <
+    0x87       sendGreaterThan            Optimized >
+    0x88       sendLessOrEqual            Optimized <=
+    0x89       sendGreaterOrEqual         Optimized >=
+    0x8A       sendEqual                  Optimized =
+    0x8B       sendNotEqual               Optimized ~=
+    0x8C       sendAt                     Optimized at:
+    0x8D       sendAtPut                  Optimized at:put:
+    0x8E       sendSize                   Optimized size
+    0x8F       sendClass                  Optimized class
+
+RETURNS (0xA0-0xAF):
+    0xA0       returnReceiver             Return self
+    0xA1       returnTrue                 Return true
+    0xA2       returnFalse                Return false
+    0xA3       returnNil                  Return nil
+    0xA4       returnTop                  Return top of stack
+    0xA5       blockReturn                Return from enclosing method
+
+JUMPS (0xB0-0xBF):
+    0xB0       jump: offset               Unconditional jump (signed 16-bit)
+    0xB1       jumpIfTrue: offset         Pop and jump if true
+    0xB2       jumpIfFalse: offset        Pop and jump if false
+    0xB3       jumpIfNil: offset          Pop and jump if nil
+    0xB4       jumpIfNotNil: offset       Pop and jump if not nil
+
+MISC (0xC0-0xCF):
+    0xC0       pop                        Pop top of stack
+    0xC1       dup                        Duplicate top of stack
+    0xC2       primitive: n               Execute primitive n (index follows)
+    0xC3       pushNewArray: n            Create array of size n from stack
+    0xC4       pushClosure                Create block closure
+
+EXTENDED (0xD0-0xFF):
+    Reserved for future use / extended encodings
+
+
+2.2 INTERPRETER
+---------------
+File: src/vm/interpreter.zig
+
+```zig
+pub const Interpreter = struct {
+    heap: *Heap,
+
+    // Current execution state
+    method: *CompiledMethod,
+    ip: usize,                    // Instruction pointer
+    sp: usize,                    // Stack pointer
+    stack: [1024]Value,           // Evaluation stack
+    receiver: Value,              // Current self
+    context: ?*Object,            // Current context (for blocks)
+
+    pub fn interpret(self: *Interpreter) !Value {
+        while (true) {
+            const bytecode = self.fetchByte();
+
+            switch (bytecode) {
+                0x00...0x0F => {
+                    // pushReceiverVariable
+                    const index = bytecode & 0x0F;
+                    self.push(self.receiver.asObject().fields[index]);
+                },
+
+                0x22 => {
+                    // pushReceiver
+                    self.push(self.receiver);
+                },
+
+                0x80 => {
+                    // send
+                    const selectorIndex = self.fetchByte();
+                    const numArgs = self.fetchByte();
+                    const selector = self.method.literals[selectorIndex];
+                    try self.send(selector, numArgs);
+                },
+
+                0xA4 => {
+                    // returnTop
+                    return self.pop();
+                },
+
+                0xB2 => {
+                    // jumpIfFalse
+                    const offset = self.fetchSignedShort();
+                    const value = self.pop();
+                    if (value.bits == self.heap.falseObj.bits) {
+                        self.ip = @intCast(usize, @intCast(isize, self.ip) + offset);
+                    }
+                },
+
+                // ... etc
+            }
+        }
+    }
+
+    fn send(self: *Interpreter, selector: Value, numArgs: u8) !void {
+        const receiver = self.stack[self.sp - numArgs - 1];
+        const class = self.heap.classOf(receiver);
+        const method = try self.lookupMethod(class, selector);
+
+        if (method.header.primitive != 0) {
+            const result = try self.executePrimitive(method.header.primitive);
+            // Pop args and receiver, push result
+            self.sp -= numArgs + 1;
+            self.push(result);
+        } else {
+            // Activate new method
+            try self.activateMethod(method, receiver, numArgs);
+        }
+    }
+};
+```
+
+
+================================================================================
+                             PHASE 3: COMPILER
+                       (Parse Smalltalk, Emit Bytecode)
+================================================================================
+
+3.1 LEXER
+---------
+File: src/compiler/lexer.zig
+
+Tokens:
+    - Identifier:      foo, Bar, myVariable
+    - Keyword:         at:, ifTrue:ifFalse:, to:do:
+    - BinarySelector:  +, -, *, /, <, >, =, ~=, @
+    - Integer:         42, -7, 16rFF
+    - Float:           3.14, 1.5e10
+    - String:          'hello world'
+    - Symbol:          #foo, #'hello world', #+
+    - Character:       $a, $B, $$
+    - Assignment:      :=
+    - Return:          ^
+    - OpenParen:       (
+    - CloseParen:      )
+    - OpenBracket:     [
+    - CloseBracket:    ]
+    - OpenBrace:       {
+    - CloseBrace:      }
+    - Period:          .
+    - Semicolon:       ;
+    - Colon:           :
+    - Bar:             |
+    - Caret:           ^
+
+
+3.2 PARSER
+----------
+File: src/compiler/parser.zig
+
+Produces AST nodes:
+
+```zig
+pub const ASTNode = union(enum) {
+    literalInteger: i64,
+    literalFloat: f64,
+    literalString: []const u8,
+    literalSymbol: []const u8,
+    literalArray: []ASTNode,
+    literalBlock: BlockNode,
+
+    variable: []const u8,           // Variable reference
+    assignment: AssignmentNode,
+
+    messageSend: MessageNode,
+    cascade: CascadeNode,
+
+    sequence: []ASTNode,            // Statements
+    returnStatement: *ASTNode,
+};
+
+pub const MessageNode = struct {
+    receiver: *ASTNode,
+    selector: []const u8,
+    arguments: []ASTNode,
+    isSuper: bool,
+};
+
+pub const BlockNode = struct {
+    parameters: [][]const u8,
+    temporaries: [][]const u8,
+    body: []ASTNode,
+};
+```
+
+Grammar (simplified):
+    method        = pattern [temps] [primitive] statements
+    pattern       = unaryPattern | binaryPattern | keywordPattern
+    temps         = '|' identifier* '|'
+    primitive     = '<' 'primitive:' integer '>'
+    statements    = ['^'] expression ('.' ['^'] expression)*
+    expression    = assignment | cascade
+    assignment    = identifier ':=' expression
+    cascade       = message (';' messagePart)*
+    message       = unaryMessage | binaryMessage | keywordMessage
+    primary       = identifier | literal | block | '(' expression ')'
+    block         = '[' [blockArgs] [temps] statements ']'
+    blockArgs     = (':' identifier)+ '|'
+
+
+3.3 CODE GENERATOR
+------------------
+File: src/compiler/codegen.zig
+
+```zig
+pub const CodeGenerator = struct {
+    bytecodes: std.ArrayList(u8),
+    literals: std.ArrayList(Value),
+
+    // Variable scopes
+    arguments: [][]const u8,
+    temporaries: [][]const u8,
+    instanceVariables: [][]const u8,
+
+    pub fn compile(self: *CodeGenerator, node: ASTNode) !void {
+        switch (node) {
+            .literalInteger => |n| {
+                if (n >= -128 and n <= 127) {
+                    try self.emit(.pushInteger);
+                    try self.emitByte(@intCast(u8, @bitCast(i8, n)));
+                } else {
+                    const index = try self.addLiteral(Value.fromSmallInt(n));
+                    try self.emit(.pushLiteral);
+                    try self.emitByte(index);
+                }
+            },
+
+            .variable => |name| {
+                if (self.findArgOrTemp(name)) |index| {
+                    try self.emit(.pushTemporary + index);
+                } else if (self.findInstVar(name)) |index| {
+                    try self.emit(.pushReceiverVariable + index);
+                } else {
+                    // Global variable
+                    const index = try self.addLiteral(self.lookupGlobal(name));
+                    try self.emit(.pushLiteralVariable);
+                    try self.emitByte(index);
+                }
+            },
+
+            .messageSend => |msg| {
+                // Compile receiver
+                try self.compile(msg.receiver.*);
+
+                // Compile arguments
+                for (msg.arguments) |arg| {
+                    try self.compile(arg);
+                }
+
+                // Emit send
+                const selectorIndex = try self.addLiteralSelector(msg.selector);
+                try self.emit(.send);
+                try self.emitByte(selectorIndex);
+                try self.emitByte(@intCast(u8, msg.arguments.len));
+            },
+
+            // ... etc
+        }
+    }
+};
+```
+
+
+================================================================================
+                              PHASE 4: PRIMITIVES
+                          (Built-in Fast Operations)
+================================================================================
+
+4.1 PRIMITIVE TABLE
+-------------------
+File: src/vm/primitives.zig
+
+Primitives are numbered operations implemented in Zig for speed:
+
+```zig
+pub const primitives = [_]PrimitiveFn{
+    // Arithmetic (1-20)
+    prim_add,           // 1: SmallInteger +
+    prim_subtract,      // 2: SmallInteger -
+    prim_multiply,      // 3: SmallInteger *
+    prim_divide,        // 4: SmallInteger //
+    prim_mod,           // 5: SmallInteger \\
+    prim_lessThan,      // 6: SmallInteger <
+    prim_greaterThan,   // 7: SmallInteger >
+    prim_lessOrEqual,   // 8: SmallInteger <=
+    prim_greaterOrEqual,// 9: SmallInteger >=
+    prim_equal,         // 10: SmallInteger =
+    prim_notEqual,      // 11: SmallInteger ~=
+    prim_bitAnd,        // 12: SmallInteger bitAnd:
+    prim_bitOr,         // 13: SmallInteger bitOr:
+    prim_bitXor,        // 14: SmallInteger bitXor:
+    prim_bitShift,      // 15: SmallInteger bitShift:
+
+    // Float arithmetic (21-40)
+    prim_floatAdd,      // 21: Float +
+    prim_floatSub,      // 22: Float -
+    // ...
+
+    // Array/String (41-60)
+    prim_at,            // 41: at:
+    prim_atPut,         // 42: at:put:
+    prim_size,          // 43: size
+    prim_stringAt,      // 44: String at:
+    prim_stringAtPut,   // 45: String at:put:
+    prim_replaceFrom,   // 46: replaceFrom:to:with:startingAt:
+
+    // Object (61-80)
+    prim_class,         // 61: class
+    prim_hash,          // 62: identityHash
+    prim_identicalTo,   // 63: ==
+    prim_basicNew,      // 64: basicNew
+    prim_basicNewSize,  // 65: basicNew:
+    prim_instVarAt,     // 66: instVarAt:
+    prim_instVarAtPut,  // 67: instVarAt:put:
+    prim_become,        // 68: become:
+    prim_shallowCopy,   // 69: shallowCopy
+
+    // Control (81-100)
+    prim_blockValue,    // 81: BlockClosure value
+    prim_blockValue1,   // 82: BlockClosure value:
+    prim_blockValue2,   // 83: BlockClosure value:value:
+    prim_perform,       // 84: perform:
+    prim_performWith,   // 85: perform:with:
+
+    // I/O (101-120)
+    prim_printString,   // 101: FileStream nextPutAll: (stdout)
+    prim_readLine,      // 102: FileStream nextLine (stdin)
+    prim_fileOpen,      // 103: File open:mode:
+    prim_fileClose,     // 104: File close
+    prim_fileRead,      // 105: File read:into:
+    prim_fileWrite,     // 106: File write:from:
+
+    // System (121-140)
+    prim_quit,          // 121: Smalltalk quit
+    prim_gc,            // 122: Smalltalk garbageCollect
+    prim_snapshot,      // 123: Smalltalk saveImage
+    prim_loadImage,     // 124: Smalltalk loadImage:
+    prim_arguments,     // 125: Smalltalk arguments
+
+    // FFI (200+)
+    prim_ffiCall,       // 200: ExternalLibrary call
+    prim_ffiCallback,   // 201: Create callback
+    prim_ffiMalloc,     // 202: ExternalMemory malloc:
+    prim_ffiFree,       // 203: ExternalMemory free
+    prim_ffiRead,       // 204: ExternalMemory at:type:
+    prim_ffiWrite,      // 205: ExternalMemory at:type:put:
+};
+
+fn prim_add(interp: *Interpreter) !Value {
+    const b = interp.pop();
+    const a = interp.pop();
+
+    if (a.isSmallInt() and b.isSmallInt()) {
+        const result = a.asSmallInt() +% b.asSmallInt();
+        // Check overflow
+        if (result >= MIN_SMALL_INT and result <= MAX_SMALL_INT) {
+            return Value.fromSmallInt(result);
+        }
+    }
+
+    return error.PrimitiveFailed; // Fall back to Smalltalk
+}
+```
+
+
+================================================================================
+                                PHASE 5: FFI
+                         (C Library Integration)
+================================================================================
+
+5.1 BUILD-TIME BINDING GENERATION
+---------------------------------
+File: build.zig
+
+```zig
+const std = @import("std");
+
+pub fn build(b: *std.Build) void {
+    const target = b.standardTargetOptions(.{});
+    const optimize = b.standardOptimizeOption(.{});
+
+    const exe = b.addExecutable(.{
+        .name = "zig-smalltalk",
+        .root_source_file = .{ .path = "src/main.zig" },
+        .target = target,
+        .optimize = optimize,
+    });
+
+    // Link C libraries
+    exe.linkSystemLibrary("c");
+    exe.linkSystemLibrary("GL");
+    exe.linkSystemLibrary("glfw");
+    exe.linkSystemLibrary("vulkan");
+    // exe.linkSystemLibrary("cuda");  // If available
+
+    // Generate FFI bindings at comptime via @cImport
+    // The bindings.zig file uses @cImport to pull in headers
+
+    b.installArtifact(exe);
+}
+```
+
+File: src/ffi/bindings.zig
+
+```zig
+// All C bindings generated at compile time
+pub const c = @cImport({
+    // Standard C
+    @cInclude("stdio.h");
+    @cInclude("stdlib.h");
+    @cInclude("string.h");
+    @cInclude("math.h");
+
+    // OpenGL
+    @cInclude("GL/gl.h");
+    @cInclude("GL/glext.h");
+
+    // GLFW for windowing
+    @cInclude("GLFW/glfw3.h");
+
+    // Vulkan (optional)
+    @cInclude("vulkan/vulkan.h");
+
+    // Add more as needed...
+});
+
+// Re-export commonly used types for convenience
+pub const GLuint = c.GLuint;
+pub const GLint = c.GLint;
+pub const GLenum = c.GLenum;
+pub const GLFWwindow = c.GLFWwindow;
+pub const VkInstance = c.VkInstance;
+```
+
+
+5.2 MARSHALING
+--------------
+File: src/ffi/marshal.zig
+
+```zig
+const std = @import("std");
+const Value = @import("../vm/object.zig").Value;
+const Object = @import("../vm/object.zig").Object;
+const Heap = @import("../vm/memory.zig").Heap;
+
+pub fn marshal(comptime T: type, heap: *Heap, value: Value) T {
+    return switch (@typeInfo(T)) {
+        .Int => @intCast(T, value.asSmallInt()),
+        .Float => value.asFloat(),
+
+        .Pointer => |ptr| blk: {
+            if (ptr.child == u8) {
+                // String - get pointer to ByteArray bytes
+                break :blk value.asObject().asByteArray().ptr;
+            } else {
+                // External pointer wrapped in object
+                break :blk value.asExternalPointer(T);
+            }
+        },
+
+        .Struct => marshalStruct(T, heap, value),
+
+        else => @compileError("Cannot marshal type: " ++ @typeName(T)),
+    };
+}
+
+pub fn unmarshal(comptime T: type, heap: *Heap, value: T) !Value {
+    return switch (@typeInfo(T)) {
+        .Int => Value.fromSmallInt(@intCast(i63, value)),
+        .Float => try heap.newFloat(value),
+
+        .Pointer => |ptr| blk: {
+            if (ptr.child == u8 and ptr.is_const) {
+                // C string -> Smalltalk String
+                break :blk try heap.newString(std.mem.span(value));
+            } else {
+                // Wrap external pointer
+                break :blk try heap.wrapExternalPointer(value);
+            }
+        },
+
+        .Struct => try unmarshalStruct(T, heap, value),
+
+        .Void => heap.nilObj,
+
+        else => @compileError("Cannot unmarshal type: " ++ @typeName(T)),
+    };
+}
+
+fn marshalStruct(comptime T: type, heap: *Heap, value: Value) T {
+    var result: T = undefined;
+    const obj = value.asObject();
+
+    inline for (std.meta.fields(T), 0..) |field, i| {
+        const st_value = obj.fields[i];
+        @field(result, field.name) = marshal(field.type, heap, st_value);
+    }
+
+    return result;
+}
+```
+
+
+5.3 FFI PRIMITIVE IMPLEMENTATION
+--------------------------------
+File: src/vm/primitives_ffi.zig
+
+```zig
+const c = @import("../ffi/bindings.zig").c;
+const marshal = @import("../ffi/marshal.zig");
+
+// Example: glGenTextures wrapper
+pub fn prim_glGenTextures(interp: *Interpreter) !Value {
+    const n = marshal.marshal(c.GLsizei, interp.heap, interp.pop());
+
+    // Allocate Smalltalk array for results
+    const array = try interp.heap.newArray(@intCast(usize, n));
+
+    // Call OpenGL
+    c.glGenTextures(n, @ptrCast([*c]c.GLuint, array.asWordArray().ptr));
+
+    return Value.fromObject(array);
+}
+
+// Generic FFI call - interprets selector to determine function
+pub fn prim_ffiCall(interp: *Interpreter) !Value {
+    const numArgs = interp.pop().asSmallInt();
+    const funcName = interp.pop().asSymbol();
+
+    // Look up function by name in loaded libraries
+    // This is the dynamic path - slower but flexible
+
+    // For known functions, we can dispatch directly
+    return switch (hashSymbol(funcName)) {
+        hash("glGenTextures") => prim_glGenTextures(interp),
+        hash("glBindTexture") => prim_glBindTexture(interp),
+        hash("glfwInit") => {
+            const result = c.glfwInit();
+            return Value.fromSmallInt(result);
+        },
+        hash("glfwCreateWindow") => prim_glfwCreateWindow(interp),
+        // ... etc
+        else => error.UnknownFunction,
+    };
+}
+```
+
+
+5.4 SMALLTALK FFI WRAPPER CLASSES
+---------------------------------
+These are written in Smalltalk and use primitives:
+
+```smalltalk
+"File: lib/core/FFI/ExternalLibrary.st"
+Object subclass: #ExternalLibrary
+    instanceVariableNames: 'handle name'
+    classVariableNames: ''
+
+"File: lib/core/FFI/OpenGL.st"
+ExternalLibrary subclass: #OpenGL
+    instanceVariableNames: ''
+    classVariableNames: ''
+
+OpenGL class >> glGenTextures: n
+    <primitive: 210>
+    self primitiveFailed
+
+OpenGL class >> glBindTexture: target texture: texture
+    <primitive: 211>
+    self primitiveFailed
+
+OpenGL class >> glTexImage2D: target level: level internalFormat: internalFormat
+        width: width height: height border: border
+        format: format type: type data: data
+    <primitive: 212>
+    self primitiveFailed
+
+"File: lib/core/FFI/GLFW.st"
+ExternalLibrary subclass: #GLFW
+    instanceVariableNames: ''
+    classVariableNames: ''
+
+GLFW class >> init
+    <primitive: 220>
+    self primitiveFailed
+
+GLFW class >> createWindow: width height: height title: title
+    <primitive: 221>
+    self primitiveFailed
+
+GLFW class >> pollEvents
+    <primitive: 222>
+    self primitiveFailed
+
+GLFW class >> swapBuffers: window
+    <primitive: 223>
+    self primitiveFailed
+
+GLFW class >> windowShouldClose: window
+    <primitive: 224>
+    self primitiveFailed
+```
+
+
+================================================================================
+                              PHASE 6: REPL
+                        (Interactive Workspace)
+================================================================================
+
+6.1 MAIN ENTRY POINT
+--------------------
+File: src/main.zig
+
+```zig
+const std = @import("std");
+const Interpreter = @import("vm/interpreter.zig").Interpreter;
+const Heap = @import("vm/memory.zig").Heap;
+const Compiler = @import("compiler/codegen.zig").Compiler;
+const bootstrap = @import("image/bootstrap.zig");
+
+pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    // Initialize heap and core classes
+    var heap = try Heap.init(allocator, 64 * 1024 * 1024); // 64MB
+    defer heap.deinit();
+
+    // Bootstrap core classes
+    try bootstrap.createCoreClasses(&heap);
+
+    // Load image if exists, otherwise use bootstrap
+    heap.loadImageOrBootstrap("zig-smalltalk.image") catch |err| {
+        std.debug.print("Note: Starting with fresh image ({s})\n", .{@errorName(err)});
+    };
+
+    // Create interpreter
+    var interp = Interpreter.init(&heap);
+
+    // Print banner
+    const stdout = std.io.getStdOut().writer();
+    try stdout.print(
+        \\
+        \\Zig Smalltalk v0.1
+        \\Type expressions to evaluate. 'quit' to exit.
+        \\
+        \\
+    , .{});
+
+    // REPL loop
+    const stdin = std.io.getStdIn().reader();
+    var line_buf: [4096]u8 = undefined;
+
+    while (true) {
+        try stdout.print("st> ", .{});
+
+        const line = stdin.readUntilDelimiter(&line_buf, '\n') catch |err| {
+            if (err == error.EndOfStream) break;
+            return err;
+        };
+
+        const trimmed = std.mem.trim(u8, line, " \t\r\n");
+
+        if (trimmed.len == 0) continue;
+        if (std.mem.eql(u8, trimmed, "quit")) break;
+
+        // Compile and execute
+        const result = compileAndExecute(&interp, trimmed) catch |err| {
+            try stdout.print("Error: {s}\n", .{@errorName(err)});
+            continue;
+        };
+
+        // Print result
+        const resultString = try interp.sendMessage(result, "printString", &[_]Value{});
+        try stdout.print("=> {s}\n", .{resultString.asString()});
+    }
+
+    try stdout.print("Goodbye!\n", .{});
+}
+
+fn compileAndExecute(interp: *Interpreter, source: []const u8) !Value {
+    // Wrap in a method: "doIt ^<source>"
+    var compiler = Compiler.init(interp.heap);
+    const method = try compiler.compileDoIt(source);
+
+    // Execute with nil as receiver (or could use Smalltalk object)
+    return try interp.execute(method, interp.heap.nilObj);
+}
+```
+
+
+6.2 MULTI-LINE INPUT
+--------------------
+Support for multi-line expressions:
+
+```zig
+fn readExpression(stdin: anytype, stdout: anytype, buf: []u8) ![]const u8 {
+    var total_len: usize = 0;
+    var open_brackets: i32 = 0;
+    var open_parens: i32 = 0;
+    var in_string: bool = false;
+    var first_line: bool = true;
+
+    while (true) {
+        if (first_line) {
+            try stdout.print("st> ", .{});
+            first_line = false;
+        } else {
+            try stdout.print("... ", .{});  // Continuation prompt
+        }
+
+        const line = stdin.readUntilDelimiter(buf[total_len..], '\n') catch |err| {
+            if (err == error.EndOfStream and total_len > 0) {
+                return buf[0..total_len];
+            }
+            return err;
+        };
+
+        total_len += line.len;
+        buf[total_len] = '\n';
+        total_len += 1;
+
+        // Update bracket counts
+        for (line) |ch| {
+            if (in_string) {
+                if (ch == '\'') in_string = false;
+            } else {
+                switch (ch) {
+                    '\'' => in_string = true,
+                    '[' => open_brackets += 1,
+                    ']' => open_brackets -= 1,
+                    '(' => open_parens += 1,
+                    ')' => open_parens -= 1,
+                    else => {},
+                }
+            }
+        }
+
+        // Complete when balanced
+        if (open_brackets <= 0 and open_parens <= 0 and !in_string) {
+            return buf[0..total_len];
+        }
+    }
+}
+```
+
+
+================================================================================
+                         PHASE 7: BOOTSTRAP IMAGE
+                      (Core Classes from Dolphin)
+================================================================================
+
+7.1 BOOTSTRAP SEQUENCE
+----------------------
+File: src/image/bootstrap.zig
+
+Order matters - create classes in dependency order:
+
+```zig
+pub fn createCoreClasses(heap: *Heap) !void {
+    // 1. Create the "knot" - circular dependency between Object and Class
+    const protoObject = try heap.createBootstrapClass("ProtoObject", null);
+    const object = try heap.createBootstrapClass("Object", protoObject);
+    const behavior = try heap.createBootstrapClass("Behavior", object);
+    const classDescription = try heap.createBootstrapClass("ClassDescription", behavior);
+    const class = try heap.createBootstrapClass("Class", classDescription);
+    const metaclass = try heap.createBootstrapClass("Metaclass", classDescription);
+
+    // Fix up metaclasses now that Class and Metaclass exist
+    try heap.fixupMetaclasses();
+
+    // 2. Core objects
+    _ = try heap.createClass("UndefinedObject", object);  // nil's class
+    _ = try heap.createClass("Boolean", object);
+    const trueClass = try heap.createClass("True", heap.lookup("Boolean"));
+    const falseClass = try heap.createClass("False", heap.lookup("Boolean"));
+
+    // Create singleton instances
+    heap.nilObj = try heap.createSingletonOf(heap.lookup("UndefinedObject"));
+    heap.trueObj = try heap.createSingletonOf(trueClass);
+    heap.falseObj = try heap.createSingletonOf(falseClass);
+
+    // 3. Numbers
+    const magnitude = try heap.createClass("Magnitude", object);
+    const number = try heap.createClass("Number", magnitude);
+    _ = try heap.createClass("Integer", number);
+    _ = try heap.createClass("SmallInteger", heap.lookup("Integer"));
+    _ = try heap.createClass("LargeInteger", heap.lookup("Integer"));
+    _ = try heap.createClass("Float", number);
+    _ = try heap.createClass("Fraction", number);
+
+    // 4. Collections
+    const collection = try heap.createClass("Collection", object);
+    const sequenceable = try heap.createClass("SequenceableCollection", collection);
+    const arrayedCollection = try heap.createClass("ArrayedCollection", sequenceable);
+    _ = try heap.createClass("Array", arrayedCollection);
+    _ = try heap.createClass("ByteArray", arrayedCollection);
+    _ = try heap.createClass("String", arrayedCollection);
+    _ = try heap.createClass("Symbol", heap.lookup("String"));
+
+    const hashedCollection = try heap.createClass("HashedCollection", collection);
+    _ = try heap.createClass("Set", hashedCollection);
+    _ = try heap.createClass("Dictionary", hashedCollection);
+    _ = try heap.createClass("IdentityDictionary", heap.lookup("Dictionary"));
+
+    // 5. Streams
+    const stream = try heap.createClass("Stream", object);
+    _ = try heap.createClass("ReadStream", stream);
+    _ = try heap.createClass("WriteStream", stream);
+    _ = try heap.createClass("ReadWriteStream", stream);
+
+    // 6. Execution
+    _ = try heap.createClass("CompiledMethod", object);
+    _ = try heap.createClass("BlockClosure", object);
+    _ = try heap.createClass("Context", object);
+    _ = try heap.createClass("Process", object);
+
+    // 7. Exceptions
+    const exception = try heap.createClass("Exception", object);
+    _ = try heap.createClass("Error", exception);
+    _ = try heap.createClass("MessageNotUnderstood", heap.lookup("Error"));
+    _ = try heap.createClass("ZeroDivide", heap.lookup("Error"));
+
+    // 8. FFI classes
+    _ = try heap.createClass("ExternalAddress", object);
+    _ = try heap.createClass("ExternalStructure", object);
+    _ = try heap.createClass("ExternalLibrary", object);
+
+    // 9. Load methods from Smalltalk source files
+    try loadCoreMethods(heap);
+}
+```
+
+
+7.2 LOADING DOLPHIN SOURCE
+--------------------------
+File: src/image/loader.zig
+
+Dolphin exports to various formats. We'll parse the .st file-out format:
+
+```zig
+pub fn loadSmalltalkFile(heap: *Heap, path: []const u8) !void {
+    const file = try std.fs.cwd().openFile(path, .{});
+    defer file.close();
+
+    const source = try file.readToEndAlloc(heap.allocator, 10 * 1024 * 1024);
+    defer heap.allocator.free(source);
+
+    var parser = ChunkParser.init(source);
+
+    while (parser.nextChunk()) |chunk| {
+        if (std.mem.startsWith(u8, chunk, "!")) {
+            // Method definition
+            try loadMethod(heap, chunk);
+        } else {
+            // Expression to evaluate (class definition, etc.)
+            try evaluateChunk(heap, chunk);
+        }
+    }
+}
+
+const ChunkParser = struct {
+    source: []const u8,
+    pos: usize,
+
+    fn nextChunk(self: *ChunkParser) ?[]const u8 {
+        if (self.pos >= self.source.len) return null;
+
+        const start = self.pos;
+
+        // Chunks are terminated by ! on its own line
+        while (self.pos < self.source.len) {
+            if (self.source[self.pos] == '!' and
+                (self.pos == 0 or self.source[self.pos - 1] == '\n')) {
+                const chunk = self.source[start..self.pos];
+                self.pos += 1; // Skip !
+                return chunk;
+            }
+            self.pos += 1;
+        }
+
+        return self.source[start..];
+    }
+};
+```
+
+
+7.3 CORE SMALLTALK FILES TO PORT FROM DOLPHIN
+---------------------------------------------
+Priority order (minimal set for REPL):
+
+1. Kernel/Object.st              - Base behavior
+2. Kernel/ProtoObject.st         - Minimal base
+3. Kernel/Behavior.st            - Class behavior
+4. Kernel/Boolean.st             - true/false
+5. Kernel/UndefinedObject.st     - nil
+6. Kernel/Magnitude.st           - Comparison
+7. Kernel/Number.st              - Arithmetic
+8. Kernel/Integer.st             - Integers
+9. Kernel/SmallInteger.st        - Immediate ints
+10. Kernel/Collection.st         - Collections base
+11. Kernel/SequenceableCollection.st
+12. Kernel/ArrayedCollection.st
+13. Kernel/Array.st
+14. Kernel/String.st
+15. Kernel/Symbol.st
+16. Kernel/Stream.st             - Streams
+17. Kernel/WriteStream.st
+18. Kernel/ReadStream.st
+19. Kernel/BlockClosure.st       - Blocks
+20. Kernel/Exception.st          - Error handling
+
+Secondary (for richer REPL):
+21. Kernel/Dictionary.st
+22. Kernel/Set.st
+23. Kernel/Interval.st           - (1 to: 10)
+24. Kernel/Character.st
+25. Kernel/Float.st
+
+
+================================================================================
+                         PHASE 8: EXAMPLE SESSION
+                      (What It Should Look Like)
+================================================================================
+
+```
+$ ./zig-smalltalk
+
+Zig Smalltalk v0.1
+Type expressions to evaluate. 'quit' to exit.
+
+st> 3 + 4
+=> 7
+
+st> 'Hello, ' , 'World!'
+=> 'Hello, World!'
+
+st> #(1 2 3 4 5) select: [:x | x > 2]
+=> #(3 4 5)
+
+st> | window |
+... window := GLFW createWindow: 800 height: 600 title: 'Zig Smalltalk'.
+... window
+=> a GLFWwindow
+
+st> OpenGL glClearColor: 0.2 g: 0.3 b: 0.3 a: 1.0
+=> nil
+
+st> Object subclass: #Point instanceVariableNames: 'x y'
+=> Point
+
+st> Point compile: 'x ^x' classified: 'accessing'
+=> Point >> x
+
+st> Point compile: 'x: aNumber x := aNumber' classified: 'accessing'
+=> Point >> x:
+
+st> Point compile: 'y ^y' classified: 'accessing'
+=> Point >> y
+
+st> Point compile: '+ aPoint ^Point new x: x + aPoint x; y: y + aPoint y' classified: 'arithmetic'
+=> Point >> +
+
+st> | p1 p2 |
+... p1 := Point new x: 10; y: 20.
+... p2 := Point new x: 5; y: 7.
+... p1 + p2
+=> a Point (15, 27)
+
+st> quit
+Goodbye!
+```
+
+
+================================================================================
+                          IMPLEMENTATION ORDER
+                        (What To Build First)
+================================================================================
+
+MILESTONE 1: "Hello World" (1-2 days)
+------------------------------------
+[ ] Object model (Value, Object, Header)
+[ ] Minimal heap (allocate, no GC yet)
+[ ] 5 core classes: Object, Class, SmallInteger, String, Array
+[ ] 5 bytecodes: pushLiteral, pushReceiver, send, returnTop, pop
+[ ] 5 primitives: +, -, *, printString, class
+[ ] Lexer and parser for simple expressions
+[ ] Code generator
+[ ] REPL loop
+[ ] TEST: 3 + 4 => 7
+
+MILESTONE 2: Control Flow (1-2 days)
+------------------------------------
+[ ] Boolean, True, False classes
+[ ] nil, true, false special objects
+[ ] BlockClosure class
+[ ] Jump bytecodes (conditional and unconditional)
+[ ] Block compilation (closure capture)
+[ ] ifTrue:, ifFalse:, ifTrue:ifFalse: via primitives
+[ ] whileTrue:, whileFalse:
+[ ] TEST: (3 > 2) ifTrue: ['yes'] ifFalse: ['no'] => 'yes'
+
+MILESTONE 3: Collections (1-2 days)
+-----------------------------------
+[ ] Array with at:, at:put:, size primitives
+[ ] Collection >> do:, select:, collect:, inject:into:
+[ ] String as byte array
+[ ] Symbol with interning
+[ ] Dictionary (for method dictionaries)
+[ ] TEST: #(1 2 3) collect: [:x | x * 2] => #(2 4 6)
+
+MILESTONE 4: Class Creation (1 day)
+-----------------------------------
+[ ] Behavior >> compile:classified:
+[ ] Class class >> subclass:instanceVariableNames:
+[ ] Metaclass creation
+[ ] TEST: Define Point class, create instances
+
+MILESTONE 5: Garbage Collection (1 day)
+---------------------------------------
+[ ] Roots: stack, special objects, symbol table
+[ ] Cheney's copying collector
+[ ] TEST: Allocate millions of objects, verify no crash/leak
+
+MILESTONE 6: FFI - OpenGL (2-3 days)
+------------------------------------
+[ ] ExternalAddress class
+[ ] ExternalStructure with field accessors
+[ ] GLFW bindings (init, createWindow, pollEvents, swapBuffers)
+[ ] OpenGL bindings (glClear, glClearColor, basic drawing)
+[ ] TEST: Open window, clear to color
+
+MILESTONE 7: Full FFI (2-3 days)
+--------------------------------
+[ ] Complete OpenGL 3.3+ bindings
+[ ] Vulkan bindings (optional)
+[ ] Callback support
+[ ] Struct marshaling
+[ ] TEST: Textured triangle
+
+MILESTONE 8: Image Save/Load (1-2 days)
+---------------------------------------
+[ ] Serialize entire heap
+[ ] Save to file
+[ ] Load and reconstruct
+[ ] TEST: Define classes, quit, restart, classes still exist
+
+
+================================================================================
+                              TOTAL ESTIMATE
+================================================================================
+
+Minimal REPL with FFI: 2-3 weeks of focused work
+
+This gets you:
+- Interactive Smalltalk workspace
+- Full reflection (define classes, methods at runtime)
+- Direct C library calls (OpenGL, GLFW, etc.)
+- 64-bit, no memory limitations
+- Simple but functional
+
+Future enhancements (not in v0.1):
+- JIT compilation
+- Debugger
+- GUI class browser
+- Image-based persistence
+- Multi-threading
+- GPU compute (CUDA/Vulkan compute shaders)
+
+
+================================================================================
+                               RESOURCES
+================================================================================
+
+Dolphin Smalltalk Source:
+    https://github.com/dolphinsmalltalk/Dolphin
+
+Smalltalk-80 Blue Book (bytecode reference):
+    http://stephane.ducasse.free.fr/FreeBooks/BlueBook/
+
+Squeak/Pharo VM (Cog) source:
+    https://github.com/OpenSmalltalk/opensmalltalk-vm
+
+Zig Documentation:
+    https://ziglang.org/documentation/master/
+
+Zig @cImport:
+    https://ziglang.org/documentation/master/#cImport
+
+
+================================================================================
+                            END OF PLAN
+================================================================================
