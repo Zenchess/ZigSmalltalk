@@ -657,26 +657,21 @@ pub const Interpreter = struct {
         if (!dict.isObject()) return null;
 
         const dict_obj = dict.asObject();
-        const format = dict_obj.header.getFormat();
+        const dict_size = dict_obj.header.size;
 
-        if (format == .variable) {
-            // Get the class to find the size
-            // For simplicity, we'll use a fixed max size and check for nil
-            const max_entries: usize = 64;
-            const fields = dict_obj.fields(max_entries);
+        if (dict_size == 0) return null;
 
-            var i: usize = 0;
-            while (i < max_entries) : (i += 2) {
-                const key = fields[i];
-                if (key.isNil()) break; // End of entries
+        var i: usize = 0;
+        while (i + 1 < dict_size) : (i += 2) {
+            const key = dict_obj.getField(i, dict_size);
+            if (key.isNil()) break; // End of entries
 
-                // Compare selectors
-                if (key.eql(selector)) {
-                    const method_val = fields[i + 1];
-                    if (method_val.isObject()) {
-                        // The method value points to a CompiledMethod
-                        return @ptrCast(@alignCast(method_val.asObject()));
-                    }
+            // Compare selectors
+            if (key.eql(selector)) {
+                const method_val = dict_obj.getField(i + 1, dict_size);
+                if (method_val.isObject()) {
+                    // The method value points to a CompiledMethod
+                    return @ptrCast(@alignCast(method_val.asObject()));
                 }
             }
         }
