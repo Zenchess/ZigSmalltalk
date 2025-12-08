@@ -98,6 +98,10 @@ pub fn bootstrap(heap: *Heap) !void {
     const interval_class = try createClassObject(heap, Heap.CLASS_CLASS);
     heap.class_table.items[Heap.CLASS_INTERVAL] = Value.fromObject(interval_class);
 
+    // Float class
+    const float_class = try createClassObject(heap, Heap.CLASS_CLASS);
+    heap.class_table.items[Heap.CLASS_FLOAT] = Value.fromObject(float_class);
+
     // Phase 2: Set up superclass chain
 
     // Object has no superclass (nil)
@@ -151,6 +155,9 @@ pub fn bootstrap(heap: *Heap) !void {
     // Interval -> Object (in a full system: SequenceableCollection -> ...)
     setClassSuperclass(interval_class, Value.fromObject(object_class));
 
+    // Float -> Object (in a full system: Number -> Magnitude -> Object)
+    setClassSuperclass(float_class, Value.fromObject(object_class));
+
     // Phase 3: Set class names
 
     try setClassName(heap, object_class, "Object");
@@ -170,6 +177,7 @@ pub fn bootstrap(heap: *Heap) !void {
     try setClassName(heap, false_class, "False");
     try setClassName(heap, character_class, "Character");
     try setClassName(heap, interval_class, "Interval");
+    try setClassName(heap, float_class, "Float");
 
     // Phase 4: Set class formats (number of instance variables, format type)
 
@@ -216,6 +224,9 @@ pub fn bootstrap(heap: *Heap) !void {
     // Interval has 3 fields: start, stop, step
     setClassFormat(interval_class, 3, .normal);
 
+    // Float is byte-format to store 8 bytes for f64
+    setClassFormat(float_class, 8, .bytes);
+
     // Phase 5: Register globals
 
     try heap.setGlobal("Object", Value.fromObject(object_class));
@@ -235,6 +246,7 @@ pub fn bootstrap(heap: *Heap) !void {
     try heap.setGlobal("False", Value.fromObject(false_class));
     try heap.setGlobal("Character", Value.fromObject(character_class));
     try heap.setGlobal("Interval", Value.fromObject(interval_class));
+    try heap.setGlobal("Float", Value.fromObject(float_class));
 
     // Phase 6: Install core methods
     try installCoreMethods(heap);
@@ -275,7 +287,7 @@ pub fn installMethod(heap: *Heap, class: *Object, selector: []const u8, method: 
 
     if (method_dict.isNil()) {
         // Create a new method dictionary
-        const dict = try createMethodDict(heap, 32);
+        const dict = try createMethodDict(heap, 64); // Increased capacity
         method_dict = Value.fromObject(dict);
         class.setField(Heap.CLASS_FIELD_METHOD_DICT, method_dict, Heap.CLASS_NUM_FIELDS);
     }
@@ -283,8 +295,8 @@ pub fn installMethod(heap: *Heap, class: *Object, selector: []const u8, method: 
     const dict_obj = method_dict.asObject();
     const selector_sym = try heap.internSymbol(selector);
 
-    // Find first empty slot
-    const max_entries: usize = 64;
+    // Find first empty slot - use actual dict size
+    const max_entries: usize = dict_obj.header.size;
     const fields = dict_obj.fields(max_entries);
 
     var i: usize = 0;
@@ -391,6 +403,14 @@ pub fn installCoreMethods(heap: *Heap) !void {
     try installMethod(heap, string_class, "basicAt:", try createPrimitiveMethod(heap, 1, @intFromEnum(Primitive.at))); // 60
     try installMethod(heap, string_class, "at:put:", try createPrimitiveMethod(heap, 2, @intFromEnum(Primitive.at_put))); // 61
     try installMethod(heap, string_class, "basicAt:put:", try createPrimitiveMethod(heap, 2, @intFromEnum(Primitive.at_put))); // 61
+    try installMethod(heap, string_class, ",", try createPrimitiveMethod(heap, 1, @intFromEnum(Primitive.string_concat))); // 522
+    try installMethod(heap, string_class, "compare:", try createPrimitiveMethod(heap, 1, @intFromEnum(Primitive.string_compare))); // 106
+    try installMethod(heap, string_class, "<", try createPrimitiveMethod(heap, 1, @intFromEnum(Primitive.string_less_than)));
+    try installMethod(heap, string_class, ">", try createPrimitiveMethod(heap, 1, @intFromEnum(Primitive.string_greater_than)));
+    try installMethod(heap, string_class, "<=", try createPrimitiveMethod(heap, 1, @intFromEnum(Primitive.string_less_or_equal)));
+    try installMethod(heap, string_class, ">=", try createPrimitiveMethod(heap, 1, @intFromEnum(Primitive.string_greater_or_equal)));
+    try installMethod(heap, string_class, "=", try createPrimitiveMethod(heap, 1, @intFromEnum(Primitive.string_equal)));
+    try installMethod(heap, string_class, "copyFrom:to:", try createPrimitiveMethod(heap, 2, @intFromEnum(Primitive.string_copy_from_to)));
 
     // Array methods - Dolphin compatible
     const array_class = heap.getClass(Heap.CLASS_ARRAY).asObject();
@@ -450,6 +470,24 @@ pub fn installCoreMethods(heap: *Heap) !void {
     try installMethod(heap, false_class, "ifTrue:ifFalse:", try createPrimitiveMethod(heap, 2, @intFromEnum(Primitive.false_if_true_if_false)));
     try installMethod(heap, false_class, "ifFalse:ifTrue:", try createPrimitiveMethod(heap, 2, @intFromEnum(Primitive.false_if_false_if_true)));
     try installMethod(heap, false_class, "not", try createPrimitiveMethod(heap, 0, @intFromEnum(Primitive.boolean_not)));
+
+    // Float methods - Dolphin compatible primitive numbers
+    const float_class = heap.getClass(Heap.CLASS_FLOAT).asObject();
+    try installMethod(heap, float_class, "+", try createPrimitiveMethod(heap, 1, @intFromEnum(Primitive.float_add))); // 160
+    try installMethod(heap, float_class, "-", try createPrimitiveMethod(heap, 1, @intFromEnum(Primitive.float_subtract))); // 161
+    try installMethod(heap, float_class, "*", try createPrimitiveMethod(heap, 1, @intFromEnum(Primitive.float_multiply))); // 164
+    try installMethod(heap, float_class, "/", try createPrimitiveMethod(heap, 1, @intFromEnum(Primitive.float_divide))); // 165
+    try installMethod(heap, float_class, "<", try createPrimitiveMethod(heap, 1, @intFromEnum(Primitive.float_less_than))); // 162
+    try installMethod(heap, float_class, ">", try createPrimitiveMethod(heap, 1, @intFromEnum(Primitive.float_greater_than))); // 45
+    try installMethod(heap, float_class, "<=", try createPrimitiveMethod(heap, 1, @intFromEnum(Primitive.float_less_or_equal))); // 214
+    try installMethod(heap, float_class, ">=", try createPrimitiveMethod(heap, 1, @intFromEnum(Primitive.float_greater_or_equal))); // 46
+    try installMethod(heap, float_class, "=", try createPrimitiveMethod(heap, 1, @intFromEnum(Primitive.float_equal))); // 47
+    try installMethod(heap, float_class, "truncated", try createPrimitiveMethod(heap, 0, @intFromEnum(Primitive.float_truncated))); // 166
+    try installMethod(heap, float_class, "abs", try createPrimitiveMethod(heap, 0, @intFromEnum(Primitive.float_abs))); // 205
+    try installMethod(heap, float_class, "negated", try createPrimitiveMethod(heap, 0, @intFromEnum(Primitive.float_negate))); // our extension
+
+    // SmallInteger >> asFloat
+    try installMethod(heap, small_int_class, "asFloat", try createPrimitiveMethod(heap, 0, @intFromEnum(Primitive.small_as_float))); // 168
 }
 
 test "bootstrap creates core classes" {

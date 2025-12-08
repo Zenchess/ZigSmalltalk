@@ -382,6 +382,7 @@ pub const Primitive = enum(u16) {
     small_as_float = 168, // SmallInteger >> asFloat
     float_abs = 205, // Float >> abs
     float_less_or_equal = 214, // Float >> <=
+    float_negate = 215, // Float >> negated (our extension)
 
     // ========================================================================
     // I/O and System (Dolphin compatible where possible)
@@ -394,6 +395,12 @@ pub const Primitive = enum(u16) {
     char_code = 520, // Character >> asciiValue
     char_from_code = 521, // Character class >> value:
     string_concat = 522, // String >> ,
+    string_less_than = 560, // String >> <
+    string_greater_than = 561, // String >> >
+    string_less_or_equal = 562, // String >> <=
+    string_greater_or_equal = 563, // String >> >=
+    string_equal = 564, // String >> =
+    string_copy_from_to = 565, // String >> copyFrom:to:
     as_string = 523, // Object >> asString
     as_symbol = 524, // String >> asSymbol
     print_string = 525, // Primitive print

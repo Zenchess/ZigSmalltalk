@@ -227,7 +227,8 @@ pub const CompiledMethod = struct {
 
     pub const MethodFlags = packed struct {
         has_context: bool = false, // Method creates a context (has blocks with non-local returns)
-        _padding: u15 = 0,
+        has_source: bool = false, // Method has source code stored as last literal
+        _padding: u14 = 0,
     };
 
     pub fn getLiterals(self: *CompiledMethod) []Value {
@@ -239,6 +240,24 @@ pub const CompiledMethod = struct {
         const lit_bytes = self.header.num_literals * @sizeOf(Value);
         const ptr: [*]u8 = @ptrFromInt(@intFromPtr(self) + @sizeOf(MethodHeader) + lit_bytes);
         return ptr[0..self.header.bytecode_size];
+    }
+
+    /// Get the source code if stored
+    pub fn getSource(self: *CompiledMethod) ?[]const u8 {
+        if (!self.header.flags.has_source) return null;
+        if (self.header.num_literals == 0) return null;
+
+        // Source is stored as the last literal
+        const literals = self.getLiterals();
+        const source_val = literals[literals.len - 1];
+
+        if (!source_val.isObject()) return null;
+
+        const obj = source_val.asObject();
+        const memory = @import("memory.zig");
+        if (obj.header.class_index != memory.Heap.CLASS_STRING) return null;
+
+        return obj.bytes(obj.header.size);
     }
 };
 

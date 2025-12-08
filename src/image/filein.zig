@@ -283,10 +283,68 @@ pub const FileIn = struct {
 
     /// Process a class definition chunk
     fn processClassDefinition(self: *FileIn, chunk: []const u8) !void {
-        _ = chunk;
-        // TODO: Parse and create class
-        // For now, we assume classes exist from bootstrap
+        // Parse class definition like:
+        // Object subclass: #MyClass
+        //     instanceVariableNames: 'x y z'
+        //     classVariableNames: ''
+        //     poolDictionaries: ''
+        //     classInstanceVariableNames: ''
+
+        // Find superclass name (first identifier before "subclass:")
+        const subclass_idx = std.mem.indexOf(u8, chunk, "subclass:") orelse
+            std.mem.indexOf(u8, chunk, "variableSubclass:") orelse
+            std.mem.indexOf(u8, chunk, "variableByteSubclass:") orelse
+            std.mem.indexOf(u8, chunk, "variableWordSubclass:") orelse
+            return FileInError.InvalidChunkFormat;
+
+        const superclass_name = std.mem.trim(u8, chunk[0..subclass_idx], " \t\r\n");
+        if (superclass_name.len == 0) return FileInError.InvalidChunkFormat;
+
+        // Find class name after "#"
+        const hash_idx = std.mem.indexOf(u8, chunk[subclass_idx..], "#") orelse
+            return FileInError.InvalidChunkFormat;
+        const class_start = subclass_idx + hash_idx + 1;
+
+        var class_end = class_start;
+        while (class_end < chunk.len and isIdentChar(chunk[class_end])) {
+            class_end += 1;
+        }
+        const class_name = chunk[class_start..class_end];
+        if (class_name.len == 0) return FileInError.InvalidChunkFormat;
+
+        // Find instance variable names
+        var inst_var_names: []const u8 = "";
+        if (std.mem.indexOf(u8, chunk, "instanceVariableNames:")) |idx| {
+            if (std.mem.indexOfScalarPos(u8, chunk, idx, '\'')) |start| {
+                if (std.mem.indexOfScalarPos(u8, chunk, start + 1, '\'')) |end| {
+                    inst_var_names = chunk[start + 1 .. end];
+                }
+            }
+        }
+
+        // Look up superclass
+        const superclass_value = self.heap.getGlobal(superclass_name) orelse {
+            std.debug.print("Superclass not found: {s}\n", .{superclass_name});
+            return FileInError.ClassNotFound;
+        };
+
+        if (!superclass_value.isObject()) {
+            return FileInError.ClassNotFound;
+        }
+
+        // Create the new class
+        const new_class = try createDynamicClass(
+            self.heap,
+            class_name,
+            superclass_value.asObject(),
+            inst_var_names,
+        );
+
+        // Register the class as a global
+        try self.heap.setGlobal(class_name, Value.fromObject(new_class));
+
         self.classes_defined += 1;
+        std.debug.print("Created class: {s} (subclass of {s})\n", .{ class_name, superclass_name });
     }
 
     /// Process a method category marker
@@ -337,6 +395,9 @@ pub const FileIn = struct {
 
         var gen = CodeGenerator.init(self.allocator, self.heap);
         defer gen.deinit();
+
+        // Store the source code in the compiled method
+        gen.source_code = chunk;
 
         const method = gen.compileMethod(ast) catch return FileInError.CompilationFailed;
 
@@ -497,6 +558,66 @@ fn installMethodInClass(heap: *Heap, class_obj: *object.Object, selector: []cons
 
         class_obj.setField(Heap.CLASS_FIELD_METHOD_DICT, Value.fromObject(new_dict), Heap.CLASS_NUM_FIELDS);
     }
+}
+
+/// Create a new class dynamically at runtime
+fn createDynamicClass(heap: *Heap, name: []const u8, superclass: *object.Object, inst_var_names: []const u8) !*object.Object {
+    // Allocate a new class object
+    const class = try heap.allocateObject(Heap.CLASS_CLASS, Heap.CLASS_NUM_FIELDS, .normal);
+
+    // Set superclass
+    class.setField(Heap.CLASS_FIELD_SUPERCLASS, Value.fromObject(superclass), Heap.CLASS_NUM_FIELDS);
+
+    // Set class name
+    const name_sym = heap.internSymbol(name) catch return error.OutOfMemory;
+    class.setField(Heap.CLASS_FIELD_NAME, name_sym, Heap.CLASS_NUM_FIELDS);
+
+    // Parse instance variable names and count them
+    var inst_var_count: u32 = 0;
+    if (inst_var_names.len > 0) {
+        var iter = std.mem.splitScalar(u8, inst_var_names, ' ');
+        while (iter.next()) |part| {
+            if (part.len > 0) inst_var_count += 1;
+        }
+    }
+
+    // Get superclass instance variable count
+    const super_format = superclass.getField(Heap.CLASS_FIELD_FORMAT, Heap.CLASS_NUM_FIELDS);
+    var super_inst_vars: u32 = 0;
+    if (super_format.isSmallInt()) {
+        const format_int = super_format.asSmallInt();
+        if (format_int >= 0) {
+            super_inst_vars = @intCast(format_int >> 8);
+        }
+    }
+
+    // Set format: encode instance size and format type
+    // Format is encoded as: (instSize << 8) | formatType
+    const total_inst_vars = super_inst_vars + inst_var_count;
+    const format_value: i61 = (@as(i61, total_inst_vars) << 8) | 0; // 0 = normal format
+    class.setField(Heap.CLASS_FIELD_FORMAT, Value.fromSmallInt(format_value), Heap.CLASS_NUM_FIELDS);
+
+    // Initialize method dictionary to nil (will be created when first method is added)
+    class.setField(Heap.CLASS_FIELD_METHOD_DICT, Value.nil, Heap.CLASS_NUM_FIELDS);
+
+    // Store instance variable names (create an array)
+    if (inst_var_count > 0) {
+        const names_array = try heap.allocateObject(Heap.CLASS_ARRAY, inst_var_count, .variable);
+        var idx: usize = 0;
+        var iter = std.mem.splitScalar(u8, inst_var_names, ' ');
+        while (iter.next()) |part| {
+            if (part.len > 0) {
+                const var_sym = heap.internSymbol(part) catch return error.OutOfMemory;
+                names_array.setField(idx, var_sym, inst_var_count);
+                idx += 1;
+            }
+        }
+        class.setField(Heap.CLASS_FIELD_INST_VARS, Value.fromObject(names_array), Heap.CLASS_NUM_FIELDS);
+    } else {
+        class.setField(Heap.CLASS_FIELD_INST_VARS, Value.nil, Heap.CLASS_NUM_FIELDS);
+    }
+
+    return class;
 }
 
 // Tests

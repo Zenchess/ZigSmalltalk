@@ -163,11 +163,27 @@ pub const Interpreter = struct {
                 .push_literal_variable => {
                     const index = self.fetchByte();
                     const literals = self.method.getLiterals();
-                    const assoc = literals[index];
-                    // Association: value is second field
-                    if (assoc.isObject()) {
-                        const val = assoc.asObject().getField(1, 2);
-                        try self.push(val);
+                    const literal = literals[index];
+
+                    // The literal is a symbol - look it up as a global
+                    if (literal.isObject()) {
+                        const lit_obj = literal.asObject();
+                        if (lit_obj.header.class_index == Heap.CLASS_SYMBOL) {
+                            // It's a symbol - look up in globals
+                            const name_bytes = lit_obj.bytes(lit_obj.header.size);
+                            if (self.heap.getGlobal(name_bytes)) |val| {
+                                try self.push(val);
+                            } else {
+                                // Global not found
+                                try self.push(Value.nil);
+                            }
+                        } else if (lit_obj.header.class_index == Heap.CLASS_ARRAY and lit_obj.header.size == 2) {
+                            // It's an Association (2-element array): value is second field
+                            const val = lit_obj.getField(1, 2);
+                            try self.push(val);
+                        } else {
+                            try self.push(Value.nil);
+                        }
                     } else {
                         try self.push(Value.nil);
                     }
@@ -680,25 +696,83 @@ pub const Interpreter = struct {
     }
 
     fn sendSpecialBinary(self: *Interpreter, prim: bytecodes.Primitive, selector: []const u8) InterpreterError!void {
-        _ = selector;
         const arg = try self.pop();
         const recv = try self.pop();
 
-        // Try primitive
+        // Try primitive first (fast path for SmallIntegers)
         try self.push(recv);
         try self.push(arg);
 
-        const result = primitives.executePrimitive(self, @intFromEnum(prim)) catch {
-            // Fall back to message send
-            _ = try self.pop();
-            _ = try self.pop();
-            try self.push(recv);
-            try self.push(arg);
-            // TODO: actually send message
-            return InterpreterError.MessageNotUnderstood;
-        };
+        const prim_result = primitives.executePrimitive(self, @intFromEnum(prim));
+        if (prim_result) |result| {
+            try self.push(result);
+            return;
+        } else |_| {
+            // Primitive failed - fall back to regular method lookup
+            _ = try self.pop(); // Remove arg
+            _ = try self.pop(); // Remove recv
 
-        try self.push(result);
+            // Look up the selector in the class hierarchy
+            const class = self.heap.classOf(recv);
+            const selector_sym = self.heap.internSymbol(selector) catch {
+                return InterpreterError.OutOfMemory;
+            };
+
+            if (self.lookupMethod(class, selector_sym)) |method| {
+                // Found method - call it
+                if (method.header.primitive_index != 0) {
+                    // Push receiver and arg for primitive
+                    try self.push(recv);
+                    try self.push(arg);
+                    if (primitives.executePrimitive(self, method.header.primitive_index)) |result| {
+                        try self.push(result);
+                        return;
+                    } else |_| {
+                        // Pop the args we just pushed
+                        _ = try self.pop();
+                        _ = try self.pop();
+                    }
+                }
+
+                // Execute method bytecode - save context and set up new frame
+                if (self.context_ptr >= self.contexts.len - 1) {
+                    return InterpreterError.StackOverflow;
+                }
+
+                self.contexts[self.context_ptr] = .{
+                    .method = self.method,
+                    .ip = self.ip,
+                    .receiver = self.receiver,
+                    .temp_base = self.temp_base,
+                    .num_args = 0,
+                    .num_temps = 0,
+                    .outer_context = null,
+                    .closure = null,
+                };
+                self.context_ptr += 1;
+
+                self.method = method;
+                self.ip = 0;
+                self.receiver = recv;
+                self.temp_base = self.sp;
+
+                // Push receiver and argument
+                try self.push(recv);
+                try self.push(arg);
+
+                // Allocate temps
+                const total_temps = method.header.num_temps;
+                const local_temps = if (total_temps > 1) total_temps - 1 else 0;
+                var k: usize = 0;
+                while (k < local_temps) : (k += 1) {
+                    try self.push(Value.nil);
+                }
+                return;
+            }
+
+            // No method found
+            try self.push(Value.nil);
+        }
     }
 
     fn sendIdentical(self: *Interpreter) InterpreterError!void {

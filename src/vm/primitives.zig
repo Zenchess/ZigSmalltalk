@@ -123,6 +123,35 @@ pub fn executePrimitive(interp: *Interpreter, prim_index: u16) InterpreterError!
         .between_and => primBetweenAnd(interp),
         .not_equal => primNotEqual(interp),
 
+        // ====================================================================
+        // Float arithmetic (Dolphin: 45-47, 160-168, 205, 214-215)
+        // ====================================================================
+        .float_add => primFloatAdd(interp),
+        .float_subtract => primFloatSubtract(interp),
+        .float_multiply => primFloatMultiply(interp),
+        .float_divide => primFloatDivide(interp),
+        .float_less_than => primFloatLessThan(interp),
+        .float_greater_than => primFloatGreaterThan(interp),
+        .float_less_or_equal => primFloatLessOrEqual(interp),
+        .float_greater_or_equal => primFloatGreaterOrEqual(interp),
+        .float_equal => primFloatEqual(interp),
+        .float_truncated => primFloatTruncated(interp),
+        .float_abs => primFloatAbs(interp),
+        .float_negate => primFloatNegate(interp),
+        .small_as_float => primSmallAsFloat(interp),
+
+        // ====================================================================
+        // String operations
+        // ====================================================================
+        .string_concat => primStringConcat(interp),
+        .string_compare => primStringCompare(interp),
+        .string_less_than => primStringLessThan(interp),
+        .string_greater_than => primStringGreaterThan(interp),
+        .string_less_or_equal => primStringLessOrEqual(interp),
+        .string_greater_or_equal => primStringGreaterOrEqual(interp),
+        .string_equal => primStringEqual(interp),
+        .string_copy_from_to => primStringCopyFromTo(interp),
+
         else => InterpreterError.PrimitiveFailed,
     };
 }
@@ -2208,6 +2237,245 @@ test "Primitives - arithmetic" {
     try std.testing.expectEqual(@as(i61, 42), prod.asSmallInt());
 }
 
+// ============================================================================
+// Float Primitives
+// ============================================================================
+
+/// Helper: get f64 from a Value (Float object or SmallInteger)
+fn getFloatOrSmallInt(interp: *Interpreter, value: Value) ?f64 {
+    if (value.isSmallInt()) {
+        return @floatFromInt(value.asSmallInt());
+    }
+    return interp.heap.getFloatValue(value);
+}
+
+fn primFloatAdd(interp: *Interpreter) InterpreterError!Value {
+    const b = try interp.pop();
+    const a = try interp.pop();
+
+    const av = getFloatOrSmallInt(interp, a);
+    const bv = getFloatOrSmallInt(interp, b);
+
+    if (av != null and bv != null) {
+        return interp.heap.allocateFloat(av.? + bv.?) catch {
+            try interp.push(a);
+            try interp.push(b);
+            return InterpreterError.OutOfMemory;
+        };
+    }
+
+    try interp.push(a);
+    try interp.push(b);
+    return InterpreterError.PrimitiveFailed;
+}
+
+fn primFloatSubtract(interp: *Interpreter) InterpreterError!Value {
+    const b = try interp.pop();
+    const a = try interp.pop();
+
+    const av = getFloatOrSmallInt(interp, a);
+    const bv = getFloatOrSmallInt(interp, b);
+
+    if (av != null and bv != null) {
+        return interp.heap.allocateFloat(av.? - bv.?) catch {
+            try interp.push(a);
+            try interp.push(b);
+            return InterpreterError.OutOfMemory;
+        };
+    }
+
+    try interp.push(a);
+    try interp.push(b);
+    return InterpreterError.PrimitiveFailed;
+}
+
+fn primFloatMultiply(interp: *Interpreter) InterpreterError!Value {
+    const b = try interp.pop();
+    const a = try interp.pop();
+
+    const av = getFloatOrSmallInt(interp, a);
+    const bv = getFloatOrSmallInt(interp, b);
+
+    if (av != null and bv != null) {
+        return interp.heap.allocateFloat(av.? * bv.?) catch {
+            try interp.push(a);
+            try interp.push(b);
+            return InterpreterError.OutOfMemory;
+        };
+    }
+
+    try interp.push(a);
+    try interp.push(b);
+    return InterpreterError.PrimitiveFailed;
+}
+
+fn primFloatDivide(interp: *Interpreter) InterpreterError!Value {
+    const b = try interp.pop();
+    const a = try interp.pop();
+
+    const av = getFloatOrSmallInt(interp, a);
+    const bv = getFloatOrSmallInt(interp, b);
+
+    if (av != null and bv != null) {
+        if (bv.? == 0.0) {
+            try interp.push(a);
+            try interp.push(b);
+            return InterpreterError.PrimitiveFailed;
+        }
+        return interp.heap.allocateFloat(av.? / bv.?) catch {
+            try interp.push(a);
+            try interp.push(b);
+            return InterpreterError.OutOfMemory;
+        };
+    }
+
+    try interp.push(a);
+    try interp.push(b);
+    return InterpreterError.PrimitiveFailed;
+}
+
+fn primFloatLessThan(interp: *Interpreter) InterpreterError!Value {
+    const b = try interp.pop();
+    const a = try interp.pop();
+
+    const av = getFloatOrSmallInt(interp, a);
+    const bv = getFloatOrSmallInt(interp, b);
+
+    if (av != null and bv != null) {
+        return Value.fromBool(av.? < bv.?);
+    }
+
+    try interp.push(a);
+    try interp.push(b);
+    return InterpreterError.PrimitiveFailed;
+}
+
+fn primFloatGreaterThan(interp: *Interpreter) InterpreterError!Value {
+    const b = try interp.pop();
+    const a = try interp.pop();
+
+    const av = getFloatOrSmallInt(interp, a);
+    const bv = getFloatOrSmallInt(interp, b);
+
+    if (av != null and bv != null) {
+        return Value.fromBool(av.? > bv.?);
+    }
+
+    try interp.push(a);
+    try interp.push(b);
+    return InterpreterError.PrimitiveFailed;
+}
+
+fn primFloatLessOrEqual(interp: *Interpreter) InterpreterError!Value {
+    const b = try interp.pop();
+    const a = try interp.pop();
+
+    const av = getFloatOrSmallInt(interp, a);
+    const bv = getFloatOrSmallInt(interp, b);
+
+    if (av != null and bv != null) {
+        return Value.fromBool(av.? <= bv.?);
+    }
+
+    try interp.push(a);
+    try interp.push(b);
+    return InterpreterError.PrimitiveFailed;
+}
+
+fn primFloatGreaterOrEqual(interp: *Interpreter) InterpreterError!Value {
+    const b = try interp.pop();
+    const a = try interp.pop();
+
+    const av = getFloatOrSmallInt(interp, a);
+    const bv = getFloatOrSmallInt(interp, b);
+
+    if (av != null and bv != null) {
+        return Value.fromBool(av.? >= bv.?);
+    }
+
+    try interp.push(a);
+    try interp.push(b);
+    return InterpreterError.PrimitiveFailed;
+}
+
+fn primFloatEqual(interp: *Interpreter) InterpreterError!Value {
+    const b = try interp.pop();
+    const a = try interp.pop();
+
+    const av = getFloatOrSmallInt(interp, a);
+    const bv = getFloatOrSmallInt(interp, b);
+
+    if (av != null and bv != null) {
+        return Value.fromBool(av.? == bv.?);
+    }
+
+    try interp.push(a);
+    try interp.push(b);
+    return InterpreterError.PrimitiveFailed;
+}
+
+fn primFloatTruncated(interp: *Interpreter) InterpreterError!Value {
+    const a = try interp.pop();
+
+    const av = interp.heap.getFloatValue(a);
+    if (av != null) {
+        const truncated = @trunc(av.?);
+        const max: f64 = @floatFromInt(std.math.maxInt(i61));
+        const min: f64 = @floatFromInt(std.math.minInt(i61));
+        if (truncated >= min and truncated <= max) {
+            return Value.fromSmallInt(@intFromFloat(truncated));
+        }
+    }
+
+    try interp.push(a);
+    return InterpreterError.PrimitiveFailed;
+}
+
+fn primFloatAbs(interp: *Interpreter) InterpreterError!Value {
+    const a = try interp.pop();
+
+    const av = interp.heap.getFloatValue(a);
+    if (av != null) {
+        return interp.heap.allocateFloat(@abs(av.?)) catch {
+            try interp.push(a);
+            return InterpreterError.OutOfMemory;
+        };
+    }
+
+    try interp.push(a);
+    return InterpreterError.PrimitiveFailed;
+}
+
+fn primFloatNegate(interp: *Interpreter) InterpreterError!Value {
+    const a = try interp.pop();
+
+    const av = interp.heap.getFloatValue(a);
+    if (av != null) {
+        return interp.heap.allocateFloat(-av.?) catch {
+            try interp.push(a);
+            return InterpreterError.OutOfMemory;
+        };
+    }
+
+    try interp.push(a);
+    return InterpreterError.PrimitiveFailed;
+}
+
+fn primSmallAsFloat(interp: *Interpreter) InterpreterError!Value {
+    const a = try interp.pop();
+
+    if (a.isSmallInt()) {
+        const f: f64 = @floatFromInt(a.asSmallInt());
+        return interp.heap.allocateFloat(f) catch {
+            try interp.push(a);
+            return InterpreterError.OutOfMemory;
+        };
+    }
+
+    try interp.push(a);
+    return InterpreterError.PrimitiveFailed;
+}
+
 test "Primitives - comparison" {
     const allocator = std.testing.allocator;
     const heap = try memory.Heap.init(allocator, 1024 * 1024);
@@ -2225,4 +2493,252 @@ test "Primitives - comparison" {
     try interp.push(Value.fromSmallInt(3));
     const gt = try executePrimitive(&interp, @intFromEnum(Primitive.greater_than));
     try std.testing.expect(gt.isTrue());
+}
+
+// ============================================================================
+// String Primitives
+// ============================================================================
+
+fn primStringConcat(interp: *Interpreter) InterpreterError!Value {
+    const b = try interp.pop();
+    const a = try interp.pop();
+
+    // Both must be strings
+    if (!a.isObject() or !b.isObject()) {
+        try interp.push(a);
+        try interp.push(b);
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    const a_obj = a.asObject();
+    const b_obj = b.asObject();
+
+    if (a_obj.header.class_index != memory.Heap.CLASS_STRING or
+        b_obj.header.class_index != memory.Heap.CLASS_STRING)
+    {
+        try interp.push(a);
+        try interp.push(b);
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    const a_bytes = a_obj.bytes(a_obj.header.size);
+    const b_bytes = b_obj.bytes(b_obj.header.size);
+
+    const total_len = a_bytes.len + b_bytes.len;
+
+    // Allocate new string
+    const new_obj = interp.heap.allocateObject(
+        memory.Heap.CLASS_STRING,
+        total_len,
+        .bytes,
+    ) catch {
+        try interp.push(a);
+        try interp.push(b);
+        return InterpreterError.OutOfMemory;
+    };
+
+    // Copy bytes
+    const new_bytes = new_obj.bytes(total_len);
+    @memcpy(new_bytes[0..a_bytes.len], a_bytes);
+    @memcpy(new_bytes[a_bytes.len..], b_bytes);
+
+    return Value.fromObject(new_obj);
+}
+
+fn primStringCompare(interp: *Interpreter) InterpreterError!Value {
+    // String compare returns -1, 0, or 1
+    const b = try interp.pop();
+    const a = try interp.pop();
+
+    // Both must be strings
+    if (!a.isObject() or !b.isObject()) {
+        try interp.push(a);
+        try interp.push(b);
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    const a_obj = a.asObject();
+    const b_obj = b.asObject();
+
+    if (a_obj.header.class_index != memory.Heap.CLASS_STRING or
+        b_obj.header.class_index != memory.Heap.CLASS_STRING)
+    {
+        try interp.push(a);
+        try interp.push(b);
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    const a_bytes = a_obj.bytes(a_obj.header.size);
+    const b_bytes = b_obj.bytes(b_obj.header.size);
+
+    // Compare lexicographically
+    const min_len = @min(a_bytes.len, b_bytes.len);
+    for (a_bytes[0..min_len], b_bytes[0..min_len]) |ac, bc| {
+        if (ac < bc) return Value.fromSmallInt(-1);
+        if (ac > bc) return Value.fromSmallInt(1);
+    }
+
+    // Prefixes are equal, compare lengths
+    if (a_bytes.len < b_bytes.len) return Value.fromSmallInt(-1);
+    if (a_bytes.len > b_bytes.len) return Value.fromSmallInt(1);
+    return Value.fromSmallInt(0);
+}
+
+/// Helper function to compare two strings
+fn stringCompareHelper(a: Value, b: Value) ?i2 {
+    if (!a.isObject() or !b.isObject()) return null;
+
+    const a_obj = a.asObject();
+    const b_obj = b.asObject();
+
+    if (a_obj.header.class_index != memory.Heap.CLASS_STRING or
+        b_obj.header.class_index != memory.Heap.CLASS_STRING)
+    {
+        return null;
+    }
+
+    const a_bytes = a_obj.bytes(a_obj.header.size);
+    const b_bytes = b_obj.bytes(b_obj.header.size);
+
+    // Compare lexicographically
+    const min_len = @min(a_bytes.len, b_bytes.len);
+    for (a_bytes[0..min_len], b_bytes[0..min_len]) |ac, bc| {
+        if (ac < bc) return -1;
+        if (ac > bc) return 1;
+    }
+
+    // Prefixes are equal, compare lengths
+    if (a_bytes.len < b_bytes.len) return -1;
+    if (a_bytes.len > b_bytes.len) return 1;
+    return 0;
+}
+
+fn primStringLessThan(interp: *Interpreter) InterpreterError!Value {
+    const b = try interp.pop();
+    const a = try interp.pop();
+
+    if (stringCompareHelper(a, b)) |cmp| {
+        return Value.fromBool(cmp < 0);
+    }
+
+    try interp.push(a);
+    try interp.push(b);
+    return InterpreterError.PrimitiveFailed;
+}
+
+fn primStringGreaterThan(interp: *Interpreter) InterpreterError!Value {
+    const b = try interp.pop();
+    const a = try interp.pop();
+
+    if (stringCompareHelper(a, b)) |cmp| {
+        return Value.fromBool(cmp > 0);
+    }
+
+    try interp.push(a);
+    try interp.push(b);
+    return InterpreterError.PrimitiveFailed;
+}
+
+fn primStringLessOrEqual(interp: *Interpreter) InterpreterError!Value {
+    const b = try interp.pop();
+    const a = try interp.pop();
+
+    if (stringCompareHelper(a, b)) |cmp| {
+        return Value.fromBool(cmp <= 0);
+    }
+
+    try interp.push(a);
+    try interp.push(b);
+    return InterpreterError.PrimitiveFailed;
+}
+
+fn primStringGreaterOrEqual(interp: *Interpreter) InterpreterError!Value {
+    const b = try interp.pop();
+    const a = try interp.pop();
+
+    if (stringCompareHelper(a, b)) |cmp| {
+        return Value.fromBool(cmp >= 0);
+    }
+
+    try interp.push(a);
+    try interp.push(b);
+    return InterpreterError.PrimitiveFailed;
+}
+
+fn primStringEqual(interp: *Interpreter) InterpreterError!Value {
+    const b = try interp.pop();
+    const a = try interp.pop();
+
+    if (stringCompareHelper(a, b)) |cmp| {
+        return Value.fromBool(cmp == 0);
+    }
+
+    try interp.push(a);
+    try interp.push(b);
+    return InterpreterError.PrimitiveFailed;
+}
+
+fn primStringCopyFromTo(interp: *Interpreter) InterpreterError!Value {
+    // String >> copyFrom: start to: end
+    // Returns substring from start to end (1-indexed, inclusive)
+    const end_val = try interp.pop();
+    const start_val = try interp.pop();
+    const string = try interp.pop();
+
+    if (!string.isObject() or !start_val.isSmallInt() or !end_val.isSmallInt()) {
+        try interp.push(string);
+        try interp.push(start_val);
+        try interp.push(end_val);
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    const str_obj = string.asObject();
+    if (str_obj.header.class_index != memory.Heap.CLASS_STRING) {
+        try interp.push(string);
+        try interp.push(start_val);
+        try interp.push(end_val);
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    const start_1indexed = start_val.asSmallInt();
+    const end_1indexed = end_val.asSmallInt();
+
+    // Convert to 0-indexed
+    if (start_1indexed < 1 or end_1indexed < start_1indexed) {
+        try interp.push(string);
+        try interp.push(start_val);
+        try interp.push(end_val);
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    const str_bytes = str_obj.bytes(str_obj.header.size);
+    const start: usize = @intCast(start_1indexed - 1);
+    const end: usize = @intCast(end_1indexed);
+
+    if (end > str_bytes.len) {
+        try interp.push(string);
+        try interp.push(start_val);
+        try interp.push(end_val);
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    const new_len = end - start;
+
+    // Allocate new string
+    const new_obj = interp.heap.allocateObject(
+        memory.Heap.CLASS_STRING,
+        new_len,
+        .bytes,
+    ) catch {
+        try interp.push(string);
+        try interp.push(start_val);
+        try interp.push(end_val);
+        return InterpreterError.OutOfMemory;
+    };
+
+    // Copy bytes
+    const new_bytes = new_obj.bytes(new_len);
+    @memcpy(new_bytes, str_bytes[start..end]);
+
+    return Value.fromObject(new_obj);
 }

@@ -46,6 +46,7 @@ pub const Heap = struct {
     pub const CLASS_FALSE: u32 = 14;
     pub const CLASS_CHARACTER: u32 = 15;
     pub const CLASS_INTERVAL: u32 = 16;
+    pub const CLASS_FLOAT: u32 = 17;
 
     // Class object field indices
     pub const CLASS_FIELD_SUPERCLASS: usize = 0;
@@ -166,6 +167,25 @@ pub const Heap = struct {
     pub fn allocateArray(self: *Heap, size: usize) !Value {
         const obj = try self.allocateObject(CLASS_ARRAY, size, .variable);
         return Value.fromObject(obj);
+    }
+
+    /// Allocate a Float object containing the given f64 value
+    pub fn allocateFloat(self: *Heap, value: f64) !Value {
+        // Float is stored as 8 bytes (one 64-bit word)
+        const obj = try self.allocateObject(CLASS_FLOAT, 8, .bytes);
+        const bytes_slice = obj.bytes(8);
+        const value_bytes: [8]u8 = @bitCast(value);
+        @memcpy(bytes_slice, &value_bytes);
+        return Value.fromObject(obj);
+    }
+
+    /// Extract f64 value from a Float object
+    pub fn getFloatValue(_: *Heap, value: Value) ?f64 {
+        if (!value.isObject()) return null;
+        const obj = value.asObject();
+        if (obj.header.class_index != CLASS_FLOAT) return null;
+        const bytes_slice = obj.bytes(8);
+        return @bitCast(bytes_slice[0..8].*);
     }
 
     /// Intern a symbol (returns existing one if already interned)

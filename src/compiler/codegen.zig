@@ -40,6 +40,9 @@ pub const CodeGenerator = struct {
     outer_temporaries: std.ArrayList([]const u8),
     block_depth: usize,
 
+    // Method source for storage
+    source_code: ?[]const u8 = null,
+
     // Special selector indices for optimized sends
     selector_plus: ?usize,
     selector_minus: ?usize,
@@ -677,6 +680,16 @@ pub const CodeGenerator = struct {
     }
 
     fn buildMethodWithPrimitive(self: *CodeGenerator, num_args: u8, primitive_index: u16) CompileError!*CompiledMethod {
+        // If source code is set, add it as the last literal
+        if (self.source_code) |source| {
+            const source_str = self.heap.allocateString(source) catch {
+                return CompileError.OutOfMemory;
+            };
+            self.literals.append(self.allocator, source_str) catch {
+                return CompileError.OutOfMemory;
+            };
+        }
+
         const num_literals = self.literals.items.len;
         const bytecode_size = self.bytecodes_buf.items.len;
 
@@ -698,7 +711,7 @@ pub const CodeGenerator = struct {
             .num_temps = @intCast(self.temporaries.items.len),
             .num_literals = @intCast(num_literals),
             .primitive_index = primitive_index,
-            .flags = .{},
+            .flags = .{ .has_source = self.source_code != null },
             .bytecode_size = @intCast(bytecode_size),
         };
 
