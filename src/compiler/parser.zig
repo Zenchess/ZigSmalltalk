@@ -19,6 +19,7 @@ pub const NodeType = enum {
     // Literals
     literal_integer,
     literal_float,
+    literal_scaled_decimal,
     literal_string,
     literal_symbol,
     literal_character,
@@ -51,6 +52,12 @@ pub const MethodNode = struct {
     primitive_index: u16, // 0 = no primitive
 };
 
+/// Scaled decimal data structure
+pub const ScaledDecimalData = struct {
+    value: f64,
+    scale: u8,
+};
+
 /// AST Node
 pub const ASTNode = struct {
     node_type: NodeType,
@@ -61,6 +68,7 @@ pub const ASTNode = struct {
         // For literals
         integer: i64,
         float: f64,
+        scaled_decimal: ScaledDecimalData,
         string: []const u8,
 
         // For variable
@@ -209,8 +217,9 @@ pub const Parser = struct {
         errdefer arguments.deinit(self.allocator);
 
         // Determine message type from first token
-        if (self.check(.binary_selector)) {
-            // Binary method: + aNumber
+        // Note: .bar (|) is also a valid binary selector for 'or' method
+        if (self.check(.binary_selector) or self.check(.bar)) {
+            // Binary method: + aNumber, | operand
             try selector_buf.appendSlice(self.allocator, self.current.text);
             self.advance();
 
@@ -433,13 +442,19 @@ pub const Parser = struct {
                 try arguments.append(self.allocator, arg);
             }
 
+            // Check if receiver is 'super'
+            const is_super = if (receiver.node_type == .pseudo_variable)
+                std.mem.eql(u8, receiver.data.name, "super")
+            else
+                false;
+
             const send = try self.createNode(.message_send);
             send.data = .{
                 .message = .{
                     .receiver = receiver,
                     .selector = try selector.toOwnedSlice(self.allocator),
                     .arguments = try arguments.toOwnedSlice(self.allocator),
-                    .is_super = false,
+                    .is_super = is_super,
                 },
             };
             return send;
@@ -451,7 +466,8 @@ pub const Parser = struct {
     fn binaryMessage(self: *Parser) ParseError!*ASTNode {
         var receiver = try self.unaryMessage();
 
-        while (self.check(.binary_selector)) {
+        // Note: .bar (|) is also a valid binary selector for 'or' method
+        while (self.check(.binary_selector) or self.check(.bar)) {
             const op_token = self.current;
             self.advance();
 
@@ -460,13 +476,19 @@ pub const Parser = struct {
             var args = try self.allocator.alloc(*ASTNode, 1);
             args[0] = arg;
 
+            // Check if receiver is 'super'
+            const is_super = if (receiver.node_type == .pseudo_variable)
+                std.mem.eql(u8, receiver.data.name, "super")
+            else
+                false;
+
             const send = try self.createNode(.message_send);
             send.data = .{
                 .message = .{
                     .receiver = receiver,
                     .selector = op_token.text,
                     .arguments = args,
-                    .is_super = false,
+                    .is_super = is_super,
                 },
             };
             receiver = send;
@@ -488,13 +510,19 @@ pub const Parser = struct {
             const selector_token = self.current;
             self.advance();
 
+            // Check if receiver is 'super'
+            const is_super = if (receiver.node_type == .pseudo_variable)
+                std.mem.eql(u8, receiver.data.name, "super")
+            else
+                false;
+
             const send = try self.createNode(.message_send);
             send.data = .{
                 .message = .{
                     .receiver = receiver,
                     .selector = selector_token.text,
                     .arguments = &[_]*ASTNode{},
-                    .is_super = false,
+                    .is_super = is_super,
                 },
             };
             receiver = send;
@@ -514,6 +542,13 @@ pub const Parser = struct {
         if (self.match(.float)) {
             const node = try self.createNode(.literal_float);
             node.data = .{ .float = try self.parseFloat(self.previous.text) };
+            return node;
+        }
+
+        if (self.match(.scaled_decimal)) {
+            const node = try self.createNode(.literal_scaled_decimal);
+            const parsed = try self.parseScaledDecimal(self.previous.text);
+            node.data = .{ .scaled_decimal = parsed };
             return node;
         }
 
@@ -798,9 +833,41 @@ pub const Parser = struct {
 
     fn parseFloat(self: *Parser, text: []const u8) ParseError!f64 {
         _ = self;
-        return std.fmt.parseFloat(f64, text) catch {
+        // Handle double float suffix (e.g., "2.0d0")
+        var float_text = text;
+        for (text, 0..) |c, i| {
+            if (c == 'd' or c == 'D') {
+                float_text = text[0..i];
+                break;
+            }
+        }
+        return std.fmt.parseFloat(f64, float_text) catch {
             return ParseError.InvalidNumber;
         };
+    }
+
+    fn parseScaledDecimal(self: *Parser, text: []const u8) ParseError!ScaledDecimalData {
+        _ = self;
+        // Parse "2.0s3" format - value is 2.0, scale is 3
+        var value_end: usize = 0;
+        for (text, 0..) |c, i| {
+            if (c == 's' or c == 'S') {
+                value_end = i;
+                break;
+            }
+        }
+        if (value_end == 0) {
+            return ParseError.InvalidNumber;
+        }
+        const value = std.fmt.parseFloat(f64, text[0..value_end]) catch {
+            return ParseError.InvalidNumber;
+        };
+        const scale_str = text[value_end + 1 ..];
+        const scale: u8 = if (scale_str.len > 0)
+            std.fmt.parseInt(u8, scale_str, 10) catch 0
+        else
+            0;
+        return .{ .value = value, .scale = scale };
     }
 
     fn createNode(self: *Parser, node_type: NodeType) ParseError!*ASTNode {

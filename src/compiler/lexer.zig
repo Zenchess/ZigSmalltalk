@@ -4,6 +4,7 @@ pub const TokenType = enum {
     // Literals
     integer,
     float,
+    scaled_decimal, // 2.0s3
     string,
     symbol,
     character,
@@ -241,6 +242,27 @@ pub const Lexer = struct {
             _ = self.advance(); // consume '.'
             while (isDigit(self.peek())) {
                 _ = self.advance();
+            }
+
+            // Check for scaled decimal suffix (2.0s3)
+            if (self.peek() == 's' or self.peek() == 'S') {
+                _ = self.advance();
+                while (isDigit(self.peek())) {
+                    _ = self.advance();
+                }
+                return self.makeToken(.scaled_decimal);
+            }
+
+            // Check for double float suffix (2.0d0)
+            if (self.peek() == 'd' or self.peek() == 'D') {
+                _ = self.advance();
+                if (self.peek() == '+' or self.peek() == '-') {
+                    _ = self.advance();
+                }
+                while (isDigit(self.peek())) {
+                    _ = self.advance();
+                }
+                return self.makeToken(.float); // treat double as float for now
             }
 
             // Check for exponent

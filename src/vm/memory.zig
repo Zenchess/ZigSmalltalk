@@ -47,14 +47,91 @@ pub const Heap = struct {
     pub const CLASS_CHARACTER: u32 = 15;
     pub const CLASS_INTERVAL: u32 = 16;
     pub const CLASS_FLOAT: u32 = 17;
+    pub const CLASS_EXCEPTION: u32 = 18;
+    pub const CLASS_ERROR: u32 = 19;
+    pub const CLASS_MESSAGE: u32 = 20; // For doesNotUnderstand:
+    pub const CLASS_DICTIONARY: u32 = 21;
+    pub const CLASS_SET: u32 = 22;
+    pub const CLASS_ORDERED_COLLECTION: u32 = 23;
+    pub const CLASS_READ_STREAM: u32 = 24;
+    pub const CLASS_WRITE_STREAM: u32 = 25;
+    pub const CLASS_FILE_STREAM: u32 = 26;
+    pub const CLASS_DEAF_OBJECT: u32 = 36;
+    pub const CLASS_TRANSCRIPT_SHELL: u32 = 37;
+    pub const CLASS_ASSOCIATION: u32 = 38;
+    pub const CLASS_POOL_DICTIONARY: u32 = 39;
+    pub const CLASS_MAGNITUDE: u32 = 40;
+    pub const CLASS_NUMBER: u32 = 41;
+    pub const CLASS_INTEGER: u32 = 42;
+    pub const CLASS_BOOLEAN: u32 = 43;
+    pub const CLASS_COLLECTION: u32 = 44;
+    pub const CLASS_SEQUENCEABLE_COLLECTION: u32 = 45;
+    pub const CLASS_ARRAYED_COLLECTION: u32 = 46;
 
     // Class object field indices
     pub const CLASS_FIELD_SUPERCLASS: usize = 0;
     pub const CLASS_FIELD_METHOD_DICT: usize = 1;
-    pub const CLASS_FIELD_FORMAT: usize = 2;
+    pub const CLASS_FIELD_FORMAT: usize = 2; // Holds Dolphin-style instanceSpec for the class
     pub const CLASS_FIELD_INST_VARS: usize = 3;
     pub const CLASS_FIELD_NAME: usize = 4;
-    pub const CLASS_NUM_FIELDS: usize = 5;
+    pub const CLASS_FIELD_CLASS_VARS: usize = 5; // Class variables dictionary
+    pub const CLASS_FIELD_METACLASS: usize = 6; // Points to metaclass object (for class-side methods)
+    pub const CLASS_FIELD_POOL_DICTS: usize = 7; // Array of pool dictionaries
+    pub const CLASS_FIELD_CLASS_INST_VARS: usize = 8; // Class instance variables (stored on metaclass)
+    pub const CLASS_NUM_FIELDS: usize = 9;
+
+    // Metaclass has an extra field: thisClass (the class it's a metaclass of)
+    pub const METACLASS_FIELD_THIS_CLASS: usize = 9;
+    pub const METACLASS_NUM_FIELDS: usize = 10;
+
+    // Dolphin Behavior instanceSpec masks (kept here so VM can synthesize instanceSpec values)
+    pub const INSTSPEC_SIZE_MASK: i61 = 0xFF;
+    pub const INSTSPEC_VARIABLE_MASK: i61 = 0x1000;
+    pub const INSTSPEC_POINTERS_MASK: i61 = 0x2000;
+    pub const INSTSPEC_NULLTERM_MASK: i61 = 0x4000; // Exposed for completeness
+    pub const INSTSPEC_INDIRECT_MASK: i61 = 0x800;
+
+    pub const InstanceSpecInfo = struct {
+        inst_size: usize,
+        format: ClassFormat,
+        is_pointers: bool,
+        is_variable: bool,
+    };
+
+    /// Encode our ClassFormat + fixed inst var count into a Dolphin-compatible instanceSpec.
+    /// We only set the bits we understand (pointers/variable/size); other bits remain clear.
+    pub fn encodeInstanceSpec(inst_size: usize, format: ClassFormat) i61 {
+        const size_part: i61 = @intCast(inst_size & 0xFF);
+        const variable = switch (format) {
+            .variable, .bytes, .words => INSTSPEC_VARIABLE_MASK,
+            else => 0,
+        };
+        const pointers = switch (format) {
+            .bytes, .words => 0,
+            else => INSTSPEC_POINTERS_MASK,
+        };
+        return size_part | variable | pointers;
+    }
+
+    /// Decode a Dolphin-style instanceSpec into inst size + ClassFormat (best effort).
+    pub fn decodeInstanceSpec(spec: i61) InstanceSpecInfo {
+        const inst_size: usize = @intCast(spec & INSTSPEC_SIZE_MASK);
+        const is_variable = (spec & INSTSPEC_VARIABLE_MASK) != 0;
+        const is_pointers = (spec & INSTSPEC_POINTERS_MASK) != 0;
+
+        const format: ClassFormat = if (is_variable) blk: {
+            break :blk if (is_pointers) .variable else .bytes;
+        } else blk2: {
+            break :blk2 if (is_pointers) .normal else .bytes;
+        };
+
+        return .{
+            .inst_size = inst_size,
+            .format = format,
+            .is_pointers = is_pointers,
+            .is_variable = is_variable,
+        };
+    }
 
     pub fn init(allocator: std.mem.Allocator, heap_size: usize) !*Heap {
         const heap = try allocator.create(Heap);
@@ -237,9 +314,71 @@ pub const Heap = struct {
             return self.getClass(CLASS_FALSE);
         } else if (value.isObject()) {
             const obj = value.asObject();
+
+            // Check if this is a class object - if so, return its metaclass
+            if (obj.header.class_index == CLASS_CLASS or obj.header.class_index == CLASS_METACLASS) {
+                // This is a class or metaclass object - get its metaclass from the METACLASS field
+                const metaclass = obj.getField(CLASS_FIELD_METACLASS, CLASS_NUM_FIELDS);
+                if (!metaclass.isNil() and metaclass.isObject()) {
+                    return metaclass;
+                }
+                // Lazily create a metaclass if missing
+                if (self.createMetaclassIfMissing(obj)) |meta_val| {
+                    return meta_val;
+                }
+                // Debug: metaclass lookup failed
+                const class_name = obj.getField(CLASS_FIELD_NAME, CLASS_NUM_FIELDS);
+                if (class_name.isObject()) {
+                    const name_obj = class_name.asObject();
+                    if (name_obj.header.class_index == CLASS_SYMBOL) {
+                        const name_bytes = name_obj.bytes(name_obj.header.size);
+                        std.debug.print("classOf: class '{s}' has nil metaclass, falling back to Class\n", .{name_bytes});
+                    }
+                }
+            }
+
             return self.getClass(obj.header.class_index);
         }
         return Value.nil;
+    }
+
+    fn createMetaclassIfMissing(self: *Heap, class_obj: *Object) ?Value {
+        // Attempt to synthesize a metaclass when one is absent.
+        const new_meta = self.allocateObject(CLASS_METACLASS, METACLASS_NUM_FIELDS, .normal) catch return null;
+
+        // Set name if available
+        const name_val = class_obj.getField(CLASS_FIELD_NAME, CLASS_NUM_FIELDS);
+        if (name_val.isObject() and name_val.asObject().header.class_index == CLASS_SYMBOL) {
+            const name_obj = name_val.asObject();
+            const name_bytes = name_obj.bytes(name_obj.header.size);
+            var buf: [128]u8 = undefined;
+            const formatted = std.fmt.bufPrint(&buf, "{s} class", .{name_bytes}) catch null;
+            if (formatted) |slice| {
+                if (self.internSymbol(slice)) |sym| {
+                    new_meta.setField(CLASS_FIELD_NAME, sym, METACLASS_NUM_FIELDS);
+                } else |_| {}
+            }
+        }
+
+        // Link to the class and set format/superclass
+        new_meta.setField(METACLASS_FIELD_THIS_CLASS, Value.fromObject(class_obj), METACLASS_NUM_FIELDS);
+        const fmt = encodeInstanceSpec(@intCast(CLASS_NUM_FIELDS), .normal);
+        new_meta.setField(CLASS_FIELD_FORMAT, Value.fromSmallInt(fmt), METACLASS_NUM_FIELDS);
+
+        // Inherit metaclass chain from superclass if possible
+        const super_val = class_obj.getField(CLASS_FIELD_SUPERCLASS, CLASS_NUM_FIELDS);
+        if (super_val.isObject()) {
+            const super_meta = super_val.asObject().getField(CLASS_FIELD_METACLASS, CLASS_NUM_FIELDS);
+            if (super_meta.isObject()) {
+                new_meta.setField(CLASS_FIELD_SUPERCLASS, super_meta, METACLASS_NUM_FIELDS);
+            }
+        }
+        if (new_meta.getField(CLASS_FIELD_SUPERCLASS, METACLASS_NUM_FIELDS).isNil()) {
+            new_meta.setField(CLASS_FIELD_SUPERCLASS, self.getClass(CLASS_CLASS), METACLASS_NUM_FIELDS);
+        }
+
+        class_obj.setField(CLASS_FIELD_METACLASS, Value.fromObject(new_meta), CLASS_NUM_FIELDS);
+        return Value.fromObject(new_meta);
     }
 
     /// Set a global variable
@@ -389,7 +528,8 @@ pub const Heap = struct {
             const class_obj = class.asObject();
             const format_val = class_obj.getField(CLASS_FIELD_FORMAT, CLASS_NUM_FIELDS);
             if (format_val.isSmallInt()) {
-                return @intCast(format_val.asSmallInt());
+                const info = decodeInstanceSpec(format_val.asSmallInt());
+                return info.inst_size;
             }
         }
         return 0;
@@ -402,7 +542,8 @@ pub const Heap = struct {
             const class_obj = class.asObject();
             const format_val = class_obj.getField(CLASS_FIELD_FORMAT, CLASS_NUM_FIELDS);
             if (format_val.isSmallInt()) {
-                return @intCast(format_val.asSmallInt());
+                const info = decodeInstanceSpec(format_val.asSmallInt());
+                return info.inst_size;
             }
         }
         return 0;

@@ -6,6 +6,7 @@ pub const memory = @import("vm/memory.zig");
 pub const bytecodes = @import("vm/bytecodes.zig");
 pub const interpreter = @import("vm/interpreter.zig");
 pub const primitives = @import("vm/primitives.zig");
+pub const debugger = @import("vm/debugger.zig");
 
 // Compiler modules
 pub const lexer = @import("compiler/lexer.zig");
@@ -15,6 +16,7 @@ pub const codegen = @import("compiler/codegen.zig");
 // Image modules
 pub const bootstrap = @import("image/bootstrap.zig");
 pub const filein = @import("image/filein.zig");
+pub const snapshot = @import("image/snapshot.zig");
 
 const Value = object.Value;
 const Heap = memory.Heap;
@@ -38,22 +40,82 @@ const banner =
 ;
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    const allocator = std.heap.c_allocator;
 
     const stdout = std.fs.File.stdout();
     const stdin = std.fs.File.stdin();
 
-    // Initialize heap (64MB)
-    const heap = try Heap.init(allocator, 64 * 1024 * 1024);
-    defer heap.deinit();
+    // Process command line arguments for files to load
+    const args = try std.process.argsAlloc(allocator);
+    defer std.process.argsFree(allocator, args);
 
-    // Bootstrap core classes
-    try bootstrap.bootstrap(heap);
+    // Handle --image <path> flag
+    var heap: *Heap = undefined;
+    var loaded_from_image = false;
+    var arg_index: usize = 1;
+    while (arg_index < args.len) : (arg_index += 1) {
+        if (std.mem.eql(u8, args[arg_index], "--image") and arg_index + 1 < args.len) {
+            const img_path = args[arg_index + 1];
+            heap = snapshot.loadFromFile(allocator, img_path) catch {
+                std.debug.print("Failed to load image {s}, falling back to bootstrap\n", .{img_path});
+                loaded_from_image = false;
+                break;
+            };
+            loaded_from_image = true;
+            arg_index += 1; // skip path
+        }
+    }
+
+    if (!loaded_from_image) {
+        // Initialize heap (64MB default)
+        heap = try Heap.init(allocator, 64 * 1024 * 1024);
+        // Bootstrap core classes
+        try bootstrap.bootstrap(heap);
+    }
+    try bootstrap.ensureCorePrimitives(heap);
+    defer heap.deinit();
 
     // Create interpreter
     var interp = Interpreter.init(heap);
+
+    var skip_next: bool = false;
+    for (args[1..]) |arg| {
+        if (skip_next) {
+            skip_next = false;
+            continue;
+        }
+        // Skip flags
+        if (arg.len > 0 and arg[0] == '-') {
+            if (std.mem.eql(u8, arg, "--image")) {
+                // Skip the following path (already handled in the earlier loop)
+                skip_next = true;
+                continue;
+            }
+            continue;
+        }
+
+        // Load file
+        std.debug.print("Loading file: {s}\n", .{arg});
+        var file_in = filein.FileIn.init(allocator, heap);
+        defer file_in.deinit();
+
+        file_in.loadFile(arg) catch |err| {
+            const err_msg = switch (err) {
+                filein.FileInError.FileNotFound => "File not found",
+                filein.FileInError.ClassNotFound => "Class not found",
+                filein.FileInError.InvalidMethodDefinition => "Invalid method definition",
+                filein.FileInError.CompilationFailed => "Compilation failed",
+                else => "Unknown error",
+            };
+            std.debug.print("Error loading {s}: {s}\n", .{ arg, err_msg });
+            continue;
+        };
+        if (file_in.expressions_evaluated > 0) {
+            std.debug.print("Loaded {d} methods, {d} classes, {d} expressions from {s}\n", .{ file_in.methods_loaded, file_in.classes_defined, file_in.expressions_evaluated, arg });
+        } else {
+            std.debug.print("Loaded {d} methods, {d} classes from {s}\n", .{ file_in.methods_loaded, file_in.classes_defined, arg });
+        }
+    }
 
     // Print banner
     _ = try stdout.write(banner);
@@ -106,6 +168,32 @@ pub fn main() !void {
             continue;
         }
 
+        if (std.mem.eql(u8, trimmed, "debug")) {
+            if (debugger.debugEnabled) {
+                _ = try stdout.write("Disabling debugger.\n");
+                debugger.disableDebugger();
+            } else {
+                _ = try stdout.write("Enabling debugger. Next expression will start in step mode.\n");
+                _ = debugger.enableDebugger(&interp);
+            }
+            continue;
+        }
+
+        if (std.mem.startsWith(u8, trimmed, "saveimage")) {
+            var tok = std.mem.tokenizeAny(u8, trimmed, " \t");
+            _ = tok.next(); // command
+            const path = tok.next() orelse "zig-smalltalk.img";
+            _ = try stdout.write("Saving image to ");
+            _ = try stdout.write(path);
+            _ = try stdout.write("...\n");
+            snapshot.saveToFile(heap, allocator, path) catch {
+                _ = try stdout.write("Failed to save image\n");
+                continue;
+            };
+            _ = try stdout.write("Image saved.\n");
+            continue;
+        }
+
         // Check for filein command
         if (std.mem.startsWith(u8, trimmed, "filein ")) {
             const path = std.mem.trim(u8, trimmed[7..], " \t");
@@ -153,6 +241,43 @@ pub fn main() !void {
                 else => "Unknown error",
             };
             _ = try stdout.write(err_msg);
+            if (err == error.MessageNotUnderstood) {
+                _ = try stdout.write(" (selector: ");
+                const sel = if (std.mem.eql(u8, interp.last_mnu_selector, "<?>"))
+                    interp.last_send_selector
+                else
+                    interp.last_mnu_selector;
+                _ = try stdout.write(sel);
+                _ = try stdout.write(")");
+                // Print receiver class for easier debugging
+                const recv_class = interp.heap.classOf(interp.last_mnu_receiver);
+                if (recv_class.isObject()) {
+                    const rc_obj = recv_class.asObject();
+                    const rc_name_val = rc_obj.getField(Heap.CLASS_FIELD_NAME, Heap.CLASS_NUM_FIELDS);
+                    if (rc_name_val.isObject()) {
+                        const rc_name_obj = rc_name_val.asObject();
+                        if (rc_name_obj.header.class_index == Heap.CLASS_SYMBOL) {
+                            _ = try stdout.write(" on ");
+                            _ = try stdout.write(rc_name_obj.bytes(rc_name_obj.header.size));
+                        }
+                    }
+                }
+                if (!std.mem.eql(u8, interp.last_mnu_method, "<?>")) {
+                    _ = try stdout.write(" raised in ");
+                    _ = try stdout.write(interp.last_mnu_method);
+                }
+                _ = try stdout.write(" in method: ");
+                const meth = interp.method;
+                const lits = meth.getLiterals();
+                if (lits.len > 0 and lits[lits.len-1].isObject()) {
+                    const obj = lits[lits.len-1].asObject();
+                    if (obj.header.class_index == Heap.CLASS_STRING) {
+                        _ = try stdout.write(obj.bytes(obj.header.size));
+                    }
+                } else {
+                    _ = try stdout.write("<unknown>");
+                }
+            }
             _ = try stdout.write("\n");
             continue;
         };
@@ -164,12 +289,18 @@ pub fn main() !void {
 }
 
 fn compileAndExecute(allocator: std.mem.Allocator, interp: *Interpreter, source: []const u8) !Value {
+    // Use a short-lived arena so temporary compiler allocations (including the
+    // compiled method) are cleaned up after execution
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const temp_alloc = arena.allocator();
+
     // Parse the expression
-    var p = Parser.init(allocator, source);
+    var p = Parser.init(temp_alloc, source);
     const ast = try p.parseExpression();
 
     // Compile to bytecode
-    var gen = CodeGenerator.init(allocator, interp.heap);
+    var gen = CodeGenerator.init(temp_alloc, interp.heap, temp_alloc);
     defer gen.deinit();
 
     const method = try gen.compileDoIt(ast);
@@ -203,37 +334,41 @@ fn printValue(file: std.fs.File, heap: *Heap, value: Value) !void {
         const class_index = obj.header.class_index;
 
         if (class_index == Heap.CLASS_STRING or class_index == Heap.CLASS_SYMBOL) {
-            // Print string/symbol content
-            const class = heap.getClass(class_index);
-            if (class.isObject()) {
-                const class_obj = class.asObject();
-                const format_val = class_obj.getField(Heap.CLASS_FIELD_FORMAT, Heap.CLASS_NUM_FIELDS);
-                if (format_val.isSmallInt()) {
-                    const raw_format = format_val.asSmallInt();
-                    const size: usize = @intCast(raw_format & 0xFF);
-                    if (size > 0) {
-                        const bytes_slice = obj.bytes(size);
-                        if (class_index == Heap.CLASS_SYMBOL) {
-                            _ = try file.write("#");
-                        }
-                        _ = try file.write("'");
-                        _ = try file.write(bytes_slice);
-                        _ = try file.write("'");
-                        return;
-                    }
+            // Print string/symbol content - use the object's header size, not class format
+            const size = obj.header.size;
+            if (size > 0) {
+                const bytes_slice = obj.bytes(size);
+                if (class_index == Heap.CLASS_SYMBOL) {
+                    _ = try file.write("#");
                 }
-            }
-            // Fallback
-            if (class_index == Heap.CLASS_SYMBOL) {
-                _ = try file.write("a Symbol");
+                _ = try file.write("'");
+                _ = try file.write(bytes_slice);
+                _ = try file.write("'");
             } else {
-                _ = try file.write("a String");
+                // Empty string/symbol
+                if (class_index == Heap.CLASS_SYMBOL) {
+                    _ = try file.write("#''");
+                } else {
+                    _ = try file.write("''");
+                }
             }
         } else if (class_index == Heap.CLASS_ARRAY) {
             _ = try file.write("#(...)");
         } else {
-            // Generic object print
-            const s = std.fmt.bufPrint(&buf, "<Object @{x}>", .{@intFromPtr(obj)}) catch "?";
+            // Generic object print - try to get class name
+            const class = heap.getClass(class_index);
+            var class_name: []const u8 = "Object";
+            if (class.isObject()) {
+                const class_obj = class.asObject();
+                const name_val = class_obj.getField(Heap.CLASS_FIELD_NAME, Heap.CLASS_NUM_FIELDS);
+                if (name_val.isObject()) {
+                    const name_obj = name_val.asObject();
+                    if (name_obj.header.class_index == Heap.CLASS_SYMBOL) {
+                        class_name = name_obj.bytes(name_obj.header.size);
+                    }
+                }
+            }
+            const s = std.fmt.bufPrint(&buf, "<{s} @{x}>", .{ class_name, @intFromPtr(obj) }) catch "?";
             _ = try file.write(s);
         }
     } else {
@@ -249,6 +384,9 @@ fn printHelp(file: std.fs.File) !void {
         \\  quit, exit    - Exit the REPL
         \\  help          - Show this help
         \\  gc            - Run garbage collection
+        \\  debug         - Toggle debugger (step-by-step execution)
+        \\  saveimage <path> - Save image snapshot
+        \\  filein <path> - Load Smalltalk source file
         \\
         \\Expression Examples:
         \\  3 + 4           - Arithmetic

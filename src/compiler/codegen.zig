@@ -24,6 +24,7 @@ pub const CompileError = error{
 /// Code generator - compiles AST to bytecode
 pub const CodeGenerator = struct {
     allocator: std.mem.Allocator,
+    method_allocator: std.mem.Allocator,
     heap: *Heap,
 
     // Output buffers
@@ -55,9 +56,10 @@ pub const CodeGenerator = struct {
     selector_equal: ?usize,
     selector_not_equal: ?usize,
 
-    pub fn init(allocator: std.mem.Allocator, heap: *Heap) CodeGenerator {
+    pub fn init(allocator: std.mem.Allocator, heap: *Heap, method_allocator: std.mem.Allocator) CodeGenerator {
         return .{
             .allocator = allocator,
+            .method_allocator = method_allocator,
             .heap = heap,
             .bytecodes_buf = .{},
             .literals = .{},
@@ -193,16 +195,43 @@ pub const CodeGenerator = struct {
                     try self.emitByte(@intCast(unsigned >> 8));
                     try self.emitByte(@intCast(unsigned & 0xFF));
                 } else {
-                    // Store as literal
-                    const index = try self.addLiteral(Value.fromSmallInt(@intCast(n)));
-                    try self.emit(.push_literal);
-                    try self.emitByte(@intCast(index));
+                    // Store as literal - check if fits in SmallInt range
+                    const max_small_int: i64 = (1 << 60) - 1;
+                    const min_small_int: i64 = -(1 << 60);
+                    if (n >= min_small_int and n <= max_small_int) {
+                        const index = try self.addLiteral(Value.fromSmallInt(@intCast(n)));
+                        try self.emit(.push_literal);
+                        try self.emitByte(@intCast(index));
+                    } else {
+                        // Number too large for SmallInt - would need LargeInteger
+                        // For now, store as Float
+                        const float_obj = self.heap.allocateFloat(@floatFromInt(n)) catch {
+                            return CompileError.OutOfMemory;
+                        };
+                        const index = try self.addLiteral(float_obj);
+                        try self.emit(.push_literal);
+                        try self.emitByte(@intCast(index));
+                    }
                 }
             },
 
             .literal_float => {
-                // For now, store as literal (we'd need Float objects)
-                const index = try self.addLiteral(Value.fromSmallInt(0)); // placeholder
+                // Allocate a Float object and store as literal
+                const float_obj = self.heap.allocateFloat(node.data.float) catch {
+                    return CompileError.OutOfMemory;
+                };
+                const index = try self.addLiteral(float_obj);
+                try self.emit(.push_literal);
+                try self.emitByte(@intCast(index));
+            },
+
+            .literal_scaled_decimal => {
+                // For now, treat scaled decimal as Float
+                // TODO: Implement proper ScaledDecimal class
+                const float_obj = self.heap.allocateFloat(node.data.scaled_decimal.value) catch {
+                    return CompileError.OutOfMemory;
+                };
+                const index = try self.addLiteral(float_obj);
                 try self.emit(.push_literal);
                 try self.emitByte(@intCast(index));
             },
@@ -378,7 +407,15 @@ pub const CodeGenerator = struct {
                     }
                 }
 
-                return CompileError.VariableNotFound;
+                // Not found in local scope - treat as class variable
+                // Store the symbol name as a literal and emit extended_store with type 2
+                const sym = self.heap.internSymbol(name) catch {
+                    return CompileError.OutOfMemory;
+                };
+                const index = try self.addLiteral(sym);
+                try self.emit(.extended_store);
+                try self.emitByte(2); // type 2 = class variable
+                try self.emitByte(@intCast(index));
             },
 
             .message_send => {
@@ -508,19 +545,55 @@ pub const CodeGenerator = struct {
 
                 // Save outer scope's arguments and temporaries for outer context access
                 const prev_outer_args = self.outer_arguments;
-                const prev_outer_temp_count = self.outer_temporaries.items.len;
 
-                // Capture current scope as outer scope for the block
-                // (merge any existing outer scope with current scope for nested blocks)
-                self.outer_arguments = self.arguments;
-
-                // Copy current temporaries to outer_temporaries for closure access
-                self.outer_temporaries.shrinkRetainingCapacity(0);
-                for (self.temporaries.items) |temp| {
-                    self.outer_temporaries.append(self.allocator, temp) catch {
+                // Save the current outer_temporaries content to restore later
+                var saved_outer_temps = std.ArrayListUnmanaged([]const u8){};
+                for (self.outer_temporaries.items) |temp| {
+                    saved_outer_temps.append(self.allocator, temp) catch {
                         return CompileError.OutOfMemory;
                     };
                 }
+
+                // For nested blocks, we need to merge all outer scopes
+                // Build a combined list: [prev_outer_args] + [prev_outer_temps] + [current_args] + [current_temps]
+                // This flattens the scope chain so inner blocks can access outer-outer variables
+                var combined_outer = std.ArrayListUnmanaged([]const u8){};
+
+                // First add previous outer arguments (grandparent scope)
+                for (prev_outer_args) |arg| {
+                    combined_outer.append(self.allocator, arg) catch {
+                        return CompileError.OutOfMemory;
+                    };
+                }
+                // Then previous outer temporaries
+                for (saved_outer_temps.items) |temp| {
+                    combined_outer.append(self.allocator, temp) catch {
+                        return CompileError.OutOfMemory;
+                    };
+                }
+                // Then current arguments (parent scope)
+                for (self.arguments) |arg| {
+                    combined_outer.append(self.allocator, arg) catch {
+                        return CompileError.OutOfMemory;
+                    };
+                }
+                // Then current temporaries
+                for (self.temporaries.items) |temp| {
+                    combined_outer.append(self.allocator, temp) catch {
+                        return CompileError.OutOfMemory;
+                    };
+                }
+
+                // Set combined outer scope - everything is in outer_temporaries for simplicity
+                // (we put args there too since they're accessed the same way via push_outer_temp)
+                self.outer_arguments = &[_][]const u8{};
+                self.outer_temporaries.shrinkRetainingCapacity(0);
+                for (combined_outer.items) |item| {
+                    self.outer_temporaries.append(self.allocator, item) catch {
+                        return CompileError.OutOfMemory;
+                    };
+                }
+                combined_outer.deinit(self.allocator);
 
                 // Save current scope
                 const current_args = self.arguments;
@@ -562,7 +635,13 @@ pub const CodeGenerator = struct {
 
                 // Restore previous outer scope
                 self.outer_arguments = prev_outer_args;
-                self.outer_temporaries.shrinkRetainingCapacity(prev_outer_temp_count);
+                self.outer_temporaries.shrinkRetainingCapacity(0);
+                for (saved_outer_temps.items) |temp| {
+                    self.outer_temporaries.append(self.allocator, temp) catch {
+                        return CompileError.OutOfMemory;
+                    };
+                }
+                saved_outer_temps.deinit(self.allocator);
 
                 // If block has no statements, push nil
                 if (node.data.block.statements.len == 0) {
@@ -698,12 +777,11 @@ pub const CodeGenerator = struct {
         const literals_size = num_literals * @sizeOf(Value);
         const total_size = header_size + literals_size + bytecode_size;
 
-        // Allocate memory for the method
-        const mem = self.allocator.alignedAlloc(u8, .@"8", total_size) catch {
+        // Allocate memory for the method with 8-byte alignment
+        const mem = self.method_allocator.alignedAlloc(u8, std.mem.Alignment.of(CompiledMethod), total_size) catch {
             return CompileError.OutOfMemory;
         };
-
-        const method: *CompiledMethod = @ptrCast(@alignCast(mem.ptr));
+        const method: *CompiledMethod = @ptrCast(mem.ptr);
 
         // Fill in header
         method.header = .{
@@ -716,13 +794,13 @@ pub const CodeGenerator = struct {
         };
 
         // Copy literals
-        const literals_ptr: [*]Value = @ptrCast(@alignCast(mem.ptr + header_size));
+        const literals_ptr: [*]Value = @ptrFromInt(@intFromPtr(method) + header_size);
         for (self.literals.items, 0..) |lit, i| {
             literals_ptr[i] = lit;
         }
 
         // Copy bytecodes
-        const bytecodes_ptr: [*]u8 = @ptrCast(mem.ptr + header_size + literals_size);
+        const bytecodes_ptr: [*]u8 = @ptrFromInt(@intFromPtr(method) + header_size + literals_size);
         @memcpy(bytecodes_ptr[0..bytecode_size], self.bytecodes_buf.items);
 
         return method;
@@ -734,7 +812,7 @@ test "CodeGenerator - simple integer" {
     const heap = try Heap.init(allocator, 1024 * 1024);
     defer heap.deinit();
 
-    var gen = CodeGenerator.init(allocator, heap);
+    var gen = CodeGenerator.init(allocator, heap, allocator);
     defer gen.deinit();
 
     // Create a simple integer node
@@ -755,7 +833,7 @@ test "CodeGenerator - binary message" {
     const heap = try Heap.init(allocator, 1024 * 1024);
     defer heap.deinit();
 
-    var gen = CodeGenerator.init(allocator, heap);
+    var gen = CodeGenerator.init(allocator, heap, allocator);
     defer gen.deinit();
 
     // Create "3 + 4" AST manually

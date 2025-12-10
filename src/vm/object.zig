@@ -242,6 +242,24 @@ pub const CompiledMethod = struct {
         return ptr[0..self.header.bytecode_size];
     }
 
+    /// Total byte size of the compiled method, including header, literals and bytecodes
+    pub fn byteSize(self: *CompiledMethod) usize {
+        const header_size = @sizeOf(MethodHeader);
+        const literals_size = @as(usize, self.header.num_literals) * @sizeOf(Value);
+        const bytecodes_size = @as(usize, self.header.bytecode_size);
+        return header_size + literals_size + bytecodes_size;
+    }
+
+    /// Convenience view of the compiled method as a byte slice
+    pub fn asBytes(self: *CompiledMethod) []u8 {
+        return @as([*]u8, @ptrCast(self))[0..self.byteSize()];
+    }
+
+    /// Free storage for this compiled method using the allocator it was created with
+    pub fn destroy(self: *CompiledMethod, allocator: std.mem.Allocator) void {
+        allocator.free(self.asBytes());
+    }
+
     /// Get the source code if stored
     pub fn getSource(self: *CompiledMethod) ?[]const u8 {
         if (!self.header.flags.has_source) return null;

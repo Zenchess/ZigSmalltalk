@@ -3,12 +3,20 @@ const object = @import("object.zig");
 const memory = @import("memory.zig");
 const bytecodes = @import("bytecodes.zig");
 const primitives = @import("primitives.zig");
+const debugger = @import("debugger.zig");
 
 const Value = object.Value;
 const Object = object.Object;
 const CompiledMethod = object.CompiledMethod;
 const Heap = memory.Heap;
 const Opcode = bytecodes.Opcode;
+
+var debug_receiver_idx2_count: usize = 0;
+var debug_send_special_count: usize = 0;
+
+// Debug flag - set to false to disable verbose debug output
+const DEBUG_VERBOSE = false;
+const DEBUG_STACK = true;
 
 pub const InterpreterError = error{
     StackOverflow,
@@ -20,15 +28,32 @@ pub const InterpreterError = error{
     OutOfMemory,
     TypeError,
     BlockCannotReturn,
+    BlockNonLocalReturn, // Non-local return from block - result is on stack
+    SmalltalkException, // Exception signaled by Smalltalk code
+    ContinueExecution, // Primitive set up new context - continue main loop
+};
+
+/// Exception handler entry for on:do: handling
+pub const ExceptionHandler = struct {
+    exception_class: Value, // The exception class being caught
+    handler_block: Value, // The block to execute
+    context_ptr: usize, // Context index when handler was installed
+    sp: usize, // Stack pointer when handler was installed
+    temp_base: usize, // temp_base when handler was installed
+    method: *CompiledMethod, // Method when handler was installed
+    ip: usize, // Instruction pointer when handler was installed
+    receiver: Value, // Receiver when handler was installed
 };
 
 /// Execution context for a method activation
 pub const Context = struct {
     method: *CompiledMethod,
+    method_class: Value,
     ip: usize,
     receiver: Value,
     // Temporaries and arguments are stored on the stack
     temp_base: usize, // Base index in stack for temps/args
+    outer_temp_base: usize, // Base index for outer temps (for blocks)
     num_args: usize,
     num_temps: usize,
     // For block closures
@@ -50,9 +75,27 @@ pub const Interpreter = struct {
 
     // Current execution state (cached from current context)
     method: *CompiledMethod,
+    method_class: Value,
     ip: usize,
     receiver: Value,
     temp_base: usize,
+    outer_temp_base: usize, // For closures: temp_base of enclosing context
+    last_mnu_selector: []const u8,
+    last_send_selector: []const u8,
+    last_mnu_receiver: Value,
+    last_mnu_method: []const u8,
+
+    // Exception handling
+    exception_handlers: [256]ExceptionHandler,
+    handler_ptr: usize, // Current handler index (number of active handlers)
+    current_exception: Value, // Current exception being handled (for handler block parameter)
+
+    // Primitive block execution tracking - when > 0, return_top returns directly to primitive
+    // but block_return still uses context chain for non-local returns
+    primitive_block_depth: usize,
+    // The context_ptr at which the innermost primitive block started - only return immediately
+    // from return_top if we're at this context level (not in a nested method call)
+    primitive_block_context_base: usize,
 
     pub fn init(heap: *Heap) Interpreter {
         return .{
@@ -62,10 +105,88 @@ pub const Interpreter = struct {
             .contexts = undefined,
             .context_ptr = 0,
             .method = undefined,
+            .method_class = Value.nil,
             .ip = 0,
             .receiver = Value.nil,
             .temp_base = 0,
+            .outer_temp_base = 0,
+            .last_mnu_selector = "<?>",
+            .last_send_selector = "<?>",
+            .last_mnu_receiver = Value.nil,
+            .last_mnu_method = "<?>",
+            .exception_handlers = undefined,
+            .handler_ptr = 0,
+            .current_exception = Value.nil,
+            .primitive_block_depth = 0,
+            .primitive_block_context_base = 0,
         };
+    }
+
+    /// Push an exception handler onto the handler stack
+    pub fn pushExceptionHandler(self: *Interpreter, exception_class: Value, handler_block: Value) InterpreterError!void {
+        if (self.handler_ptr >= self.exception_handlers.len) {
+            return InterpreterError.StackOverflow;
+        }
+        self.exception_handlers[self.handler_ptr] = .{
+            .exception_class = exception_class,
+            .handler_block = handler_block,
+            .context_ptr = self.context_ptr,
+            .sp = self.sp,
+            .temp_base = self.temp_base,
+            .method = self.method,
+            .ip = self.ip,
+            .receiver = self.receiver,
+        };
+        self.handler_ptr += 1;
+    }
+
+    /// Pop an exception handler from the handler stack
+    pub fn popExceptionHandler(self: *Interpreter) void {
+        if (self.handler_ptr > 0) {
+            self.handler_ptr -= 1;
+        }
+    }
+
+    /// Check if an exception class matches a handler's exception class
+    /// Returns true if exception_class is the same as or a subclass of handler_class
+    pub fn exceptionMatches(_: *Interpreter, exception_class: Value, handler_class: Value) bool {
+        // Check exact match first
+        if (exception_class.eql(handler_class)) {
+            return true;
+        }
+
+        // Check if exception_class is a subclass of handler_class
+        var current = exception_class;
+        while (current.isObject()) {
+            const current_obj = current.asObject();
+            const superclass = current_obj.getField(Heap.CLASS_FIELD_SUPERCLASS, Heap.CLASS_NUM_FIELDS);
+            if (superclass.eql(handler_class)) {
+                return true;
+            }
+            if (superclass.isNil()) {
+                break;
+            }
+            current = superclass;
+        }
+
+        return false;
+    }
+
+    /// Find a handler for the given exception and return its index, or null if not found
+    pub fn findExceptionHandler(self: *Interpreter, exception: Value) ?usize {
+        // Get the exception's class
+        const exception_class = self.heap.classOf(exception);
+
+        // Search handlers from top to bottom (most recent first)
+        var i: usize = self.handler_ptr;
+        while (i > 0) {
+            i -= 1;
+            const handler = self.exception_handlers[i];
+            if (self.exceptionMatches(exception_class, handler.exception_class)) {
+                return i;
+            }
+        }
+        return null;
     }
 
     /// Execute a compiled method and return the result
@@ -75,6 +196,7 @@ pub const Interpreter = struct {
         self.ip = 0;
         self.receiver = recv;
         self.temp_base = self.sp;
+        self.outer_temp_base = self.temp_base;
 
         // Push receiver
         try self.push(recv);
@@ -97,7 +219,10 @@ pub const Interpreter = struct {
                 // If primitive succeeded, return its result
                 return result;
             } else |err| {
-                if (err != InterpreterError.PrimitiveFailed) {
+                // ContinueExecution means primitive set up new context - continue to interpretLoop
+                if (err == InterpreterError.ContinueExecution) {
+                    // Fall through to interpretLoop
+                } else if (err != InterpreterError.PrimitiveFailed) {
                     return err;
                 }
                 // Fall through to bytecode execution on PrimitiveFailed
@@ -105,12 +230,81 @@ pub const Interpreter = struct {
         }
 
         // Main interpretation loop
-        return self.interpretLoop();
+        return self.interpretLoop() catch |err| {
+            // Non-local return from block - result is on stack, return it as success
+            if (err == InterpreterError.BlockNonLocalReturn) {
+                return try self.pop();
+            }
+            if (err == InterpreterError.MessageNotUnderstood and std.mem.eql(u8, self.last_mnu_selector, "<?>")) {
+                self.last_mnu_selector = self.last_send_selector;
+                self.last_mnu_method = self.currentMethodSource();
+            }
+            if (err == InterpreterError.MessageNotUnderstood) {
+                const recv_class = self.heap.classOf(self.last_mnu_receiver);
+                var recv_name: []const u8 = "<?>";
+                if (recv_class.isObject()) {
+                    const name_val = recv_class.asObject().getField(Heap.CLASS_FIELD_NAME, Heap.CLASS_NUM_FIELDS);
+                    if (name_val.isObject() and name_val.asObject().header.class_index == Heap.CLASS_SYMBOL) {
+                        recv_name = name_val.asObject().bytes(name_val.asObject().header.size);
+                    }
+                } else if (self.last_mnu_receiver.isNil()) {
+                    recv_name = "nil";
+                } else if (self.last_mnu_receiver.isSmallInt()) {
+                    recv_name = "SmallInteger";
+                }
+                if (DEBUG_VERBOSE) std.debug.print("DEBUG MNU catch: last_send={s} method={s} recv={s}\n", .{
+                    self.last_send_selector,
+                    self.currentMethodSource(),
+                    recv_name,
+                });
+            }
+            return err;
+        };
     }
 
     pub fn interpretLoop(self: *Interpreter) InterpreterError!Value {
         while (true) {
+            // Check debugger before each bytecode
+            if (debugger.debugEnabled and debugger.shouldBreak()) {
+                debugger.enterDebugger();
+            }
+
             const byte = self.fetchByte();
+
+            // Temporary debug tracing for MainTestCase suite builders
+            if (DEBUG_VERBOSE and self.method.header.flags.has_source) {
+                const lits = self.method.getLiterals();
+                if (lits.len > 0) {
+                    const last = lits[lits.len - 1];
+                    if (last.isObject() and last.asObject().header.class_index == Heap.CLASS_STRING) {
+                        const src = last.asObject().bytes(last.asObject().header.size);
+                        if (std.mem.startsWith(u8, src, "buildSuiteFrom") or std.mem.startsWith(u8, src, "buildSuite") or std.mem.startsWith(u8, src, "allTestSelectors") or std.mem.startsWith(u8, src, "tests")) {
+                            std.debug.print("TRACE2 ip={} byte=0x{x}\n", .{ self.ip - 1, byte });
+                            if (byte == @intFromEnum(Opcode.send)) {
+                                const lit_idx = self.fetchByte();
+                                const arg_count = self.fetchByte();
+                                var lit_info: []const u8 = "<?>"; 
+                                if (lit_idx < lits.len) {
+                                    const l = lits[lit_idx];
+                                    if (l.isObject()) {
+                                        const lobj = l.asObject();
+                                        if (lobj.header.class_index == Heap.CLASS_SYMBOL or lobj.header.class_index == Heap.CLASS_STRING) {
+                                            lit_info = lobj.bytes(lobj.header.size);
+                                        }
+                                    } else if (l.isSmallInt()) {
+                                        lit_info = "SmallInt";
+                                    }
+                                }
+                                std.debug.print("TRACE_SEND ip={} lit={} ({s}) args={} sp={}\n", .{ self.ip - 3, lit_idx, lit_info, arg_count, self.sp });
+                                // rewind ip to before the fetches
+                                self.ip -= 2;
+                            } else {
+                                std.debug.print("TRACE ip={} opcode=0x{x}\n", .{ self.ip - 1, byte });
+                            }
+                        }
+                    }
+                }
+            }
 
             // Handle short-form opcodes first
             if (Opcode.isPushReceiverVariable(byte)) {
@@ -125,7 +319,9 @@ pub const Interpreter = struct {
             }
             if (Opcode.isStoreReceiverVariable(byte)) {
                 const index = byte - 0x40;
+                if (DEBUG_VERBOSE) std.debug.print("DEBUG storeRecVar before idx={} ip={} sp={}\n", .{index, self.ip - 1, self.sp});
                 try self.storeReceiverVariable(index);
+                if (DEBUG_VERBOSE) std.debug.print("DEBUG storeRecVar after\n", .{});
                 continue;
             }
             if (Opcode.isStoreTemporary(byte)) {
@@ -165,16 +361,20 @@ pub const Interpreter = struct {
                     const literals = self.method.getLiterals();
                     const literal = literals[index];
 
-                    // The literal is a symbol - look it up as a global
+                    // The literal is a symbol - look it up as class variable or global
                     if (literal.isObject()) {
                         const lit_obj = literal.asObject();
                         if (lit_obj.header.class_index == Heap.CLASS_SYMBOL) {
-                            // It's a symbol - look up in globals
+                            // It's a symbol - first try class variables, then globals
                             const name_bytes = lit_obj.bytes(lit_obj.header.size);
-                            if (self.heap.getGlobal(name_bytes)) |val| {
+
+                            // Try to find as class variable in receiver's class hierarchy
+                            if (self.lookupClassVariable(name_bytes)) |val| {
+                                try self.push(val);
+                            } else if (self.heap.getGlobal(name_bytes)) |val| {
                                 try self.push(val);
                             } else {
-                                // Global not found
+                                // Not found
                                 try self.push(Value.nil);
                             }
                         } else if (lit_obj.header.class_index == Heap.CLASS_ARRAY and lit_obj.header.size == 2) {
@@ -215,12 +415,27 @@ pub const Interpreter = struct {
                 .send => {
                     const selector_index = self.fetchByte();
                     const num_args = self.fetchByte();
-                    try self.sendMessage(selector_index, num_args, false);
+                    self.sendMessage(selector_index, num_args, false) catch |err| {
+                        if (err == InterpreterError.BlockNonLocalReturn) {
+                            // Non-local return from a block - propagate it up
+                            // The result is already on the stack
+                            return err;
+                        } else {
+                            return err;
+                        }
+                    };
                 },
                 .super_send => {
                     const selector_index = self.fetchByte();
                     const num_args = self.fetchByte();
-                    try self.sendMessage(selector_index, num_args, true);
+                    self.sendMessage(selector_index, num_args, true) catch |err| {
+                        if (err == InterpreterError.BlockNonLocalReturn) {
+                            // Non-local return from a block - propagate it up
+                            return err;
+                        } else {
+                            return err;
+                        }
+                    };
                 },
 
                 // Optimized sends
@@ -235,24 +450,16 @@ pub const Interpreter = struct {
                 .send_equal => try self.sendSpecialBinary(.equal, "="),
                 .send_not_equal => try self.sendSpecialBinary(.not_equal, "~="),
                 .send_identical => try self.sendIdentical(),
+                .send_not_identical => try self.sendNotIdentical(),
                 .send_class => {
                     const recv = try self.pop();
                     const class = self.heap.classOf(recv);
                     try self.push(class);
                 },
                 .send_size => {
-                    // Try primitive first
-                    const recv = self.peek();
-                    if (recv.isObject()) {
-                        const result = primitives.executePrimitive(self, @intFromEnum(bytecodes.Primitive.size)) catch {
-                            try self.sendUnary("size");
-                            continue;
-                        };
-                        _ = try self.pop(); // Remove receiver
-                        try self.push(result);
-                    } else {
-                        try self.sendUnary("size");
-                    }
+                    // Always use method lookup for size - many classes override it
+                    // (e.g., OrderedCollection returns lastIndex - firstIndex + 1, not basicSize)
+                    try self.sendUnary("size");
                 },
 
                 // Returns
@@ -279,13 +486,32 @@ pub const Interpreter = struct {
                 },
                 .return_top => {
                     const result = try self.pop();
+                    // If we're in a primitive-controlled block AND at the block's context level,
+                    // return directly (the primitive will restore state, don't pop contexts).
+                    // If we're in a nested method call (context_ptr > primitive_block_context_base),
+                    // use normal return to pop contexts properly.
+                    if (self.primitive_block_depth > 0 and self.context_ptr == self.primitive_block_context_base) {
+                        return result;
+                    }
                     if (try self.returnFromMethod(result)) |final_result| {
                         return final_result;
                     }
                 },
                 .block_return => {
-                    // Non-local return - return from enclosing method
+                    // Non-local return - return from enclosing method's home context
                     const result = try self.pop();
+                    if (DEBUG_VERBOSE) std.debug.print("DEBUG block_return primitive_block_depth={} result_is_obj={}\n", .{ self.primitive_block_depth, result.isObject() });
+
+                    // If we're inside a primitive block execution, signal non-local return
+                    // so that the primitive can unwind properly
+                    if (self.primitive_block_depth > 0) {
+                        // Push result back so primitive can retrieve it
+                        try self.push(result);
+                        if (DEBUG_VERBOSE) std.debug.print("DEBUG block_return signaling BlockNonLocalReturn\n", .{});
+                        return InterpreterError.BlockNonLocalReturn;
+                    }
+
+                    // Otherwise, just return from the current method normally
                     if (try self.returnFromMethod(result)) |final_result| {
                         return final_result;
                     }
@@ -353,6 +579,19 @@ pub const Interpreter = struct {
                     const size_lo: u16 = self.fetchByte();
                     const bytecode_size: usize = @intCast((size_hi << 8) | size_lo);
 
+                    if (std.debug.runtime_safety) {
+                        const lits_dbg = self.method.getLiterals();
+                        if (lits_dbg.len > 0 and lits_dbg[lits_dbg.len - 1].isObject()) {
+                            const src_obj = lits_dbg[lits_dbg.len - 1].asObject();
+                            if (src_obj.header.class_index == Heap.CLASS_STRING) {
+                                const src_bytes = src_obj.bytes(src_obj.header.size);
+                                if (std.mem.indexOf(u8, src_bytes, "basicBeginsWith") != null) {
+                                    if (DEBUG_VERBOSE) std.debug.print("DEBUG push_closure in basicBeginsWith temp_base={} num_args={}\n", .{ self.temp_base, num_args });
+                                }
+                            }
+                        }
+                    }
+
                     // Create BlockClosure object
                     // Fields: outerTempBase, startPC, numArgs, method, receiver
                     const closure = self.heap.allocateObject(Heap.CLASS_BLOCK_CLOSURE, 5, .normal) catch {
@@ -360,7 +599,10 @@ pub const Interpreter = struct {
                     };
 
                     // Store: outer temp base (for outer variable access), start PC, num args, enclosing method, receiver
-                    closure.setField(0, Value.fromSmallInt(@intCast(self.temp_base)), 5); // outer temp base
+                    // Use outer_temp_base if we're inside a primitive-evaluated block, to maintain the chain
+                    // to the original method's context
+                    const captured_base = if (self.primitive_block_depth > 0) self.outer_temp_base else self.temp_base;
+                    closure.setField(0, Value.fromSmallInt(@intCast(captured_base)), 5); // outer temp base
                     closure.setField(1, Value.fromSmallInt(@intCast(self.ip)), 5); // start PC (current position in bytecodes)
                     closure.setField(2, Value.fromSmallInt(num_args), 5); // num args
                     closure.setField(3, Value.fromObject(@ptrCast(@alignCast(self.method))), 5); // enclosing method
@@ -376,23 +618,12 @@ pub const Interpreter = struct {
                     // Format: push_outer_temp <level> <index>
                     // level = 1 means immediate outer context
                     // For now we only support level=1
-                    const level = self.fetchByte();
+                    _ = self.fetchByte(); // level (unused)
                     const index = self.fetchByte();
-                    _ = level; // Currently unused - assumes level 1
 
-                    // Get the outer temp base from the current block's closure
-                    // The closure stores the temp_base of its enclosing context at field 0
-                    // For now, we use a simpler approach: calculate from the method's stack layout
-                    // The outer temporaries start at temp_base - (num_outer_temps + num_outer_args)
-                    // Since we don't track num_outer_temps, we rely on outer_temp_base stored in the closure
-
-                    // We need access to the current block closure to find outer_temp_base
-                    // For now, assume outer temps are at lower stack addresses
-                    // This is a simplified approach - proper closures need full context chain
-
-                    // For doIt expressions, outer temps are at the base of the stack
-                    // temp_base for block is set after pushing args, so outer vars are before
-                    const outer_val = self.stack[index];
+                    // Access outer temp relative to outer_temp_base
+                    // outer_temp_base points to receiver slot, temps start at outer_temp_base + 1
+                    const outer_val = self.stack[self.outer_temp_base + 1 + index];
                     try self.push(outer_val);
                 },
 
@@ -405,8 +636,9 @@ pub const Interpreter = struct {
                     // Get value but leave on stack (store doesn't pop in Smalltalk)
                     const val = self.peek();
 
-                    // Store to outer context's temporary slot
-                    self.stack[index] = val;
+                    // Store to outer context's temporary slot relative to outer_temp_base
+                    // outer_temp_base points to receiver slot, temps start at outer_temp_base + 1
+                    self.stack[self.outer_temp_base + 1 + index] = val;
                 },
 
                 .make_array => {
@@ -429,6 +661,55 @@ pub const Interpreter = struct {
                     }
 
                     try self.push(Value.fromObject(array));
+                },
+
+                .extended_store => {
+                    // Format: extended_store <type> <index>
+                    // type: 0=temp, 1=inst var, 2=class var (literal index)
+                    const store_type = self.fetchByte();
+                    const index = self.fetchByte();
+                    const val = self.peek(); // Store leaves value on stack
+
+                    switch (store_type) {
+                        0 => {
+                            // Store to temporary
+                            // temp_base points to receiver slot, temps start at temp_base + 1
+                            self.stack[self.temp_base + 1 + index] = val;
+                        },
+                        1 => {
+                            // Store to instance variable
+                            if (self.receiver.isObject()) {
+                                const recv_obj = self.receiver.asObject();
+                                const class = self.heap.classOf(self.receiver);
+                                var inst_size: usize = 0;
+                                if (class.isObject()) {
+                                    const format_val = class.asObject().getField(Heap.CLASS_FIELD_FORMAT, Heap.CLASS_NUM_FIELDS);
+                                    if (format_val.isSmallInt()) {
+                                        // Extract inst var count from format (low byte)
+                                        inst_size = @intCast(format_val.asSmallInt() & 0xFF);
+                                    }
+                                }
+                                recv_obj.setField(index, val, inst_size);
+                            }
+                        },
+                        2 => {
+                            // Store to class variable - index is literal index containing name
+                            const literals = self.method.getLiterals();
+                            const literal = literals[index];
+                            if (literal.isObject()) {
+                                const lit_obj = literal.asObject();
+                                if (lit_obj.header.class_index == Heap.CLASS_SYMBOL) {
+                                    const name_bytes = lit_obj.bytes(lit_obj.header.size);
+                                    // Try class variables first, then globals
+                                    if (!self.storeClassVariable(name_bytes, val)) {
+                                        // Not found in class variables, store as global
+                                        self.heap.setGlobal(name_bytes, val);
+                                    }
+                                }
+                            }
+                        },
+                        else => {},
+                    }
                 },
 
                 else => return InterpreterError.InvalidBytecode,
@@ -463,6 +744,20 @@ pub const Interpreter = struct {
         return self.stack[self.sp - 1 - n];
     }
 
+    pub fn currentMethodSource(self: *Interpreter) []const u8 {
+        const lits = self.method.getLiterals();
+        if (lits.len > 0) {
+            const last = lits[lits.len - 1];
+            if (last.isObject()) {
+                const obj = last.asObject();
+                if (obj.header.class_index == Heap.CLASS_STRING) {
+                    return obj.bytes(obj.header.size);
+                }
+            }
+        }
+        return "<?>"; // Unknown
+    }
+
     fn fetchByte(self: *Interpreter) u8 {
         const bytecodes_slice = self.method.getBytecodes();
         if (self.ip >= bytecodes_slice.len) return 0;
@@ -480,16 +775,63 @@ pub const Interpreter = struct {
     fn pushReceiverVariable(self: *Interpreter, index: u8) InterpreterError!void {
         if (self.receiver.isObject()) {
             const obj = self.receiver.asObject();
-            // Get number of fields from class - for now assume reasonable max
-            const val = obj.getField(index, 16);
-            try self.push(val);
+            // Get number of fields from class format
+            var num_fields: usize = 16; // Default fallback
+            const class = self.heap.classOf(self.receiver);
+            if (class.isObject()) {
+                const format_val = class.asObject().getField(Heap.CLASS_FIELD_FORMAT, Heap.CLASS_NUM_FIELDS);
+                if (format_val.isSmallInt()) {
+                    const spec = Heap.decodeInstanceSpec(format_val.asSmallInt());
+                    num_fields = spec.inst_size;
+                    if (num_fields == 0) num_fields = obj.header.size; // fallback to actual object size
+                }
+            }
+            // Debug: trace some receiver variable accesses on class objects
+            if (DEBUG_VERBOSE and obj.header.class_index == Heap.CLASS_CLASS and debug_receiver_idx2_count < 20) {
+                debug_receiver_idx2_count += 1;
+                var name_buf: []const u8 = "<?>"; // Default if lookup fails
+                if (num_fields > Heap.CLASS_FIELD_NAME) {
+                    const name_val = obj.getField(Heap.CLASS_FIELD_NAME, num_fields);
+                    if (name_val.isObject()) {
+                        const name_obj = name_val.asObject();
+                        if (name_obj.header.class_index == Heap.CLASS_SYMBOL) {
+                            name_buf = name_obj.bytes(name_obj.header.size);
+                        }
+                    }
+                }
+                std.debug.print("DEBUG pushRecVar idx={}, recv name={s}, obj.class_idx={}, num_fields={}, class.class_idx={}\n", .{
+                    index,
+                    name_buf,
+                    obj.header.class_index,
+                    num_fields,
+                    if (class.isObject()) class.asObject().header.class_index else 0xFFFF_FFFF,
+                });
+                const val_dbg = if (index < num_fields) obj.getField(index, num_fields) else Value.nil;
+                std.debug.print("  field[{}] type=", .{index});
+                if (val_dbg.isSmallInt()) {
+                    std.debug.print("SmallInt({})\n", .{val_dbg.asSmallInt()});
+                } else if (val_dbg.isObject()) {
+                    std.debug.print("Object(class_idx={})\n", .{val_dbg.asObject().header.class_index});
+                } else if (val_dbg.isNil()) {
+                    std.debug.print("nil\n", .{});
+                } else {
+                    std.debug.print("other\n", .{});
+                }
+            }
+            if (index < num_fields) {
+                const val = obj.getField(index, num_fields);
+                try self.push(val);
+            } else {
+                try self.push(Value.nil);
+            }
         } else {
             try self.push(Value.nil);
         }
     }
 
     fn pushTemporary(self: *Interpreter, index: u8) InterpreterError!void {
-        const stack_index = self.temp_base + index;
+        // temp_base points to receiver slot, temps start at temp_base + 1
+        const stack_index = self.temp_base + 1 + index;
         if (stack_index < self.sp) {
             try self.push(self.stack[stack_index]);
         } else {
@@ -501,13 +843,27 @@ pub const Interpreter = struct {
         const val = self.peek();
         if (self.receiver.isObject()) {
             const obj = self.receiver.asObject();
-            obj.setField(index, val, 16);
+            // Get number of fields from class format
+            var num_fields: usize = 16; // Default
+            const class = self.heap.classOf(self.receiver);
+            if (class.isObject()) {
+                const format_val = class.asObject().getField(Heap.CLASS_FIELD_FORMAT, Heap.CLASS_NUM_FIELDS);
+                if (format_val.isSmallInt()) {
+                    const spec = Heap.decodeInstanceSpec(format_val.asSmallInt());
+                    num_fields = spec.inst_size;
+                    if (num_fields == 0) num_fields = obj.header.size;
+                }
+            }
+            if (index < num_fields) {
+                obj.setField(index, val, num_fields);
+            }
         }
     }
 
     fn storeTemporary(self: *Interpreter, index: u8) InterpreterError!void {
         const val = self.peek();
-        const stack_index = self.temp_base + index;
+        // temp_base points to receiver slot, temps start at temp_base + 1
+        const stack_index = self.temp_base + 1 + index;
         if (stack_index < self.sp) {
             self.stack[stack_index] = val;
         }
@@ -517,7 +873,18 @@ pub const Interpreter = struct {
         // Get selector from literals
         const literals = self.method.getLiterals();
         const selector = literals[selector_index];
-
+        var selector_name: []const u8 = "<?>"; 
+        if (selector.isObject()) { 
+            const sel_obj = selector.asObject(); 
+            if (sel_obj.header.class_index == Heap.CLASS_SYMBOL) { 
+                selector_name = sel_obj.bytes(sel_obj.header.size); 
+            } 
+        } else if (selector.isSmallInt()) {
+            if (DEBUG_VERBOSE) std.debug.print("DEBUG sendMessage selector smallInt={} literal index={}\n", .{selector.asSmallInt(), selector_index});
+        } else {
+            if (DEBUG_VERBOSE) std.debug.print("DEBUG sendMessage selector non-object bits=0x{x} literal index={}\n", .{selector.bits, selector_index});
+        }
+        self.last_send_selector = selector_name;
         // Pop args and receiver
         var args: [16]Value = undefined;
         var i: usize = num_args;
@@ -527,16 +894,179 @@ pub const Interpreter = struct {
         }
         const recv = try self.pop();
 
+        // Fast-path: update class instanceSpec flags directly for setSpecialBehavior:to:
+        if (selector.isObject()) {
+            const sel_obj = selector.asObject();
+            if (sel_obj.header.class_index == Heap.CLASS_SYMBOL) {
+                const sel_name = sel_obj.bytes(sel_obj.header.size);
+
+                // Fast-path boolean conditionals to avoid Dolphin methods overwriting primitives
+                if (std.mem.eql(u8, sel_name, "ifTrue:ifFalse:") and num_args == 2 and (recv.isTrue() or recv.isFalse())) {
+                    const chosen_block = if (recv.isTrue()) args[0] else args[1];
+                    try self.push(chosen_block);
+                    const res = primitives.primBlockValue(self) catch |err| {
+                        return err;
+                    };
+                    try self.push(res);
+                    return;
+                }
+
+                if (std.mem.eql(u8, sel_name, "ifFalse:ifTrue:") and num_args == 2 and (recv.isTrue() or recv.isFalse())) {
+                    const chosen_block = if (recv.isFalse()) args[0] else args[1];
+                    try self.push(chosen_block);
+                    const res = primitives.primBlockValue(self) catch |err| {
+                        return err;
+                    };
+                    try self.push(res);
+                    return;
+                }
+
+                if (std.mem.eql(u8, sel_name, "ifTrue:") and num_args == 1 and (recv.isTrue() or recv.isFalse())) {
+                    if (recv.isTrue()) {
+                        try self.push(args[0]);
+                        const res = primitives.primBlockValue(self) catch |err| {
+                            return err;
+                        };
+                        try self.push(res);
+                    } else {
+                        try self.push(Value.nil);
+                    }
+                    return;
+                }
+
+                if (std.mem.eql(u8, sel_name, "ifFalse:") and num_args == 1 and (recv.isTrue() or recv.isFalse())) {
+                    if (recv.isFalse()) {
+                        try self.push(args[0]);
+                        const res = primitives.primBlockValue(self) catch |err| {
+                            return err;
+                        };
+                        try self.push(res);
+                    } else {
+                        try self.push(Value.nil);
+                    }
+                    return;
+                }
+
+                // Fast-path: Behavior>>allSubclasses without needing closure captures
+                if (std.mem.eql(u8, sel_name, "allSubclasses") and recv.isObject() and num_args == 0) {
+                    const recv_obj = recv.asObject();
+
+                    var stack_list = std.ArrayListUnmanaged(*object.Object){};
+                    defer stack_list.deinit(std.heap.page_allocator);
+                    var result_list = std.ArrayListUnmanaged(Value){};
+                    defer result_list.deinit(std.heap.page_allocator);
+
+                    try stack_list.append(std.heap.page_allocator, recv_obj);
+                    while (stack_list.items.len > 0) {
+                        const cls = stack_list.items[stack_list.items.len - 1];
+                        stack_list.items.len -= 1;
+
+                        for (self.heap.class_table.items) |candidate| {
+                            if (!candidate.isObject()) continue;
+                            const cand_obj = candidate.asObject();
+                            const super_val = cand_obj.getField(Heap.CLASS_FIELD_SUPERCLASS, cand_obj.header.size);
+                            if (super_val.eql(Value.fromObject(cls))) {
+                                try result_list.append(std.heap.page_allocator, candidate);
+                                try stack_list.append(std.heap.page_allocator, cand_obj);
+                            }
+                        }
+                    }
+
+                    const arr_val = try self.heap.allocateArray(result_list.items.len);
+                    const arr_obj = arr_val.asObject();
+                    const fields = arr_obj.fields(result_list.items.len);
+                    for (result_list.items, 0..) |v, fi| {
+                        fields[fi] = v;
+                    }
+                    try self.push(arr_val);
+                    return;
+                }
+
+                // ProtocolSpec protocol builder expressions - treat as no-ops
+                if (std.mem.startsWith(u8, sel_name, "newProtocolNamed:conformsToProtocolNames:") or
+                    std.mem.startsWith(u8, sel_name, "newMessagePattern:forProtocolNamed:") or
+                    std.mem.eql(u8, sel_name, "protocolDescription:"))
+                {
+                    try self.push(Value.nil);
+                    return;
+                }
+                if (std.mem.eql(u8, sel_name, "setSpecialBehavior:to:") and recv.isObject() and num_args == 2) {
+                    const mask_val = args[0];
+                    const bool_val = args[1];
+                    if (DEBUG_VERBOSE) std.debug.print("DEBUG fastpath setSpecialBehavior args: mask smallInt?={} bool true?={} false?={}\n", .{ mask_val.isSmallInt(), bool_val.isTrue(), bool_val.isFalse() });
+
+                    var mask: i61 = Heap.INSTSPEC_NULLTERM_MASK; // default to NullTerm mask if we can't parse
+                    if (mask_val.isSmallInt()) {
+                        mask = mask_val.asSmallInt();
+                    }
+
+                    const recv_obj = recv.asObject();
+                    const current = recv_obj.getField(Heap.CLASS_FIELD_FORMAT, recv_obj.header.size);
+                    if (current.isSmallInt()) {
+                        var new_spec = current.asSmallInt();
+                        if (bool_val.isTrue()) {
+                            new_spec |= mask;
+                        } else if (bool_val.isFalse()) {
+                            new_spec &= ~mask;
+                        }
+                        recv_obj.setField(Heap.CLASS_FIELD_FORMAT, Value.fromSmallInt(new_spec), recv_obj.header.size);
+                        try self.push(Value.fromSmallInt(new_spec));
+                        return;
+                    }
+                    // If we can't handle, fall through to normal send
+                }
+            }
+        }
+
+        if (debug_send_special_count < 12 and selector.isObject()) {
+            const sel_obj = selector.asObject();
+            if (sel_obj.header.class_index == Heap.CLASS_SYMBOL) {
+                const sel_name = sel_obj.bytes(sel_obj.header.size);
+                if (std.mem.eql(u8, sel_name, "isBytes") or std.mem.eql(u8, sel_name, "setSpecialBehavior:to:") or std.mem.eql(u8, sel_name, "isPointers")) {
+                    debug_send_special_count += 1;
+                    var recv_name: []const u8 = "<?>"; // default if lookup fails
+                    if (recv.isObject()) {
+                        const recv_obj = recv.asObject();
+                        const nf = recv_obj.header.size;
+                        if (nf > Heap.CLASS_FIELD_NAME) {
+                            const name_val = recv_obj.getField(Heap.CLASS_FIELD_NAME, nf);
+                            if (name_val.isObject() and name_val.asObject().header.class_index == Heap.CLASS_SYMBOL) {
+                                recv_name = name_val.asObject().bytes(name_val.asObject().header.size);
+                            }
+                        }
+                    }
+                    if (DEBUG_VERBOSE) std.debug.print("DEBUG send {s} recv={s} num_args={d}\n", .{ sel_name, recv_name, num_args });
+                    if (std.mem.eql(u8, sel_name, "setSpecialBehavior:to:") and recv.isObject()) {
+                        const obj = recv.asObject();
+                        const class_of = self.heap.classOf(recv);
+                        if (class_of.isObject()) {
+                            const spec_val = class_of.asObject().getField(Heap.CLASS_FIELD_FORMAT, Heap.CLASS_NUM_FIELDS);
+                            if (spec_val.isSmallInt()) {
+                                const info = Heap.decodeInstanceSpec(spec_val.asSmallInt());
+                                std.debug.print("  (meta spec) size={}, pointers={}, variable={}\n", .{ info.inst_size, info.is_pointers, info.is_variable });
+                            }
+                        }
+                        const spec_val2 = obj.getField(Heap.CLASS_FIELD_FORMAT, obj.header.size);
+                        if (spec_val2.isSmallInt()) {
+                            const info2 = Heap.decodeInstanceSpec(spec_val2.asSmallInt());
+                            std.debug.print("  (recv spec) size={}, pointers={}, variable={}, raw={}\n", .{ info2.inst_size, info2.is_pointers, info2.is_variable, spec_val2.asSmallInt() });
+                        }
+                    }
+                }
+            }
+        }
+
         // Get the class to start lookup from
-        const class = if (is_super)
-            self.getSuperclass(self.heap.classOf(self.receiver))
+        const receiver_class = self.heap.classOf(self.receiver);
+        const super_lookup_class = if (!self.method_class.isNil()) self.method_class else receiver_class;
+        const start_class = if (is_super)
+            self.getSuperclass(super_lookup_class)
         else
             self.heap.classOf(recv);
-
         // Look up method in class hierarchy
-        const method_opt = self.lookupMethod(class, selector);
-
-        if (method_opt) |found_method| {
+        if (self.lookupMethodWithHolder(start_class, selector)) |method_lookup| {
+            const found_method = method_lookup.method;
+            const method_holder = method_lookup.holder;
             // Execute the found method
             if (found_method.header.primitive_index != 0) {
                 // Push receiver and args back for primitive
@@ -547,7 +1077,25 @@ pub const Interpreter = struct {
                 if (primitives.executePrimitive(self, found_method.header.primitive_index)) |result| {
                     try self.push(result);
                     return;
-                } else |_| {
+                } else |err| {
+                    // ContinueExecution means primitive set up new context - just return to continue main loop
+                    if (err == InterpreterError.ContinueExecution) {
+                        return;
+                    }
+                    // Check if this is a fatal error that should propagate
+                    if (err == InterpreterError.MessageNotUnderstood) {
+                        if (std.mem.eql(u8, self.last_mnu_selector, "<?>")) {
+                            self.last_mnu_selector = selector_name;
+                            self.last_mnu_receiver = recv;
+                            self.last_mnu_method = self.currentMethodSource();
+                        }
+                        if (DEBUG_VERBOSE) std.debug.print("DEBUG primitive MNU selector={s}\n", .{selector_name});
+                        return err;
+                    }
+                    // Propagate block non-local returns up the call chain
+                    if (err == InterpreterError.BlockNonLocalReturn) {
+                        return err;
+                    }
                     // Primitive failed, fall through to execute bytecode
                     // Pop the args and receiver we just pushed
                     var j: usize = 0;
@@ -560,31 +1108,51 @@ pub const Interpreter = struct {
             // Execute the method bytecode
             // Save current context
             if (self.context_ptr >= self.contexts.len - 1) {
+            if (DEBUG_STACK) {
+                std.debug.print("STACK OVERFLOW at context_ptr={} method={s}\n", .{self.context_ptr, self.currentMethodSource()});
+            }
                 return InterpreterError.StackOverflow;
             }
 
-            self.contexts[self.context_ptr] = .{
-                .method = self.method,
-                .ip = self.ip,
-                .receiver = self.receiver,
-                .temp_base = self.temp_base,
-                .num_args = 0, // We don't track this for the current context
-                .num_temps = 0,
-                .outer_context = null,
-                .closure = null,
-            };
+            // Debug: show which method is being saved
+            var method_name: []const u8 = "<no source>";
+            if (self.method.header.flags.has_source) {
+                const lits_dbg = self.method.getLiterals();
+                if (lits_dbg.len > 0 and lits_dbg[lits_dbg.len - 1].isObject()) {
+                    const src_obj = lits_dbg[lits_dbg.len - 1].asObject();
+                    if (src_obj.header.class_index == Heap.CLASS_STRING) {
+                        const src_bytes = src_obj.bytes(src_obj.header.size);
+                        method_name = src_bytes[0..@min(src_bytes.len, 20)];
+                    }
+                }
+            }
+            if (DEBUG_VERBOSE) std.debug.print("DEBUG push context ip={} ctx_ptr={} method={s}\n", .{self.ip, self.context_ptr, method_name});
+                self.contexts[self.context_ptr] = .{
+                    .method = self.method,
+                    .method_class = self.method_class,
+                    .ip = self.ip,
+                    .receiver = self.receiver,
+                    .temp_base = self.temp_base,
+                    .outer_temp_base = self.outer_temp_base,
+                    .num_args = 0, // We don't track this for the current context
+                    .num_temps = 0,
+                    .outer_context = null,
+                    .closure = null,
+                };
             self.context_ptr += 1;
 
             // Set up new context for the called method
             self.method = found_method;
+            self.method_class = method_holder;
             self.ip = 0;
             self.receiver = recv;
             self.temp_base = self.sp;
+            self.outer_temp_base = self.temp_base;
 
-            // Push receiver
+            // Push receiver (at temp_base, but NOT accessible as temp - receiver is accessed via self.receiver)
             try self.push(recv);
 
-            // Push arguments
+            // Push arguments (these are temps 0, 1, 2, ...)
             for (args[0..num_args]) |arg| {
                 try self.push(arg);
             }
@@ -597,30 +1165,175 @@ pub const Interpreter = struct {
                 try self.push(Value.nil);
             }
         } else {
-            // Method not found - should send doesNotUnderstand:
-            // For now, push nil
-            try self.push(Value.nil);
+            // Method not found - try to send doesNotUnderstand:
+            var sel_name_dbg: []const u8 = "<?>";
+            if (selector.isObject()) {
+                const sel_obj = selector.asObject();
+                if (sel_obj.header.class_index == Heap.CLASS_SYMBOL) {
+                    sel_name_dbg = sel_obj.bytes(sel_obj.header.size);
+                }
+            }
+            var class_name_dbg: []const u8 = "<unknown>";
+            if (start_class.isObject()) {
+                const cls_obj = start_class.asObject();
+                const name_val = cls_obj.getField(Heap.CLASS_FIELD_NAME, Heap.CLASS_NUM_FIELDS);
+                if (name_val.isObject() and name_val.asObject().header.class_index == Heap.CLASS_SYMBOL) {
+                    class_name_dbg = name_val.asObject().bytes(name_val.asObject().header.size);
+                }
+            }
+            self.last_mnu_selector = sel_name_dbg;
+            self.last_mnu_receiver = recv;
+            self.last_mnu_method = self.currentMethodSource();
+            if (DEBUG_VERBOSE) std.debug.print("DEBUG lookup miss selector={s} class={s}\n", .{sel_name_dbg, class_name_dbg});
+            // Create a Message object to pass to doesNotUnderstand:
+            const dnu_selector = self.heap.internSymbol("doesNotUnderstand:") catch {
+                return InterpreterError.MessageNotUnderstood;
+            };
+
+            // Only try DNU if we're not already handling DNU (avoid infinite recursion)
+            if (selector.eql(dnu_selector)) {
+                return InterpreterError.MessageNotUnderstood;
+            }
+
+            // Look up doesNotUnderstand: in the class hierarchy
+            const dnu_method = self.lookupMethod(start_class, dnu_selector);
+            if (dnu_method) |found_dnu| {
+                // Create a Message object
+                const message = self.heap.allocateObject(Heap.CLASS_MESSAGE, 3, .normal) catch {
+                    return InterpreterError.OutOfMemory;
+                };
+                // Message has: selector, arguments, lookupClass
+                message.setField(0, selector, 3); // selector
+                // Create arguments array
+                const args_array = self.heap.allocateObject(Heap.CLASS_ARRAY, num_args, .variable) catch {
+                    return InterpreterError.OutOfMemory;
+                };
+                var j: usize = 0;
+                while (j < num_args) : (j += 1) {
+                    args_array.setField(j, args[j], num_args);
+                }
+                message.setField(1, Value.fromObject(args_array), 3); // arguments
+                message.setField(2, start_class, 3); // lookupClass
+
+                // If doesNotUnderstand: is a primitive, execute it directly
+                if (found_dnu.header.primitive_index != 0) {
+                    try self.push(recv);
+                    try self.push(Value.fromObject(message));
+                    if (primitives.executePrimitive(self, found_dnu.header.primitive_index)) |result| {
+                        try self.push(result);
+                        return;
+                    } else |err| {
+                        return err; // Propagate all errors from DNU primitive
+                    }
+                }
+
+                // Call doesNotUnderstand: with the Message (non-primitive case)
+                // Save context
+                if (self.context_ptr >= self.contexts.len - 1) {
+                    return InterpreterError.StackOverflow;
+                }
+
+                self.contexts[self.context_ptr] = .{
+                    .method = self.method,
+                    .method_class = self.method_class,
+                    .ip = self.ip,
+                    .receiver = self.receiver,
+                    .temp_base = self.temp_base,
+                    .outer_temp_base = self.outer_temp_base,
+                    .num_args = 0,
+                    .num_temps = 0,
+                    .outer_context = null,
+                    .closure = null,
+                };
+                self.context_ptr += 1;
+
+                self.method = found_dnu;
+                self.ip = 0;
+                self.receiver = recv;
+                self.temp_base = self.sp;
+                self.outer_temp_base = self.temp_base;
+
+                // Push receiver and message argument
+                try self.push(recv);
+                try self.push(Value.fromObject(message));
+
+                // Allocate temps
+                const total_temps = found_dnu.header.num_temps;
+                const local_temps = if (total_temps > 1) total_temps - 1 else 0;
+                var k: usize = 0;
+                while (k < local_temps) : (k += 1) {
+                    try self.push(Value.nil);
+                }
+            } else {
+                // No doesNotUnderstand: method - raise error
+                var sel_name: []const u8 = "<?>"; 
+                if (selector.isObject()) { 
+                    const sel_obj = selector.asObject(); 
+                    if (sel_obj.header.class_index == Heap.CLASS_SYMBOL) { 
+                        sel_name = sel_obj.bytes(sel_obj.header.size); 
+                    } else {
+                        if (DEBUG_VERBOSE) std.debug.print("DEBUG MNU selector class_idx={}\n", .{sel_obj.header.class_index});
+                    } 
+                }
+                var recv_name: []const u8 = "<?>"; 
+                if (recv.isObject()) { 
+                    const recv_obj = recv.asObject(); 
+                    const name_val = recv_obj.getField(Heap.CLASS_FIELD_NAME, recv_obj.header.size); 
+                    if (name_val.isObject() and name_val.asObject().header.class_index == Heap.CLASS_SYMBOL) { 
+                        recv_name = name_val.asObject().bytes(name_val.asObject().header.size); 
+                    } 
+                }
+                if (selector.isSmallInt()) {
+                    if (DEBUG_VERBOSE) std.debug.print("DEBUG MNU selector smallInt={}\n", .{selector.asSmallInt()});
+                } else if (!selector.isObject()) {
+                    if (DEBUG_VERBOSE) std.debug.print("DEBUG MNU selector raw bits=0x{x}\n", .{selector.bits});
+                }
+                self.last_mnu_selector = sel_name;
+                self.last_mnu_method = self.currentMethodSource();
+                if (std.debug.runtime_safety) {
+                    // Help diagnose missing doesNotUnderstand: definitions by showing the lookup chain.
+                    var c = start_class;
+                    while (c.isObject()) {
+                        const c_obj = c.asObject();
+                        const name_val = c_obj.getField(Heap.CLASS_FIELD_NAME, Heap.CLASS_NUM_FIELDS);
+                        if (name_val.isObject() and name_val.asObject().header.class_index == Heap.CLASS_SYMBOL) {
+                            const nm = name_val.asObject().bytes(name_val.asObject().header.size);
+                            std.debug.print("  DNU lookup chain class={s}\n", .{nm});
+                        }
+                        c = c_obj.getField(Heap.CLASS_FIELD_SUPERCLASS, Heap.CLASS_NUM_FIELDS);
+                    }
+                }
+                if (DEBUG_VERBOSE) std.debug.print("DEBUG MessageNotUnderstood recv={s} selector={s}\n", .{ recv_name, sel_name }); 
+                return InterpreterError.MessageNotUnderstood;
+            }
         }
     }
 
     /// Return from a method, restoring the previous context.
     /// Returns the final value if this was the outermost call, or null to continue execution.
     fn returnFromMethod(self: *Interpreter, result: Value) InterpreterError!?Value {
-        // Pop the current activation's stack frame
-        self.sp = self.temp_base;
-
+        if (DEBUG_VERBOSE) std.debug.print("DEBUG returnFromMethod ctx_ptr={} result_is_obj={}\n", .{self.context_ptr, result.isObject()});
         if (self.context_ptr == 0) {
             // No more contexts - this is the final return
+            // Don't reset sp here - let the caller handle cleanup
+            // This is important for block returns where the primitive will restore state
+            if (DEBUG_VERBOSE) std.debug.print("DEBUG returnFromMethod final return\n", .{});
             return result;
         }
+
+        // Pop the current activation's stack frame
+        self.sp = self.temp_base;
 
         // Restore previous context
         self.context_ptr -= 1;
         const ctx = self.contexts[self.context_ptr];
+        if (DEBUG_VERBOSE) std.debug.print("DEBUG returnFromMethod restoring ip={}\n", .{ctx.ip});
         self.method = ctx.method;
+        self.method_class = ctx.method_class;
         self.ip = ctx.ip;
         self.receiver = ctx.receiver;
         self.temp_base = ctx.temp_base;
+        self.outer_temp_base = ctx.outer_temp_base;
 
         // Push the return value onto the caller's stack
         try self.push(result);
@@ -636,13 +1349,13 @@ pub const Interpreter = struct {
         return Value.nil;
     }
 
-    fn lookupMethod(self: *Interpreter, start_class: Value, selector: Value) ?*CompiledMethod {
+    pub fn lookupMethod(self: *Interpreter, start_class: Value, selector: Value) ?*CompiledMethod {
         var class = start_class;
 
         // Walk up the superclass chain
         while (!class.isNil()) {
-            if (class.isObject()) {
-                const class_obj = class.asObject();
+            if (start_class.isObject()) {
+                const class_obj = start_class.asObject();
 
                 // Get method dictionary
                 const method_dict = class_obj.getField(Heap.CLASS_FIELD_METHOD_DICT, Heap.CLASS_NUM_FIELDS);
@@ -655,6 +1368,35 @@ pub const Interpreter = struct {
                 }
 
                 // Move to superclass
+                class = class_obj.getField(Heap.CLASS_FIELD_SUPERCLASS, Heap.CLASS_NUM_FIELDS);
+            } else {
+                break;
+            }
+        }
+
+        return null;
+    }
+
+    const MethodLookup = struct {
+        method: *CompiledMethod,
+        holder: Value,
+    };
+
+    fn lookupMethodWithHolder(self: *Interpreter, start_class: Value, selector: Value) ?MethodLookup {
+        var class = start_class;
+
+        while (!class.isNil()) {
+            if (class.isObject()) {
+                const class_obj = class.asObject();
+                const method_dict = class_obj.getField(Heap.CLASS_FIELD_METHOD_DICT, Heap.CLASS_NUM_FIELDS);
+                if (method_dict.isObject()) {
+                    if (self.lookupInMethodDict(method_dict, selector)) |method| {
+                        return MethodLookup{
+                            .method = method,
+                            .holder = class,
+                        };
+                    }
+                }
                 class = class_obj.getField(Heap.CLASS_FIELD_SUPERCLASS, Heap.CLASS_NUM_FIELDS);
             } else {
                 break;
@@ -677,22 +1419,158 @@ pub const Interpreter = struct {
 
         if (dict_size == 0) return null;
 
+        // Scan entire dictionary - don't break on nil because bootstrap may use sparse dictionaries
+        // and file-in may add methods to empty slots in the middle
         var i: usize = 0;
         while (i + 1 < dict_size) : (i += 2) {
             const key = dict_obj.getField(i, dict_size);
-            if (key.isNil()) break; // End of entries
 
-            // Compare selectors
-            if (key.eql(selector)) {
-                const method_val = dict_obj.getField(i + 1, dict_size);
-                if (method_val.isObject()) {
-                    // The method value points to a CompiledMethod
-                    return @ptrCast(@alignCast(method_val.asObject()));
+            // Compare selectors (skip nil entries)
+            if (!key.isNil()) {
+                var match = key.eql(selector);
+                // Symbols created during different file-in passes may be distinct objects;
+                // fall back to name comparison when both are symbols.
+                if (!match and key.isObject() and selector.isObject()) {
+                    const key_obj = key.asObject();
+                    const sel_obj = selector.asObject();
+                    if (key_obj.header.class_index == Heap.CLASS_SYMBOL and sel_obj.header.class_index == Heap.CLASS_SYMBOL) {
+                        const k_bytes = key_obj.bytes(key_obj.header.size);
+                        const s_bytes = sel_obj.bytes(sel_obj.header.size);
+                        match = std.mem.eql(u8, k_bytes, s_bytes);
+                    }
+                }
+
+                if (match) {
+                    const method_val = dict_obj.getField(i + 1, dict_size);
+                    if (method_val.isObject()) {
+                        // The method value points to a CompiledMethod
+                        return @ptrCast(@alignCast(method_val.asObject()));
+                    }
                 }
             }
         }
 
         return null;
+    }
+
+    /// Look up a class variable by name in the receiver's class hierarchy
+    fn lookupClassVariable(self: *Interpreter, name: []const u8) ?Value {
+        // Get the class to search for class variables
+        // If the receiver is a class (i.e., its class is a metaclass), we need to
+        // search the receiver's class hierarchy, not its metaclass hierarchy.
+        var class = self.heap.classOf(self.receiver);
+
+        // Check if the receiver's class is a metaclass by looking for thisClass field
+        // A metaclass has METACLASS_NUM_FIELDS (10) and thisClass at index 9
+        if (class.isObject()) {
+            const class_of_receiver = class.asObject();
+            if (class_of_receiver.header.size >= Heap.METACLASS_NUM_FIELDS) {
+                // This might be a metaclass - check if thisClass points back to receiver
+                const this_class = class_of_receiver.getField(Heap.METACLASS_FIELD_THIS_CLASS, Heap.METACLASS_NUM_FIELDS);
+                if (this_class.isObject() and self.receiver.isObject() and
+                    this_class.asObject() == self.receiver.asObject())
+                {
+                    // The receiver IS a class - search class variables on it directly
+                    class = self.receiver;
+                }
+            }
+        }
+
+        // Walk up the superclass chain looking for the class variable
+        while (!class.isNil() and class.isObject()) {
+            const class_obj = class.asObject();
+
+            // Get class variables dictionary from this class
+            const class_vars = class_obj.getField(Heap.CLASS_FIELD_CLASS_VARS, Heap.CLASS_NUM_FIELDS);
+
+            if (class_vars.isObject()) {
+                const vars_obj = class_vars.asObject();
+                const vars_size = vars_obj.header.size;
+
+                // Search for the name in the [name, value] pairs
+                var i: usize = 0;
+                while (i + 1 < vars_size) : (i += 2) {
+                    const key = vars_obj.getField(i, vars_size);
+                    if (key.isNil()) break;
+
+                    // Compare symbol names
+                    if (key.isObject()) {
+                        const key_obj = key.asObject();
+                        if (key_obj.header.class_index == Heap.CLASS_SYMBOL) {
+                            const key_bytes = key_obj.bytes(key_obj.header.size);
+                            if (std.mem.eql(u8, key_bytes, name)) {
+                                return vars_obj.getField(i + 1, vars_size);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Move to superclass
+            class = class_obj.getField(Heap.CLASS_FIELD_SUPERCLASS, Heap.CLASS_NUM_FIELDS);
+        }
+
+        return null;
+    }
+
+    /// Store a value to a class variable by name in the receiver's class hierarchy
+    fn storeClassVariable(self: *Interpreter, name: []const u8, value: Value) bool {
+        // Get the class to search for class variables
+        // If the receiver is a class (i.e., its class is a metaclass), we need to
+        // search the receiver's class hierarchy, not its metaclass hierarchy.
+        var class = self.heap.classOf(self.receiver);
+
+        // Check if the receiver's class is a metaclass by looking for thisClass field
+        if (class.isObject()) {
+            const class_of_receiver = class.asObject();
+            if (class_of_receiver.header.size >= Heap.METACLASS_NUM_FIELDS) {
+                const this_class = class_of_receiver.getField(Heap.METACLASS_FIELD_THIS_CLASS, Heap.METACLASS_NUM_FIELDS);
+                if (this_class.isObject() and self.receiver.isObject() and
+                    this_class.asObject() == self.receiver.asObject())
+                {
+                    // The receiver IS a class - search class variables on it directly
+                    class = self.receiver;
+                }
+            }
+        }
+
+        // Walk up the superclass chain looking for the class variable
+        while (!class.isNil() and class.isObject()) {
+            const class_obj = class.asObject();
+
+            // Get class variables dictionary from this class
+            const class_vars = class_obj.getField(Heap.CLASS_FIELD_CLASS_VARS, Heap.CLASS_NUM_FIELDS);
+
+            if (class_vars.isObject()) {
+                const vars_obj = class_vars.asObject();
+                const vars_size = vars_obj.header.size;
+
+                // Search for the name in the [name, value] pairs
+                var i: usize = 0;
+                while (i + 1 < vars_size) : (i += 2) {
+                    const key = vars_obj.getField(i, vars_size);
+                    if (key.isNil()) break;
+
+                    // Compare symbol names
+                    if (key.isObject()) {
+                        const key_obj = key.asObject();
+                        if (key_obj.header.class_index == Heap.CLASS_SYMBOL) {
+                            const key_bytes = key_obj.bytes(key_obj.header.size);
+                            if (std.mem.eql(u8, key_bytes, name)) {
+                                // Found it - store the new value
+                                vars_obj.setField(i + 1, value, vars_size);
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Move to superclass
+            class = class_obj.getField(Heap.CLASS_FIELD_SUPERCLASS, Heap.CLASS_NUM_FIELDS);
+        }
+
+        return false;
     }
 
     fn sendSpecialBinary(self: *Interpreter, prim: bytecodes.Primitive, selector: []const u8) InterpreterError!void {
@@ -741,9 +1619,11 @@ pub const Interpreter = struct {
 
                 self.contexts[self.context_ptr] = .{
                     .method = self.method,
+                    .method_class = self.method_class,
                     .ip = self.ip,
                     .receiver = self.receiver,
                     .temp_base = self.temp_base,
+                    .outer_temp_base = self.outer_temp_base,
                     .num_args = 0,
                     .num_temps = 0,
                     .outer_context = null,
@@ -755,6 +1635,7 @@ pub const Interpreter = struct {
                 self.ip = 0;
                 self.receiver = recv;
                 self.temp_base = self.sp;
+                self.outer_temp_base = self.temp_base;
 
                 // Push receiver and argument
                 try self.push(recv);
@@ -771,7 +1652,60 @@ pub const Interpreter = struct {
             }
 
             // No method found
-            try self.push(Value.nil);
+            self.last_mnu_selector = selector;
+            self.last_mnu_receiver = recv;
+            self.last_mnu_method = self.currentMethodSource();
+            const recv_class = self.heap.classOf(recv);
+            var recv_name: []const u8 = "<?>";
+            if (recv_class.isObject()) {
+                const name_val = recv_class.asObject().getField(Heap.CLASS_FIELD_NAME, Heap.CLASS_NUM_FIELDS);
+                if (name_val.isObject() and name_val.asObject().header.class_index == Heap.CLASS_SYMBOL) {
+                    recv_name = name_val.asObject().bytes(name_val.asObject().header.size);
+                }
+            }
+            const arg_class = self.heap.classOf(arg);
+            var arg_name: []const u8 = "<?>";
+            if (arg_class.isObject()) {
+                const name_val = arg_class.asObject().getField(Heap.CLASS_FIELD_NAME, Heap.CLASS_NUM_FIELDS);
+                if (name_val.isObject() and name_val.asObject().header.class_index == Heap.CLASS_SYMBOL) {
+                    arg_name = name_val.asObject().bytes(name_val.asObject().header.size);
+                }
+            }
+            const src = self.currentMethodSource();
+            if (DEBUG_VERBOSE) std.debug.print("DEBUG binary lookup miss selector={s} recv={s} arg={s} in {s}\n", .{selector, recv_name, arg_name, src});
+            if (std.mem.eql(u8, selector, "+")) {
+                const base = self.outer_temp_base;
+                if (base + 2 < self.stack.len) {
+                    const slot0 = self.stack[base + 1];
+                    const slot1 = self.stack[base + 2];
+                    const s0 = blk: {
+                        const cls = self.heap.classOf(slot0);
+                        if (cls.isObject()) {
+                            const nv = cls.asObject().getField(Heap.CLASS_FIELD_NAME, Heap.CLASS_NUM_FIELDS);
+                            if (nv.isObject() and nv.asObject().header.class_index == Heap.CLASS_SYMBOL) {
+                                break :blk nv.asObject().bytes(nv.asObject().header.size);
+                            }
+                        }
+                        if (slot0.isSmallInt()) break :blk "SmallInteger";
+                        if (slot0.isNil()) break :blk "nil";
+                        break :blk "<?>";            
+                    };
+                    const s1 = blk: {
+                        const cls = self.heap.classOf(slot1);
+                        if (cls.isObject()) {
+                            const nv = cls.asObject().getField(Heap.CLASS_FIELD_NAME, Heap.CLASS_NUM_FIELDS);
+                            if (nv.isObject() and nv.asObject().header.class_index == Heap.CLASS_SYMBOL) {
+                                break :blk nv.asObject().bytes(nv.asObject().header.size);
+                            }
+                        }
+                        if (slot1.isSmallInt()) break :blk "SmallInteger";
+                        if (slot1.isNil()) break :blk "nil";
+                        break :blk "<?>";            
+                    };
+                    std.debug.print("  outer_temp_base={} slot0={s} slot1={s}\n", .{ base, s0, s1 });
+                }
+            }
+            return InterpreterError.MessageNotUnderstood;
         }
     }
 
@@ -781,8 +1715,85 @@ pub const Interpreter = struct {
         try self.push(Value.fromBool(recv.eql(arg)));
     }
 
-    fn sendUnary(_: *Interpreter, _: []const u8) InterpreterError!void {
-        // TODO: actual message lookup
+    fn sendNotIdentical(self: *Interpreter) InterpreterError!void {
+        const arg = try self.pop();
+        const recv = try self.pop();
+        try self.push(Value.fromBool(!recv.eql(arg)));
+    }
+
+    fn sendUnary(self: *Interpreter, selector: []const u8) InterpreterError!void {
+        const recv = try self.pop();
+
+        // Look up the selector in the class hierarchy
+        const class = self.heap.classOf(recv);
+        const selector_sym = self.heap.internSymbol(selector) catch {
+            return InterpreterError.OutOfMemory;
+        };
+
+        if (self.lookupMethod(class, selector_sym)) |method| {
+            // Found method - check for primitive
+            if (method.header.primitive_index != 0) {
+                // Push receiver for primitive
+                try self.push(recv);
+                if (primitives.executePrimitive(self, method.header.primitive_index)) |result| {
+                    try self.push(result);
+                    return;
+                } else |_| {
+                    // Primitive failed - pop receiver and execute bytecode
+                    _ = try self.pop();
+                }
+            }
+
+            // Execute method bytecode - save context and set up new frame
+            if (self.context_ptr >= self.contexts.len - 1) {
+                return InterpreterError.StackOverflow;
+            }
+
+            self.contexts[self.context_ptr] = .{
+                .method = self.method,
+                .method_class = self.method_class,
+                .ip = self.ip,
+                .receiver = self.receiver,
+                .temp_base = self.temp_base,
+                .outer_temp_base = self.outer_temp_base,
+                .num_args = 0,
+                .num_temps = 0,
+                .outer_context = null,
+                .closure = null,
+            };
+            self.context_ptr += 1;
+
+            self.method = method;
+            self.ip = 0;
+            self.receiver = recv;
+            self.temp_base = self.sp;
+            self.outer_temp_base = self.temp_base;
+
+            // Push receiver (no arguments for unary)
+            try self.push(recv);
+
+            // Allocate temps
+            const total_temps = method.header.num_temps;
+            var k: usize = 0;
+            while (k < total_temps) : (k += 1) {
+                try self.push(Value.nil);
+            }
+            return;
+        }
+
+        // No method found
+        self.last_mnu_selector = selector;
+        self.last_mnu_receiver = recv;
+        self.last_mnu_method = self.currentMethodSource();
+        const recv_class = self.heap.classOf(recv);
+        var recv_name: []const u8 = "<?>";
+        if (recv_class.isObject()) {
+            const name_val = recv_class.asObject().getField(Heap.CLASS_FIELD_NAME, Heap.CLASS_NUM_FIELDS);
+            if (name_val.isObject() and name_val.asObject().header.class_index == Heap.CLASS_SYMBOL) {
+                recv_name = name_val.asObject().bytes(name_val.asObject().header.size);
+            }
+        }
+        if (DEBUG_VERBOSE) std.debug.print("DEBUG lookup miss selector={s} recv={s}\n", .{ selector, recv_name });
         return InterpreterError.MessageNotUnderstood;
     }
 };

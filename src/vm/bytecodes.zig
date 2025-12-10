@@ -284,7 +284,21 @@ pub const Primitive = enum(u16) {
     float_greater_than = 45, // Float >> >
     float_greater_or_equal = 46, // Float >> >=
     float_equal = 47, // Float >> =
+
+    // SmallInteger printing (Dolphin: 44)
+    small_int_print_string = 44, // SmallInteger >> printString
+
+    // Array operations (Dolphin: 50-51)
+    replace_from_to_with = 50, // replaceFrom:to:with:startingAt:
+    string_cmp_ordinal = 51, // String comparison ordinal
+
+    // String search (Dolphin: 52)
+    string_next_index_of_dolphin = 52, // String >> nextIndexOf:from:to:
     high_bit = 54, // Integer >> highBit
+
+    // Type checking (Dolphin: 57-58)
+    is_kind_of = 57, // Object >> isKindOf:
+    inherits_from = 58, // Behavior >> inheritsFrom:
 
     // ========================================================================
     // Object/Array primitives (Dolphin: 60-77)
@@ -299,6 +313,7 @@ pub const Primitive = enum(u16) {
 
     basic_new = 70, // Behavior >> basicNew
     basic_new_size = 71, // Behavior >> basicNew:
+    become_dolphin = 72, // Object >> become: (Dolphin primitive number)
 
     inst_var_at = 73, // Object >> instVarAt:
     inst_var_at_put = 74, // Object >> instVarAt:put:
@@ -338,6 +353,69 @@ pub const Primitive = enum(u16) {
     boolean_not = 508, // Boolean >> not
     while_true = 509, // [cond] whileTrue: [body]
     while_false = 510, // [cond] whileFalse: [body]
+    true_and = 511, // True >> and: aBlock
+    true_or = 512, // True >> or: aBlock
+    false_and = 513, // False >> and: aBlock
+    false_or = 514, // False >> or: aBlock
+
+    // Error handling
+    does_not_understand = 800, // Object >> doesNotUnderstand:
+    error_message = 801, // Object >> error:
+    halt = 802, // Object >> halt
+
+    // Exception handling (810+)
+    exception_signal = 810, // Exception >> signal
+    exception_signal_with = 811, // Exception >> signal:
+    on_do = 812, // Block >> on:do:
+    ensure = 813, // Block >> ensure:
+    if_curtailed = 814, // Block >> ifCurtailed:
+
+    // Dictionary primitives (820+)
+    dict_at = 820, // Dictionary >> at:
+    dict_at_put = 821, // Dictionary >> at:put:
+    dict_at_if_absent = 822, // Dictionary >> at:ifAbsent:
+    dict_includes_key = 823, // Dictionary >> includesKey:
+    dict_remove_key = 824, // Dictionary >> removeKey:
+    dict_keys = 825, // Dictionary >> keys
+    dict_values = 826, // Dictionary >> values
+    dict_size = 827, // Dictionary >> size
+
+    // Set primitives (830+)
+    set_add = 830, // Set >> add:
+    set_includes = 831, // Set >> includes:
+    set_remove = 832, // Set >> remove:
+    set_size = 833, // Set >> size
+
+    // OrderedCollection primitives (840+)
+    oc_add = 840, // OrderedCollection >> add:
+    oc_add_first = 841, // OrderedCollection >> addFirst:
+    oc_add_last = 842, // OrderedCollection >> addLast:
+    oc_remove_first = 843, // OrderedCollection >> removeFirst
+    oc_remove_last = 844, // OrderedCollection >> removeLast
+    oc_at = 845, // OrderedCollection >> at:
+    oc_at_put = 846, // OrderedCollection >> at:put:
+    oc_size = 847, // OrderedCollection >> size
+
+    // Stream primitives (850+)
+    stream_next = 850, // Stream >> next
+    stream_next_put = 851, // Stream >> nextPut:
+    stream_next_put_all = 852, // Stream >> nextPutAll:
+    stream_peek = 853, // Stream >> peek
+    stream_at_end = 854, // Stream >> atEnd
+    stream_position = 855, // Stream >> position
+    stream_set_position = 856, // Stream >> position:
+    stream_reset = 857, // Stream >> reset
+    stream_contents = 858, // Stream >> contents
+
+    // String additional operations (860+)
+    string_index_of = 860, // String >> indexOf:
+    string_index_of_starting_at = 861, // String >> indexOf:startingAt:
+    string_as_upper = 862, // String >> asUppercase
+    string_as_lower = 863, // String >> asLowercase
+    string_trim = 864, // String >> trim
+    string_includes = 865, // String >> includes:
+    string_split = 866, // String >> subStrings:
+    as_number = 867, // String >> asNumber
 
     // ========================================================================
     // Object system (Dolphin: 100-119)
@@ -361,7 +439,7 @@ pub const Primitive = enum(u16) {
     any_mask = 145, // Integer >> anyMask:
     all_mask = 146, // Integer >> allMask:
     identity_hash = 147, // Object >> identityHash
-    behavior_is_bits = 148, // Behavior >> isBits
+    lookup_method = 148, // Behavior >> lookupMethod:
     string_copy_to_heap = 149, // String >> copyToHeap
 
     low_bit = 152, // Integer >> lowBit
@@ -383,6 +461,15 @@ pub const Primitive = enum(u16) {
     float_abs = 205, // Float >> abs
     float_less_or_equal = 214, // Float >> <=
     float_negate = 215, // Float >> negated (our extension)
+
+    // String primitives (Dolphin: 216-222)
+    as_utf8_string = 216, // String >> asUtf8String
+    as_ansi_string = 217, // String >> asAnsiString
+    string_append = 218, // String >> ,
+    dolphin_string_equal = 219, // String >> = (Dolphin primitive)
+    string_cmp_ordinal_ignoring_case = 220, // String comparison ignoring case
+    file_read_buffer = 221, // FileStream >> read:
+    file_write_buffer = 222, // FileStream >> write:
 
     // ========================================================================
     // I/O and System (Dolphin compatible where possible)
@@ -431,6 +518,19 @@ pub const Primitive = enum(u16) {
     min = 548, // Magnitude >> min:
     between_and = 549, // Magnitude >> between:and:
     not_equal = 550, // Object >> ~=
+    factorial = 551, // Integer >> factorial (optimized)
+
+    // Interval creation (our extensions)
+    to_interval = 552, // SmallInteger >> to: (creates Interval)
+    to_by_interval = 553, // SmallInteger >> to:by: (creates Interval with step)
+    interval_size = 554, // Interval >> size
+    interval_at = 555, // Interval >> at:
+    interval_do = 556, // Interval >> do:
+
+    // Nil checking (our extensions)
+    is_nil = 557, // UndefinedObject >> isNil (returns true)
+    not_nil = 558, // Object >> notNil
+    is_nil_false = 559, // Object >> isNil (returns false for non-nil)
 
     // File I/O (use high numbers to avoid conflicts)
     file_open = 600,
@@ -440,6 +540,18 @@ pub const Primitive = enum(u16) {
     file_position = 604,
     file_set_position = 605,
     file_size_prim = 606,
+    file_flush = 607,
+    file_at_end = 608,
+    file_delete = 609,
+    file_exists = 610,
+    file_rename = 611,
+    stdout_write = 612,
+    stdin_read = 613,
+    stderr_write = 614,
+    transcript_show = 650,
+    transcript_cr = 651,
+    transcript_next_put_all = 652,
+    transcript_flush = 653,
 
     // FFI (Dolphin uses 200+ for VM-internal, we use 700+)
     ffi_call = 700,
@@ -448,6 +560,15 @@ pub const Primitive = enum(u16) {
     ffi_free = 703,
     ffi_read = 704,
     ffi_write = 705,
+
+    // Reflection primitives (900+)
+    class_selectors = 900, // Behavior >> selectors
+    class_all_selectors = 901, // Behavior >> allSelectors
+    class_inst_var_names = 902, // Behavior >> instVarNames
+    class_inst_size = 903, // Behavior >> instSize
+    class_class_var_names = 904, // Behavior >> classVarNames
+    class_superclass = 905, // Behavior >> superclass
+    class_name = 906, // Class >> name
 
     _,
 };
