@@ -416,9 +416,27 @@ pub const FileIn = struct {
             return;
         }
 
-        // Skip chunks while in categories section
-        if (self.in_categories_section) {
+        // Empty or blank chunks exit the categories section and clear class context
+        // In Dolphin format, "! !" marks the end of a class's method definitions
+        const trimmed = std.mem.trim(u8, chunk, " \t\r\n");
+        if (trimmed.len == 0) {
+            self.in_categories_section = false;
+            self.current_class = null; // End of class method section
             return;
+        }
+
+        // If chunk looks like an expression (starts with uppercase and has a message),
+        // exit categories section and continue processing
+        if (self.in_categories_section) {
+            // Check if this looks like an expression that should exit categories
+            if (isExpressionChunk(chunk)) {
+                self.in_categories_section = false;
+                self.current_class = null; // Clear class context so it's treated as expression
+                // Fall through to evaluate the expression
+            } else {
+                // Skip category metadata chunks
+                return;
+            }
         }
 
         if (isIgnorableChunk(chunk)) {
@@ -426,6 +444,17 @@ pub const FileIn = struct {
         }
 
         if (try self.handleClassConstant(chunk)) return;
+
+        // If we have a current class context but this looks like an expression (not a method body),
+        // it's probably an initialization expression after "! !" that ends a class's methods section
+        if (self.current_class != null and isExpressionChunk(chunk)) {
+            // Check if this looks more like an expression than a method body
+            // Method bodies typically start with a selector (lowercase) or a unary selector
+            // Expressions like "Transcript := TranscriptShell new" have ":=" in them
+            if (std.mem.indexOf(u8, chunk, ":=") != null) {
+                self.current_class = null; // Clear class context
+            }
+        }
 
         // If we don't have a current class context, treat as an expression to evaluate
         if (self.current_class == null) {
@@ -449,13 +478,39 @@ pub const FileIn = struct {
         // Expressions often start with '(' for grouped message sends
         if (chunk[0] == '(') return true;
 
-        // Or start with a class name (uppercase) followed by a message
+        // Blocks are also expressions
+        if (chunk[0] == '[') return true;
+
+        // Temporary variable declarations indicate an expression
+        if (chunk[0] == '|') return true;
+
+        // Literals: strings, numbers (but NOT symbols starting with # - those could be categoriesForClass metadata)
+        if (chunk[0] == '\'' or std.ascii.isDigit(chunk[0])) return true;
+
+        // Check for ClassName followed by a proper message send pattern:
+        // - ClassName unaryMessage (lowercase letter after class name + whitespace)
+        // - ClassName keyword: args (has a colon indicating keyword message)
         if (std.ascii.isUpper(chunk[0])) {
-            // Look for a message send pattern: ClassName message...
+            // Find end of class name
             var i: usize = 0;
             while (i < chunk.len and (std.ascii.isAlphanumeric(chunk[i]) or chunk[i] == '_')) : (i += 1) {}
-            // If followed by whitespace and more content, likely an expression
-            if (i < chunk.len and std.ascii.isWhitespace(chunk[i])) {
+
+            // Must have whitespace after class name
+            if (i >= chunk.len or !std.ascii.isWhitespace(chunk[i])) return false;
+
+            // Skip whitespace
+            while (i < chunk.len and std.ascii.isWhitespace(chunk[i])) : (i += 1) {}
+
+            if (i >= chunk.len) return false;
+
+            // The message must start with a lowercase letter (proper Smalltalk convention)
+            // This distinguishes "DefaultSortAlgorithm initialize" from "Building Suites"
+            if (std.ascii.isLower(chunk[i])) {
+                return true;
+            }
+
+            // Also check for keyword message (contains ':')
+            if (std.mem.indexOfScalar(u8, chunk, ':') != null) {
                 return true;
             }
         }
@@ -843,6 +898,8 @@ pub const FileIn = struct {
         const class_obj = target_class_val.asObject();
         if (self.current_is_class_side) {
             std.debug.print("  Installing class method: {s} >> {s}\n", .{ class_name, selector });
+        } else {
+            std.debug.print("  Installing instance method: {s} >> {s}\n", .{ class_name, selector });
         }
         try installMethodInClass(self.heap, class_obj, selector, method, self.current_is_class_side);
 

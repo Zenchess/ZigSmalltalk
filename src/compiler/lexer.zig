@@ -28,6 +28,7 @@ pub const TokenType = enum {
     colon, // :
     bar, // |
     hash, // #
+    double_hash, // ## (compile-time constant)
 
     // Special
     eof,
@@ -104,6 +105,15 @@ pub const Lexer = struct {
             '#' => {
                 // Symbol or literal array
                 if (self.peek() == '(' or self.peek() == '[') {
+                    return self.makeToken(.hash);
+                }
+                // Compile-time constant ##(
+                if (self.peek() == '#') {
+                    _ = self.advance(); // consume second #
+                    if (self.peek() == '(') {
+                        return self.makeToken(.double_hash);
+                    }
+                    // Not ##( - return as hash and let next call return another hash
                     return self.makeToken(.hash);
                 }
                 if (self.peek() == '\'') {

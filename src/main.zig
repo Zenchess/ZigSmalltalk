@@ -49,9 +49,11 @@ pub fn main() !void {
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
 
-    // Handle --image <path> flag
+    // Handle --image <path> and --load-order <path> flags
     var heap: *Heap = undefined;
     var loaded_from_image = false;
+    var load_order_path: ?[]const u8 = null;
+    var repl_mode = true;
     var arg_index: usize = 1;
     while (arg_index < args.len) : (arg_index += 1) {
         if (std.mem.eql(u8, args[arg_index], "--image") and arg_index + 1 < args.len) {
@@ -63,6 +65,11 @@ pub fn main() !void {
             };
             loaded_from_image = true;
             arg_index += 1; // skip path
+        } else if (std.mem.eql(u8, args[arg_index], "--load-order") and arg_index + 1 < args.len) {
+            load_order_path = args[arg_index + 1];
+            arg_index += 1; // skip path
+        } else if (std.mem.eql(u8, args[arg_index], "--no-repl")) {
+            repl_mode = false;
         }
     }
 
@@ -78,6 +85,56 @@ pub fn main() !void {
     // Create interpreter
     var interp = Interpreter.init(heap);
 
+    // Process load-order file if specified
+    if (load_order_path) |order_path| {
+        const order_file = std.fs.cwd().openFile(order_path, .{}) catch |err| {
+            std.debug.print("Failed to open load-order file {s}: {any}\n", .{ order_path, err });
+            return;
+        };
+        defer order_file.close();
+
+        const order_content = order_file.readToEndAlloc(allocator, 10 * 1024 * 1024) catch {
+            std.debug.print("Failed to read load-order file\n", .{});
+            return;
+        };
+        defer allocator.free(order_content);
+
+        var total_methods: usize = 0;
+        var total_classes: usize = 0;
+        var total_expressions: usize = 0;
+
+        // Process each line as a file path
+        var lines = std.mem.splitAny(u8, order_content, "\n\r");
+        while (lines.next()) |line| {
+            const trimmed_line = std.mem.trim(u8, line, " \t");
+            // Skip empty lines and comments
+            if (trimmed_line.len == 0) continue;
+            if (trimmed_line[0] == '#') continue;
+
+            std.debug.print("Loading: {s}\n", .{trimmed_line});
+            var file_in = filein.FileIn.init(allocator, heap);
+            defer file_in.deinit();
+
+            file_in.loadFile(trimmed_line) catch |err| {
+                const err_msg = switch (err) {
+                    filein.FileInError.FileNotFound => "File not found",
+                    filein.FileInError.ClassNotFound => "Class not found",
+                    filein.FileInError.InvalidMethodDefinition => "Invalid method definition",
+                    filein.FileInError.CompilationFailed => "Compilation failed",
+                    else => "Unknown error",
+                };
+                std.debug.print("  Error: {s}\n", .{err_msg});
+                continue;
+            };
+
+            total_methods += file_in.methods_loaded;
+            total_classes += file_in.classes_defined;
+            total_expressions += file_in.expressions_evaluated;
+        }
+
+        std.debug.print("Load order complete: {d} methods, {d} classes, {d} expressions\n", .{ total_methods, total_classes, total_expressions });
+    }
+
     var skip_next: bool = false;
     for (args[1..]) |arg| {
         if (skip_next) {
@@ -86,7 +143,7 @@ pub fn main() !void {
         }
         // Skip flags
         if (arg.len > 0 and arg[0] == '-') {
-            if (std.mem.eql(u8, arg, "--image")) {
+            if (std.mem.eql(u8, arg, "--image") or std.mem.eql(u8, arg, "--load-order")) {
                 // Skip the following path (already handled in the earlier loop)
                 skip_next = true;
                 continue;
@@ -115,6 +172,10 @@ pub fn main() !void {
         } else {
             std.debug.print("Loaded {d} methods, {d} classes from {s}\n", .{ file_in.methods_loaded, file_in.classes_defined, arg });
         }
+    }
+
+    if (!repl_mode) {
+        return;
     }
 
     // Print banner

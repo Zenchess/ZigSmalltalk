@@ -1,0 +1,45 @@
+# Dolphin Core Classes - Load Order
+# These classes must be loaded in this order due to inheritance dependencies
+#
+# To load all core classes:
+#   zig-smalltalk $(cat dolphin-core/load-order.txt | grep -v '^#' | tr '\n' ' ')
+#
+# Or using the load-core.sh script:
+#   ./dolphin-core/load-core.sh
+
+# Root class
+Dolphin/Core/Object Arts/Dolphin/Base/Object.cls
+
+# Magnitude hierarchy (for ordered comparisons)
+Dolphin/Core/Object Arts/Dolphin/Base/Magnitude.cls
+Dolphin/Core/Object Arts/Dolphin/Base/ArithmeticValue.cls
+Dolphin/Core/Object Arts/Dolphin/Base/Number.cls
+Dolphin/Core/Object Arts/Dolphin/Base/Integer.cls
+Dolphin/Core/Object Arts/Dolphin/Base/SmallInteger.cls
+Dolphin/Core/Object Arts/Dolphin/Base/Interval.cls
+
+# Collection hierarchy
+Dolphin/Core/Object Arts/Dolphin/Base/Collection.cls
+Dolphin/Core/Object Arts/Dolphin/Base/SequenceableCollection.cls
+Dolphin/Core/Object Arts/Dolphin/Base/ArrayedCollection.cls
+Dolphin/Core/Object Arts/Dolphin/Base/Array.cls
+Dolphin/Core/Object Arts/Dolphin/Base/String.cls
+Dolphin/Core/Object Arts/Dolphin/Base/SequencedGrowableCollection.cls
+Dolphin/Core/Object Arts/Dolphin/Base/OrderedCollection.cls
+Dolphin/Core/Object Arts/Dolphin/Base/Dictionary.cls
+Dolphin/Core/Object Arts/Dolphin/Base/Set.cls
+
+# Boolean hierarchy
+Dolphin/Core/Object Arts/Dolphin/Base/Boolean.cls
+
+# Other core classes
+Dolphin/Core/Object Arts/Dolphin/Base/Association.cls
+
+# Exception hierarchy needed by SUnit
+Dolphin/Core/Object Arts/Dolphin/Base/Exception.cls
+Dolphin/Core/Object Arts/Dolphin/Base/Error.cls
+Dolphin/Core/Object Arts/Dolphin/Base/Notification.cls
+
+# Minimal stubs to satisfy SUnit dependencies (Delay, Semaphore, LookupTable)
+dolphin-core/stubs/sunit-stubs.st
+Dolphin/Core/Object Arts/Dolphin/Base/IdentityDictionary.cls

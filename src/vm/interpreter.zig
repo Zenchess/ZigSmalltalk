@@ -17,6 +17,7 @@ var debug_send_special_count: usize = 0;
 // Debug flag - set to false to disable verbose debug output
 const DEBUG_VERBOSE = false;
 const DEBUG_STACK = true;
+const DEBUG_STACK_TRACE = true; // Print last N method calls before overflow
 
 pub const InterpreterError = error{
     StackOverflow,
@@ -53,7 +54,8 @@ pub const Context = struct {
     receiver: Value,
     // Temporaries and arguments are stored on the stack
     temp_base: usize, // Base index in stack for temps/args
-    outer_temp_base: usize, // Base index for outer temps (for blocks)
+    outer_temp_base: usize, // Base index for outer temps (for blocks) - level 1
+    home_temp_base: usize, // Base index for home method temps - level >= 2
     num_args: usize,
     num_temps: usize,
     // For block closures
@@ -79,7 +81,8 @@ pub const Interpreter = struct {
     ip: usize,
     receiver: Value,
     temp_base: usize,
-    outer_temp_base: usize, // For closures: temp_base of enclosing context
+    outer_temp_base: usize, // For closures: temp_base of enclosing context (level 1)
+    home_temp_base: usize, // For closures: temp_base of home method context (level >= 2)
     last_mnu_selector: []const u8,
     last_send_selector: []const u8,
     last_mnu_receiver: Value,
@@ -93,9 +96,12 @@ pub const Interpreter = struct {
     // Primitive block execution tracking - when > 0, return_top returns directly to primitive
     // but block_return still uses context chain for non-local returns
     primitive_block_depth: usize,
-    // The context_ptr at which the innermost primitive block started - only return immediately
-    // from return_top if we're at this context level (not in a nested method call)
-    primitive_block_context_base: usize,
+    // Stack of context_ptrs at which primitive blocks started - used to check if return_top
+    // should return directly to primitive (when context_ptr matches top of stack)
+    primitive_block_bases: [64]usize,
+    // Target temp_base for non-local return - when BlockNonLocalReturn is signaled,
+    // this stores the temp_base of the home context we want to return to
+    non_local_return_target: usize,
 
     pub fn init(heap: *Heap) Interpreter {
         return .{
@@ -110,6 +116,7 @@ pub const Interpreter = struct {
             .receiver = Value.nil,
             .temp_base = 0,
             .outer_temp_base = 0,
+            .home_temp_base = 0,
             .last_mnu_selector = "<?>",
             .last_send_selector = "<?>",
             .last_mnu_receiver = Value.nil,
@@ -118,7 +125,8 @@ pub const Interpreter = struct {
             .handler_ptr = 0,
             .current_exception = Value.nil,
             .primitive_block_depth = 0,
-            .primitive_block_context_base = 0,
+            .primitive_block_bases = [_]usize{0} ** 64,
+            .non_local_return_target = 0,
         };
     }
 
@@ -368,10 +376,18 @@ pub const Interpreter = struct {
                             // It's a symbol - first try class variables, then globals
                             const name_bytes = lit_obj.bytes(lit_obj.header.size);
 
-                            // Try to find as class variable in receiver's class hierarchy
-                            if (self.lookupClassVariable(name_bytes)) |val| {
-                                try self.push(val);
-                            } else if (self.heap.getGlobal(name_bytes)) |val| {
+                            // Try to find as class variable in receiver's class hierarchy (only if receiver is not nil)
+                            var found_val: ?Value = null;
+                            if (!self.receiver.isNil()) {
+                                found_val = self.lookupClassVariable(name_bytes);
+                            }
+                            
+                            // If not found as class variable, try globals
+                            if (found_val == null) {
+                                found_val = self.heap.getGlobal(name_bytes);
+                            }
+                            
+                            if (found_val) |val| {
                                 try self.push(val);
                             } else {
                                 // Not found
@@ -392,6 +408,11 @@ pub const Interpreter = struct {
                 .push_nil => try self.push(Value.nil),
                 .push_true => try self.push(Value.@"true"),
                 .push_false => try self.push(Value.@"false"),
+                .push_context => {
+                    // thisContext - for now push nil since we don't have full context objects
+                    // This allows exception signaling code to run without crashing
+                    try self.push(Value.nil);
+                },
                 .push_integer => {
                     const n: i8 = @bitCast(self.fetchByte());
                     try self.push(Value.fromSmallInt(n));
@@ -417,9 +438,45 @@ pub const Interpreter = struct {
                     const num_args = self.fetchByte();
                     self.sendMessage(selector_index, num_args, false) catch |err| {
                         if (err == InterpreterError.BlockNonLocalReturn) {
-                            // Non-local return from a block - propagate it up
-                            // The result is already on the stack
-                            return err;
+                            // Non-local return from a block - check if the CURRENT method is the target
+                            // IMPORTANT: Check temp_base BEFORE restoring caller's context
+                            const current_temp_base = self.temp_base;
+                            if (DEBUG_VERBOSE) std.debug.print("DEBUG .send NLR check: temp_base={} target={}\n", .{ current_temp_base, self.non_local_return_target });
+
+                            if (current_temp_base == self.non_local_return_target) {
+                                // This method is the target - get result and return
+                                const nlr_result = self.pop() catch Value.nil;
+                                if (DEBUG_VERBOSE) std.debug.print("DEBUG .send NLR intercepted: temp_base={} target={}\n", .{ current_temp_base, self.non_local_return_target });
+
+                                // Unwind primitive_block_bases stack to match current context level
+                                while (self.primitive_block_depth > 0 and
+                                    self.primitive_block_bases[self.primitive_block_depth - 1] > self.context_ptr)
+                                {
+                                    self.primitive_block_depth -= 1;
+                                }
+
+                                if (try self.returnFromMethod(nlr_result)) |final_result| {
+                                    return final_result;
+                                }
+                                // Continue execution in caller (after return)
+                            } else {
+                                // Not the target - restore caller's context and propagate
+                                const nlr_result = self.pop() catch Value.nil;
+                                if (self.context_ptr > 0) {
+                                    self.context_ptr -= 1;
+                                    const ctx = self.contexts[self.context_ptr];
+                                    self.method = ctx.method;
+                                    self.method_class = ctx.method_class;
+                                    self.ip = ctx.ip;
+                                    self.receiver = ctx.receiver;
+                                    self.sp = ctx.temp_base;
+                                    self.temp_base = ctx.temp_base;
+                                    self.outer_temp_base = ctx.outer_temp_base;
+                                    self.home_temp_base = ctx.home_temp_base;
+                                }
+                                try self.push(nlr_result);
+                                return err;
+                            }
                         } else {
                             return err;
                         }
@@ -430,8 +487,27 @@ pub const Interpreter = struct {
                     const num_args = self.fetchByte();
                     self.sendMessage(selector_index, num_args, true) catch |err| {
                         if (err == InterpreterError.BlockNonLocalReturn) {
-                            // Non-local return from a block - propagate it up
-                            return err;
+                            // Non-local return from a block - check if we're the target
+                            if (self.temp_base == self.non_local_return_target) {
+                                // This method is the target - return the result normally
+                                const nlr_result = self.pop() catch Value.nil;
+                                if (DEBUG_VERBOSE) std.debug.print("DEBUG .super_send NLR intercepted: temp_base={} target={}\n", .{ self.temp_base, self.non_local_return_target });
+
+                                // Unwind primitive_block_bases stack to match current context level
+                                while (self.primitive_block_depth > 0 and
+                                    self.primitive_block_bases[self.primitive_block_depth - 1] > self.context_ptr)
+                                {
+                                    self.primitive_block_depth -= 1;
+                                }
+
+                                if (try self.returnFromMethod(nlr_result)) |final_result| {
+                                    return final_result;
+                                }
+                                // Continue execution in caller
+                            } else {
+                                // Not the target - propagate
+                                return err;
+                            }
                         } else {
                             return err;
                         }
@@ -488,9 +564,11 @@ pub const Interpreter = struct {
                     const result = try self.pop();
                     // If we're in a primitive-controlled block AND at the block's context level,
                     // return directly (the primitive will restore state, don't pop contexts).
-                    // If we're in a nested method call (context_ptr > primitive_block_context_base),
+                    // If we're in a nested method call (context_ptr > top of primitive_block_bases),
                     // use normal return to pop contexts properly.
-                    if (self.primitive_block_depth > 0 and self.context_ptr == self.primitive_block_context_base) {
+                    if (self.primitive_block_depth > 0 and
+                        self.context_ptr == self.primitive_block_bases[self.primitive_block_depth - 1])
+                    {
                         return result;
                     }
                     if (try self.returnFromMethod(result)) |final_result| {
@@ -500,14 +578,17 @@ pub const Interpreter = struct {
                 .block_return => {
                     // Non-local return - return from enclosing method's home context
                     const result = try self.pop();
-                    if (DEBUG_VERBOSE) std.debug.print("DEBUG block_return primitive_block_depth={} result_is_obj={}\n", .{ self.primitive_block_depth, result.isObject() });
+                    if (DEBUG_VERBOSE) std.debug.print("DEBUG block_return primitive_block_depth={} home_temp_base={} result_is_obj={}\n", .{ self.primitive_block_depth, self.home_temp_base, result.isObject() });
 
                     // If we're inside a primitive block execution, signal non-local return
                     // so that the primitive can unwind properly
                     if (self.primitive_block_depth > 0) {
+                        // Store the target temp_base so unwinding code knows where to stop
+                        // home_temp_base points to the home method context
+                        self.non_local_return_target = self.home_temp_base;
                         // Push result back so primitive can retrieve it
                         try self.push(result);
-                        if (DEBUG_VERBOSE) std.debug.print("DEBUG block_return signaling BlockNonLocalReturn\n", .{});
+                        if (DEBUG_VERBOSE) std.debug.print("DEBUG block_return signaling BlockNonLocalReturn target={}\n", .{self.non_local_return_target});
                         return InterpreterError.BlockNonLocalReturn;
                     }
 
@@ -571,6 +652,12 @@ pub const Interpreter = struct {
 
                 .nop => {},
 
+                .thread => {
+                    // Thread execution - currently a no-op placeholder
+                    // This could be used for concurrent execution or continuations
+                    // For now, just continue to next instruction
+                },
+
                 .push_closure => {
                     // Create a BlockClosure object
                     // Format: push_closure <num_args> <size_hi> <size_lo> <bytecodes...>
@@ -579,34 +666,34 @@ pub const Interpreter = struct {
                     const size_lo: u16 = self.fetchByte();
                     const bytecode_size: usize = @intCast((size_hi << 8) | size_lo);
 
-                    if (std.debug.runtime_safety) {
-                        const lits_dbg = self.method.getLiterals();
-                        if (lits_dbg.len > 0 and lits_dbg[lits_dbg.len - 1].isObject()) {
-                            const src_obj = lits_dbg[lits_dbg.len - 1].asObject();
-                            if (src_obj.header.class_index == Heap.CLASS_STRING) {
-                                const src_bytes = src_obj.bytes(src_obj.header.size);
-                                if (std.mem.indexOf(u8, src_bytes, "basicBeginsWith") != null) {
-                                    if (DEBUG_VERBOSE) std.debug.print("DEBUG push_closure in basicBeginsWith temp_base={} num_args={}\n", .{ self.temp_base, num_args });
-                                }
-                            }
-                        }
+                    if (DEBUG_VERBOSE) {
+                        const prim_ctx_base = if (self.primitive_block_depth > 0) self.primitive_block_bases[self.primitive_block_depth - 1] else 0;
+                        std.debug.print("DEBUG push_closure: temp_base={} home_temp_base={} ctx_ptr={} prim_ctx_base={} prim_depth={}\n", .{ self.temp_base, self.home_temp_base, self.context_ptr, prim_ctx_base, self.primitive_block_depth });
                     }
 
                     // Create BlockClosure object
-                    // Fields: outerTempBase, startPC, numArgs, method, receiver
-                    const closure = self.heap.allocateObject(Heap.CLASS_BLOCK_CLOSURE, 5, .normal) catch {
+                    // Fields: outerTempBase, startPC, numArgs, method, receiver, homeTempBase
+                    const closure = self.heap.allocateObject(Heap.CLASS_BLOCK_CLOSURE, 6, .normal) catch {
                         return InterpreterError.OutOfMemory;
                     };
 
-                    // Store: outer temp base (for outer variable access), start PC, num args, enclosing method, receiver
-                    // Use outer_temp_base if we're inside a primitive-evaluated block, to maintain the chain
-                    // to the original method's context
-                    const captured_base = if (self.primitive_block_depth > 0) self.outer_temp_base else self.temp_base;
-                    closure.setField(0, Value.fromSmallInt(@intCast(captured_base)), 5); // outer temp base
-                    closure.setField(1, Value.fromSmallInt(@intCast(self.ip)), 5); // start PC (current position in bytecodes)
-                    closure.setField(2, Value.fromSmallInt(num_args), 5); // num args
-                    closure.setField(3, Value.fromObject(@ptrCast(@alignCast(self.method))), 5); // enclosing method
-                    closure.setField(4, self.receiver, 5); // receiver (self in block)
+                    // Store: outer temp base (for level 1 access), start PC, num args, enclosing method, receiver, home temp base (for level >= 2)
+                    // outer_temp_base = immediate enclosing block's frame (for block args/temps)
+                    // home_temp_base = method's frame (for non-local returns)
+                    // If inside primitive block eval AND at or below the block's context level,
+                    // use home_temp_base. Otherwise use temp_base.
+                    const captured_base = self.temp_base; // immediate enclosing context
+                    const prim_ctx_base = if (self.primitive_block_depth > 0) self.primitive_block_bases[self.primitive_block_depth - 1] else 0;
+                    const home_base = if (self.primitive_block_depth > 0 and self.context_ptr <= prim_ctx_base)
+                        self.home_temp_base // nested block inside primitive-evaluated block
+                    else
+                        self.temp_base; // block in a method (either top-level or called from a block)
+                    closure.setField(0, Value.fromSmallInt(@intCast(captured_base)), 6); // outer temp base (level 1)
+                    closure.setField(1, Value.fromSmallInt(@intCast(self.ip)), 6); // start PC (current position in bytecodes)
+                    closure.setField(2, Value.fromSmallInt(num_args), 6); // num args
+                    closure.setField(3, Value.fromObject(@ptrCast(@alignCast(self.method))), 6); // enclosing method
+                    closure.setField(4, self.receiver, 6); // receiver (self in block)
+                    closure.setField(5, Value.fromSmallInt(@intCast(home_base)), 6); // home temp base (level >= 2)
 
                     try self.push(Value.fromObject(closure));
 
@@ -616,29 +703,30 @@ pub const Interpreter = struct {
 
                 .push_outer_temp => {
                     // Format: push_outer_temp <level> <index>
-                    // level = 1 means immediate outer context
-                    // For now we only support level=1
-                    _ = self.fetchByte(); // level (unused)
+                    // Level 1 = immediate outer scope, Level 2 = method scope (home)
+                    const level = self.fetchByte();
                     const index = self.fetchByte();
 
-                    // Access outer temp relative to outer_temp_base
-                    // outer_temp_base points to receiver slot, temps start at outer_temp_base + 1
-                    const outer_val = self.stack[self.outer_temp_base + 1 + index];
+                    // Access temp relative to appropriate context based on level
+                    const base = if (level >= 2) self.home_temp_base else self.outer_temp_base;
+                    const slot = base + 1 + index;
+                    const outer_val = self.stack[slot];
                     try self.push(outer_val);
                 },
 
                 .store_outer_temp => {
                     // Format: store_outer_temp <level> <index>
+                    // Level 1 = immediate outer scope, Level 2 = method scope (home)
                     const level = self.fetchByte();
                     const index = self.fetchByte();
-                    _ = level; // Currently unused - assumes level 1
 
                     // Get value but leave on stack (store doesn't pop in Smalltalk)
                     const val = self.peek();
 
-                    // Store to outer context's temporary slot relative to outer_temp_base
-                    // outer_temp_base points to receiver slot, temps start at outer_temp_base + 1
-                    self.stack[self.outer_temp_base + 1 + index] = val;
+                    // Store to appropriate context based on level
+                    const base = if (level >= 2) self.home_temp_base else self.outer_temp_base;
+                    const slot = base + 1 + index;
+                    self.stack[slot] = val;
                 },
 
                 .make_array => {
@@ -703,7 +791,7 @@ pub const Interpreter = struct {
                                     // Try class variables first, then globals
                                     if (!self.storeClassVariable(name_bytes, val)) {
                                         // Not found in class variables, store as global
-                                        self.heap.setGlobal(name_bytes, val);
+                                        try self.heap.setGlobal(name_bytes, val);
                                     }
                                 }
                             }
@@ -873,13 +961,14 @@ pub const Interpreter = struct {
         // Get selector from literals
         const literals = self.method.getLiterals();
         const selector = literals[selector_index];
-        var selector_name: []const u8 = "<?>"; 
-        if (selector.isObject()) { 
-            const sel_obj = selector.asObject(); 
-            if (sel_obj.header.class_index == Heap.CLASS_SYMBOL) { 
-                selector_name = sel_obj.bytes(sel_obj.header.size); 
-            } 
-        } else if (selector.isSmallInt()) {
+        var selector_name: []const u8 = "<?>";
+        if (selector.isObject()) {
+            const sel_obj = selector.asObject();
+            if (sel_obj.header.class_index == Heap.CLASS_SYMBOL) {
+                selector_name = sel_obj.bytes(sel_obj.header.size);
+            }
+        }
+        if (selector.isSmallInt()) {
             if (DEBUG_VERBOSE) std.debug.print("DEBUG sendMessage selector smallInt={} literal index={}\n", .{selector.asSmallInt(), selector_index});
         } else {
             if (DEBUG_VERBOSE) std.debug.print("DEBUG sendMessage selector non-object bits=0x{x} literal index={}\n", .{selector.bits, selector_index});
@@ -1057,7 +1146,7 @@ pub const Interpreter = struct {
         }
 
         // Get the class to start lookup from
-        const receiver_class = self.heap.classOf(self.receiver);
+        const receiver_class = self.heap.classOf(recv);
         const super_lookup_class = if (!self.method_class.isNil()) self.method_class else receiver_class;
         const start_class = if (is_super)
             self.getSuperclass(super_lookup_class)
@@ -1126,7 +1215,7 @@ pub const Interpreter = struct {
                     }
                 }
             }
-            if (DEBUG_VERBOSE) std.debug.print("DEBUG push context ip={} ctx_ptr={} method={s}\n", .{self.ip, self.context_ptr, method_name});
+            if (DEBUG_VERBOSE) std.debug.print("DEBUG push context ip={} ctx_ptr={} temp_base={} method={s}\n", .{ self.ip, self.context_ptr, self.temp_base, method_name });
                 self.contexts[self.context_ptr] = .{
                     .method = self.method,
                     .method_class = self.method_class,
@@ -1134,6 +1223,7 @@ pub const Interpreter = struct {
                     .receiver = self.receiver,
                     .temp_base = self.temp_base,
                     .outer_temp_base = self.outer_temp_base,
+                    .home_temp_base = self.home_temp_base,
                     .num_args = 0, // We don't track this for the current context
                     .num_temps = 0,
                     .outer_context = null,
@@ -1148,6 +1238,7 @@ pub const Interpreter = struct {
             self.receiver = recv;
             self.temp_base = self.sp;
             self.outer_temp_base = self.temp_base;
+            self.home_temp_base = self.temp_base; // Blocks in this method return to this context
 
             // Push receiver (at temp_base, but NOT accessible as temp - receiver is accessed via self.receiver)
             try self.push(recv);
@@ -1240,6 +1331,7 @@ pub const Interpreter = struct {
                     .receiver = self.receiver,
                     .temp_base = self.temp_base,
                     .outer_temp_base = self.outer_temp_base,
+                    .home_temp_base = self.home_temp_base,
                     .num_args = 0,
                     .num_temps = 0,
                     .outer_context = null,
@@ -1252,6 +1344,7 @@ pub const Interpreter = struct {
                 self.receiver = recv;
                 self.temp_base = self.sp;
                 self.outer_temp_base = self.temp_base;
+                self.home_temp_base = self.temp_base;
 
                 // Push receiver and message argument
                 try self.push(recv);
@@ -1275,13 +1368,14 @@ pub const Interpreter = struct {
                         if (DEBUG_VERBOSE) std.debug.print("DEBUG MNU selector class_idx={}\n", .{sel_obj.header.class_index});
                     } 
                 }
-                var recv_name: []const u8 = "<?>"; 
-                if (recv.isObject()) { 
-                    const recv_obj = recv.asObject(); 
-                    const name_val = recv_obj.getField(Heap.CLASS_FIELD_NAME, recv_obj.header.size); 
-                    if (name_val.isObject() and name_val.asObject().header.class_index == Heap.CLASS_SYMBOL) { 
-                        recv_name = name_val.asObject().bytes(name_val.asObject().header.size); 
-                    } 
+                var recv_name: []const u8 = "<?>";
+                const recv_class = self.heap.classOf(recv);
+                if (recv_class.isObject()) {
+                    const recv_class_obj = recv_class.asObject();
+                    const name_val = recv_class_obj.getField(Heap.CLASS_FIELD_NAME, Heap.CLASS_NUM_FIELDS);
+                    if (name_val.isObject() and name_val.asObject().header.class_index == Heap.CLASS_SYMBOL) {
+                        recv_name = name_val.asObject().bytes(name_val.asObject().header.size);
+                    }
                 }
                 if (selector.isSmallInt()) {
                     if (DEBUG_VERBOSE) std.debug.print("DEBUG MNU selector smallInt={}\n", .{selector.asSmallInt()});
@@ -1312,12 +1406,15 @@ pub const Interpreter = struct {
     /// Return from a method, restoring the previous context.
     /// Returns the final value if this was the outermost call, or null to continue execution.
     fn returnFromMethod(self: *Interpreter, result: Value) InterpreterError!?Value {
-        if (DEBUG_VERBOSE) std.debug.print("DEBUG returnFromMethod ctx_ptr={} result_is_obj={}\n", .{self.context_ptr, result.isObject()});
+        const is_true = result.bits == Value.@"true".bits;
+        const is_false = result.bits == Value.@"false".bits;
+        const is_nil = result.bits == Value.nil.bits;
+        if (DEBUG_VERBOSE) std.debug.print("DEBUG returnFromMethod ctx_ptr={} result: is_obj={} is_true={} is_false={} is_nil={}\n", .{ self.context_ptr, result.isObject(), is_true, is_false, is_nil });
         if (self.context_ptr == 0) {
             // No more contexts - this is the final return
             // Don't reset sp here - let the caller handle cleanup
             // This is important for block returns where the primitive will restore state
-            if (DEBUG_VERBOSE) std.debug.print("DEBUG returnFromMethod final return\n", .{});
+            if (DEBUG_VERBOSE) std.debug.print("DEBUG returnFromMethod final return is_true={} is_false={}\n", .{ is_true, is_false });
             return result;
         }
 
@@ -1327,13 +1424,14 @@ pub const Interpreter = struct {
         // Restore previous context
         self.context_ptr -= 1;
         const ctx = self.contexts[self.context_ptr];
-        if (DEBUG_VERBOSE) std.debug.print("DEBUG returnFromMethod restoring ip={}\n", .{ctx.ip});
+        if (DEBUG_VERBOSE) std.debug.print("DEBUG returnFromMethod restoring ip={} temp_base={}\n", .{ ctx.ip, ctx.temp_base });
         self.method = ctx.method;
         self.method_class = ctx.method_class;
         self.ip = ctx.ip;
         self.receiver = ctx.receiver;
         self.temp_base = ctx.temp_base;
         self.outer_temp_base = ctx.outer_temp_base;
+        self.home_temp_base = ctx.home_temp_base;
 
         // Push the return value onto the caller's stack
         try self.push(result);
@@ -1354,8 +1452,8 @@ pub const Interpreter = struct {
 
         // Walk up the superclass chain
         while (!class.isNil()) {
-            if (start_class.isObject()) {
-                const class_obj = start_class.asObject();
+            if (class.isObject()) {
+                const class_obj = class.asObject();
 
                 // Get method dictionary
                 const method_dict = class_obj.getField(Heap.CLASS_FIELD_METHOD_DICT, Heap.CLASS_NUM_FIELDS);
@@ -1624,6 +1722,7 @@ pub const Interpreter = struct {
                     .receiver = self.receiver,
                     .temp_base = self.temp_base,
                     .outer_temp_base = self.outer_temp_base,
+                    .home_temp_base = self.home_temp_base,
                     .num_args = 0,
                     .num_temps = 0,
                     .outer_context = null,
@@ -1636,6 +1735,7 @@ pub const Interpreter = struct {
                 self.receiver = recv;
                 self.temp_base = self.sp;
                 self.outer_temp_base = self.temp_base;
+                self.home_temp_base = self.temp_base;
 
                 // Push receiver and argument
                 try self.push(recv);
@@ -1756,6 +1856,7 @@ pub const Interpreter = struct {
                 .receiver = self.receiver,
                 .temp_base = self.temp_base,
                 .outer_temp_base = self.outer_temp_base,
+                .home_temp_base = self.home_temp_base,
                 .num_args = 0,
                 .num_temps = 0,
                 .outer_context = null,
@@ -1768,6 +1869,7 @@ pub const Interpreter = struct {
             self.receiver = recv;
             self.temp_base = self.sp;
             self.outer_temp_base = self.temp_base;
+            self.home_temp_base = self.temp_base;
 
             // Push receiver (no arguments for unary)
             try self.push(recv);

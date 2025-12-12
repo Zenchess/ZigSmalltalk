@@ -40,6 +40,8 @@ pub const CodeGenerator = struct {
     outer_arguments: []const []const u8,
     outer_temporaries: std.ArrayList([]const u8),
     block_depth: usize,
+    // Boundary in outer_temporaries: indices < this are from outer-outer (level 2), >= are from immediate outer (level 1)
+    outer_scope_boundary: usize,
 
     // Method source for storage
     source_code: ?[]const u8 = null,
@@ -69,6 +71,7 @@ pub const CodeGenerator = struct {
             .outer_arguments = &[_][]const u8{},
             .outer_temporaries = .{},
             .block_depth = 0,
+            .outer_scope_boundary = 0,
             .selector_plus = null,
             .selector_minus = null,
             .selector_times = null,
@@ -295,7 +298,7 @@ pub const CodeGenerator = struct {
 
                 // If inside a block, check outer scope variables
                 if (self.block_depth > 0) {
-                    // Check outer arguments
+                    // Check outer arguments (usually empty since we flatten into outer_temporaries)
                     for (self.outer_arguments, 0..) |arg, i| {
                         if (std.mem.eql(u8, arg, name)) {
                             // Emit push_outer_temp: level=1, index=i
@@ -306,13 +309,19 @@ pub const CodeGenerator = struct {
                         }
                     }
 
-                    // Check outer temporaries
+                    // Check outer temporaries - determine level based on boundary
                     for (self.outer_temporaries.items, 0..) |temp, i| {
                         if (std.mem.eql(u8, temp, name)) {
-                            // Emit push_outer_temp: level=1, index=outer_args.len + i
                             try self.emit(.push_outer_temp);
-                            try self.emitByte(1); // Level
-                            try self.emitByte(@intCast(self.outer_arguments.len + i));
+                            if (i < self.outer_scope_boundary) {
+                                // Variable from outer-outer scope (method) - level 2
+                                try self.emitByte(2);
+                                try self.emitByte(@intCast(i));
+                            } else {
+                                // Variable from immediate outer scope - level 1
+                                try self.emitByte(1);
+                                try self.emitByte(@intCast(i - self.outer_scope_boundary));
+                            }
                             return;
                         }
                     }
@@ -377,7 +386,7 @@ pub const CodeGenerator = struct {
 
                 // If inside a block, check outer scope variables
                 if (self.block_depth > 0) {
-                    // Check outer arguments
+                    // Check outer arguments (usually empty since we flatten into outer_temporaries)
                     for (self.outer_arguments, 0..) |arg, i| {
                         if (std.mem.eql(u8, arg, name)) {
                             // Emit store_outer_temp: level=1, index=i
@@ -388,13 +397,19 @@ pub const CodeGenerator = struct {
                         }
                     }
 
-                    // Check outer temporaries
+                    // Check outer temporaries - determine level based on boundary
                     for (self.outer_temporaries.items, 0..) |temp, i| {
                         if (std.mem.eql(u8, temp, name)) {
-                            // Emit store_outer_temp: level=1, index=outer_args.len + i
                             try self.emit(.store_outer_temp);
-                            try self.emitByte(1); // Level
-                            try self.emitByte(@intCast(self.outer_arguments.len + i));
+                            if (i < self.outer_scope_boundary) {
+                                // Variable from outer-outer scope (method) - level 2
+                                try self.emitByte(2);
+                                try self.emitByte(@intCast(i));
+                            } else {
+                                // Variable from immediate outer scope - level 1
+                                try self.emitByte(1);
+                                try self.emitByte(@intCast(i - self.outer_scope_boundary));
+                            }
                             return;
                         }
                     }
@@ -559,25 +574,29 @@ pub const CodeGenerator = struct {
                 // This flattens the scope chain so inner blocks can access outer-outer variables
                 var combined_outer = std.ArrayListUnmanaged([]const u8){};
 
-                // First add previous outer arguments (grandparent scope)
+                // First add previous outer arguments (grandparent scope) - these are level 2
                 for (prev_outer_args) |arg| {
                     combined_outer.append(self.allocator, arg) catch {
                         return CompileError.OutOfMemory;
                     };
                 }
-                // Then previous outer temporaries
+                // Then previous outer temporaries - also level 2
                 for (saved_outer_temps.items) |temp| {
                     combined_outer.append(self.allocator, temp) catch {
                         return CompileError.OutOfMemory;
                     };
                 }
-                // Then current arguments (parent scope)
+                // Track boundary: indices before this are from level 2 (outer-outer / method scope)
+                const saved_outer_scope_boundary = self.outer_scope_boundary;
+                self.outer_scope_boundary = prev_outer_args.len + saved_outer_temps.items.len;
+
+                // Then current arguments (parent scope) - these are level 1
                 for (self.arguments) |arg| {
                     combined_outer.append(self.allocator, arg) catch {
                         return CompileError.OutOfMemory;
                     };
                 }
-                // Then current temporaries
+                // Then current temporaries - also level 1
                 for (self.temporaries.items) |temp| {
                     combined_outer.append(self.allocator, temp) catch {
                         return CompileError.OutOfMemory;
@@ -642,6 +661,7 @@ pub const CodeGenerator = struct {
                     };
                 }
                 saved_outer_temps.deinit(self.allocator);
+                self.outer_scope_boundary = saved_outer_scope_boundary;
 
                 // If block has no statements, push nil
                 if (node.data.block.statements.len == 0) {

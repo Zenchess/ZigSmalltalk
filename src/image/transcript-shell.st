@@ -31,6 +31,6 @@ create
     | newTranscript |
     newTranscript := super new.
     Transcript := newTranscript.
-    ^newTranscript! !
+    ^newTranscript!
 
-Transcript := TranscriptShell create.
+Transcript := TranscriptShell new!

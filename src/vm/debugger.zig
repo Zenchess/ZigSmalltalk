@@ -249,6 +249,34 @@ pub const Debugger = struct {
         });
     }
 
+    /// Print full method source code
+    pub fn printMethodSource(self: *Debugger) void {
+        const src = self.interp.currentMethodSource();
+        if (src.len == 0 or std.mem.eql(u8, src, "<?>")) {
+            std.debug.print("\nNo source available for this method.\n", .{});
+            return;
+        }
+
+        std.debug.print("\n=== Method Source ===\n", .{});
+
+        // Print source with line numbers
+        var line_num: usize = 1;
+        var line_start: usize = 0;
+        var i: usize = 0;
+
+        while (i < src.len) : (i += 1) {
+            if (src[i] == '\n' or i == src.len - 1) {
+                const line_end = if (src[i] == '\n') i else i + 1;
+                const line = src[line_start..line_end];
+                std.debug.print("{d:4}: {s}\n", .{ line_num, line });
+                line_num += 1;
+                line_start = i + 1;
+            }
+        }
+
+        std.debug.print("=== End Source ({d} bytes) ===\n", .{src.len});
+    }
+
     fn printBytecodeDescription(self: *Debugger, byte: u8) void {
         _ = self;
         // Check short-form opcodes
@@ -293,7 +321,39 @@ pub const Debugger = struct {
             .push_integer => std.debug.print(" (push_integer)", .{}),
             .push_integer_16 => std.debug.print(" (push_integer_16)", .{}),
             .push_temporary => std.debug.print(" (push_temp_ext)", .{}),
+            .push_temporary_0 => std.debug.print(" (push_temp 0)", .{}),
+            .push_temporary_1 => std.debug.print(" (push_temp 1)", .{}),
+            .push_temporary_2 => std.debug.print(" (push_temp 2)", .{}),
+            .push_temporary_3 => std.debug.print(" (push_temp 3)", .{}),
+            .push_temporary_4 => std.debug.print(" (push_temp 4)", .{}),
+            .push_temporary_5 => std.debug.print(" (push_temp 5)", .{}),
+            .push_temporary_6 => std.debug.print(" (push_temp 6)", .{}),
+            .push_temporary_7 => std.debug.print(" (push_temp 7)", .{}),
+            .push_temporary_8 => std.debug.print(" (push_temp 8)", .{}),
+            .push_temporary_9 => std.debug.print(" (push_temp 9)", .{}),
+            .push_temporary_10 => std.debug.print(" (push_temp 10)", .{}),
+            .push_temporary_11 => std.debug.print(" (push_temp 11)", .{}),
+            .push_temporary_12 => std.debug.print(" (push_temp 12)", .{}),
+            .push_temporary_13 => std.debug.print(" (push_temp 13)", .{}),
+            .push_temporary_14 => std.debug.print(" (push_temp 14)", .{}),
+            .push_temporary_15 => std.debug.print(" (push_temp 15)", .{}),
             .push_receiver_variable => std.debug.print(" (push_recv_var_ext)", .{}),
+            .push_receiver_variable_0 => std.debug.print(" (push_recv_var 0)", .{}),
+            .push_receiver_variable_1 => std.debug.print(" (push_recv_var 1)", .{}),
+            .push_receiver_variable_2 => std.debug.print(" (push_recv_var 2)", .{}),
+            .push_receiver_variable_3 => std.debug.print(" (push_recv_var 3)", .{}),
+            .push_receiver_variable_4 => std.debug.print(" (push_recv_var 4)", .{}),
+            .push_receiver_variable_5 => std.debug.print(" (push_recv_var 5)", .{}),
+            .push_receiver_variable_6 => std.debug.print(" (push_recv_var 6)", .{}),
+            .push_receiver_variable_7 => std.debug.print(" (push_recv_var 7)", .{}),
+            .push_receiver_variable_8 => std.debug.print(" (push_recv_var 8)", .{}),
+            .push_receiver_variable_9 => std.debug.print(" (push_recv_var 9)", .{}),
+            .push_receiver_variable_10 => std.debug.print(" (push_recv_var 10)", .{}),
+            .push_receiver_variable_11 => std.debug.print(" (push_recv_var 11)", .{}),
+            .push_receiver_variable_12 => std.debug.print(" (push_recv_var 12)", .{}),
+            .push_receiver_variable_13 => std.debug.print(" (push_recv_var 13)", .{}),
+            .push_receiver_variable_14 => std.debug.print(" (push_recv_var 14)", .{}),
+            .push_receiver_variable_15 => std.debug.print(" (push_recv_var 15)", .{}),
             .push_outer_temp => std.debug.print(" (push_outer_temp)", .{}),
             .store_outer_temp => std.debug.print(" (store_outer_temp)", .{}),
             .send => std.debug.print(" (send)", .{}),
@@ -314,8 +374,11 @@ pub const Debugger = struct {
             .send_class => std.debug.print(" (send class)", .{}),
             .send_value => std.debug.print(" (send value)", .{}),
             .send_new => std.debug.print(" (send new)", .{}),
+            .send_mod => std.debug.print(" (send \\)", .{}),
             .send_identical => std.debug.print(" (send ==)", .{}),
             .send_not_identical => std.debug.print(" (send ~~)", .{}),
+            .send_value_1 => std.debug.print(" (send value:)", .{}),
+            .send_new_size => std.debug.print(" (send new:)", .{}),
             .return_top => std.debug.print(" (return_top)", .{}),
             .return_receiver => std.debug.print(" (return_self)", .{}),
             .return_nil => std.debug.print(" (return_nil)", .{}),
@@ -329,10 +392,69 @@ pub const Debugger = struct {
             .jump_if_false => std.debug.print(" (jump_false)", .{}),
             .jump_if_nil => std.debug.print(" (jump_nil)", .{}),
             .jump_if_not_nil => std.debug.print(" (jump_not_nil)", .{}),
+            .short_jump_0 => std.debug.print(" (short_jump +0)", .{}),
+            .short_jump_1 => std.debug.print(" (short_jump +1)", .{}),
+            .short_jump_2 => std.debug.print(" (short_jump +2)", .{}),
+            .short_jump_3 => std.debug.print(" (short_jump +3)", .{}),
+            .short_jump_4 => std.debug.print(" (short_jump +4)", .{}),
+            .short_jump_5 => std.debug.print(" (short_jump +5)", .{}),
+            .short_jump_6 => std.debug.print(" (short_jump +6)", .{}),
+            .short_jump_7 => std.debug.print(" (short_jump +7)", .{}),
+            .extended_push => std.debug.print(" (extended_push)", .{}),
+            .extended_send => std.debug.print(" (extended_send)", .{}),
             .push_closure => std.debug.print(" (push_closure)", .{}),
             .primitive => std.debug.print(" (primitive)", .{}),
             .make_array => std.debug.print(" (make_array)", .{}),
             .extended_store => std.debug.print(" (extended_store)", .{}),
+            .store_temporary_0 => std.debug.print(" (store_temp 0)", .{}),
+            .store_temporary_1 => std.debug.print(" (store_temp 1)", .{}),
+            .store_temporary_2 => std.debug.print(" (store_temp 2)", .{}),
+            .store_temporary_3 => std.debug.print(" (store_temp 3)", .{}),
+            .store_temporary_4 => std.debug.print(" (store_temp 4)", .{}),
+            .store_temporary_5 => std.debug.print(" (store_temp 5)", .{}),
+            .store_temporary_6 => std.debug.print(" (store_temp 6)", .{}),
+            .store_temporary_7 => std.debug.print(" (store_temp 7)", .{}),
+            .store_temporary_8 => std.debug.print(" (store_temp 8)", .{}),
+            .store_temporary_9 => std.debug.print(" (store_temp 9)", .{}),
+            .store_temporary_10 => std.debug.print(" (store_temp 10)", .{}),
+            .store_temporary_11 => std.debug.print(" (store_temp 11)", .{}),
+            .store_temporary_12 => std.debug.print(" (store_temp 12)", .{}),
+            .store_temporary_13 => std.debug.print(" (store_temp 13)", .{}),
+            .store_temporary_14 => std.debug.print(" (store_temp 14)", .{}),
+            .store_temporary_15 => std.debug.print(" (store_temp 15)", .{}),
+            .store_receiver_variable_0 => std.debug.print(" (store_recv_var 0)", .{}),
+            .store_receiver_variable_1 => std.debug.print(" (store_recv_var 1)", .{}),
+            .store_receiver_variable_2 => std.debug.print(" (store_recv_var 2)", .{}),
+            .store_receiver_variable_3 => std.debug.print(" (store_recv_var 3)", .{}),
+            .store_receiver_variable_4 => std.debug.print(" (store_recv_var 4)", .{}),
+            .store_receiver_variable_5 => std.debug.print(" (store_recv_var 5)", .{}),
+            .store_receiver_variable_6 => std.debug.print(" (store_recv_var 6)", .{}),
+            .store_receiver_variable_7 => std.debug.print(" (store_recv_var 7)", .{}),
+            .store_receiver_variable_8 => std.debug.print(" (store_recv_var 8)", .{}),
+            .store_receiver_variable_9 => std.debug.print(" (store_recv_var 9)", .{}),
+            .store_receiver_variable_10 => std.debug.print(" (store_recv_var 10)", .{}),
+            .store_receiver_variable_11 => std.debug.print(" (store_recv_var 11)", .{}),
+            .store_receiver_variable_12 => std.debug.print(" (store_recv_var 12)", .{}),
+            .store_receiver_variable_13 => std.debug.print(" (store_recv_var 13)", .{}),
+            .store_receiver_variable_14 => std.debug.print(" (store_recv_var 14)", .{}),
+            .store_receiver_variable_15 => std.debug.print(" (store_recv_var 15)", .{}),
+            .pop_store_receiver_variable_0 => std.debug.print(" (pop_store_recv_var 0)", .{}),
+            .pop_store_receiver_variable_1 => std.debug.print(" (pop_store_recv_var 1)", .{}),
+            .pop_store_receiver_variable_2 => std.debug.print(" (pop_store_recv_var 2)", .{}),
+            .pop_store_receiver_variable_3 => std.debug.print(" (pop_store_recv_var 3)", .{}),
+            .pop_store_receiver_variable_4 => std.debug.print(" (pop_store_recv_var 4)", .{}),
+            .pop_store_receiver_variable_5 => std.debug.print(" (pop_store_recv_var 5)", .{}),
+            .pop_store_receiver_variable_6 => std.debug.print(" (pop_store_recv_var 6)", .{}),
+            .pop_store_receiver_variable_7 => std.debug.print(" (pop_store_recv_var 7)", .{}),
+            .pop_store_temporary_0 => std.debug.print(" (pop_store_temp 0)", .{}),
+            .pop_store_temporary_1 => std.debug.print(" (pop_store_temp 1)", .{}),
+            .pop_store_temporary_2 => std.debug.print(" (pop_store_temp 2)", .{}),
+            .pop_store_temporary_3 => std.debug.print(" (pop_store_temp 3)", .{}),
+            .pop_store_temporary_4 => std.debug.print(" (pop_store_temp 4)", .{}),
+            .pop_store_temporary_5 => std.debug.print(" (pop_store_temp 5)", .{}),
+            .pop_store_temporary_6 => std.debug.print(" (pop_store_temp 6)", .{}),
+            .pop_store_temporary_7 => std.debug.print(" (pop_store_temp 7)", .{}),
+            .thread => std.debug.print(" (thread)", .{}),
             .nop => std.debug.print(" (nop)", .{}),
             else => {},
         }
@@ -604,10 +726,13 @@ pub const Debugger = struct {
             self.printCallStack();
         } else if (std.mem.eql(u8, cmd, "lits") or std.mem.eql(u8, cmd, "l")) {
             self.printLiterals();
+        } else if (std.mem.eql(u8, cmd, "src") or std.mem.eql(u8, cmd, "source")) {
+            self.printMethodSource();
         } else if (std.mem.eql(u8, cmd, "state") or std.mem.eql(u8, cmd, "info")) {
             self.printState();
         } else if (std.mem.eql(u8, cmd, "all") or std.mem.eql(u8, cmd, "a")) {
             self.printState();
+            self.printMethodSource();
             self.printStack();
             self.printTemps();
             self.printReceiver();
@@ -626,6 +751,7 @@ pub const Debugger = struct {
                 \\  recv, r      - Print receiver
                 \\  bt, backtrace- Print call stack
                 \\  lits, l      - Print literals
+                \\  src, source  - Print full method source
                 \\  state, info  - Print execution state
                 \\  all, a       - Print everything
                 \\

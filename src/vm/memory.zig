@@ -393,7 +393,13 @@ pub const Heap = struct {
 
     /// Get a global variable
     pub fn getGlobal(self: *Heap, name: []const u8) ?Value {
-        return self.globals.get(name);
+        const result = self.globals.get(name);
+        if (result != null) {
+            std.debug.print("Heap.getGlobal: Found '{s}' = {any}\n", .{name, result});
+        } else {
+            std.debug.print("Heap.getGlobal: Not found '{s}'\n", .{name});
+        }
+        return result;
     }
 
     fn nextHash(self: *Heap) u32 {

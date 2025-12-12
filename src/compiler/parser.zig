@@ -588,6 +588,18 @@ pub const Parser = struct {
             return self.parseLiteralArray();
         }
 
+        // Compile-time constant ##(expr) - treat as just (expr) for runtime eval
+        if (self.match(.double_hash)) {
+            if (self.match(.open_paren)) {
+                const expr = try self.expression();
+                if (!self.match(.close_paren)) {
+                    return ParseError.UnexpectedToken;
+                }
+                return expr;
+            }
+            return ParseError.UnexpectedToken;
+        }
+
         // Identifiers and pseudo-variables
         if (self.match(.identifier)) {
             const name = self.previous.text;
@@ -714,7 +726,7 @@ pub const Parser = struct {
 
         while (!self.check(.close_paren) and !self.isAtEnd()) {
             // Literal array can contain: numbers, strings, symbols, characters, other arrays
-            if (self.check(.integer) or self.check(.float) or
+            if (self.check(.integer) or self.check(.float) or self.check(.scaled_decimal) or
                 self.check(.string) or self.check(.symbol) or
                 self.check(.character) or self.check(.identifier))
             {

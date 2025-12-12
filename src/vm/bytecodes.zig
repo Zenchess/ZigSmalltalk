@@ -50,6 +50,7 @@ pub const Opcode = enum(u8) {
     push_context = 0x28, // Push thisContext
     push_receiver_variable = 0x29, // Next byte is inst var index (extended)
     push_temporary = 0x2A, // Next byte is temp index (extended)
+    thread = 0x3D, // Thread execution (for blocks/continuations)
 
     // STORE OPERATIONS (0x40-0x4F): Store into receiver inst var
     store_receiver_variable_0 = 0x40,
@@ -475,6 +476,7 @@ pub const Primitive = enum(u16) {
     // I/O and System (Dolphin compatible where possible)
     // ========================================================================
     quit = 113, // System >> quit (Dolphin uses 113 for exit)
+    dolphin_stream_next_put_all = 173, // Stream >> nextPutAll: (Dolphin primitive)
     delay_milliseconds = 174, // Delay >> milliseconds
     time_milliseconds = 189, // Time >> millisecondClockValue
 
@@ -569,6 +571,10 @@ pub const Primitive = enum(u16) {
     class_class_var_names = 904, // Behavior >> classVarNames
     class_superclass = 905, // Behavior >> superclass
     class_name = 906, // Class >> name
+
+    // Global lookup
+    global_at = 910, // Smalltalk >> at:
+    global_at_ifAbsent = 911, // Smalltalk >> at:ifAbsent:
 
     _,
 };
