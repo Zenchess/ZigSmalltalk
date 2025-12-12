@@ -18,6 +18,12 @@ pub const bootstrap = @import("image/bootstrap.zig");
 pub const filein = @import("image/filein.zig");
 pub const snapshot = @import("image/snapshot.zig");
 
+// TUI module
+pub const tui = @import("tui/app.zig");
+
+// FFI module
+pub const ffi_gen = @import("vm/ffi_generated.zig");
+
 const Value = object.Value;
 const Heap = memory.Heap;
 const Interpreter = interpreter.Interpreter;
@@ -49,11 +55,228 @@ pub fn main() !void {
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
 
+    // Handle --gen-structs early (doesn't need heap)
+    for (args, 0..) |arg, i| {
+        if (std.mem.eql(u8, arg, "--gen-structs") and i + 1 < args.len) {
+            const lib_name = args[i + 1];
+
+            // Write the base ExternalStructure class first
+            _ = try stdout.write(
+                \\!ByteArray methodsFor!
+                \\
+                \\uint8At: offset
+                \\    "Read unsigned 8-bit value at 0-based byte offset"
+                \\    <primitive: 770>
+                \\    ^self primitiveFailed!
+                \\
+                \\uint16At: offset
+                \\    "Read unsigned 16-bit value at 0-based byte offset (little-endian)"
+                \\    <primitive: 771>
+                \\    ^self primitiveFailed!
+                \\
+                \\uint32At: offset
+                \\    "Read unsigned 32-bit value at 0-based byte offset (little-endian)"
+                \\    <primitive: 772>
+                \\    ^self primitiveFailed!
+                \\
+                \\uint64At: offset
+                \\    "Read unsigned 64-bit value at 0-based byte offset (little-endian)"
+                \\    <primitive: 778>
+                \\    ^self primitiveFailed!
+                \\
+                \\int8At: offset
+                \\    "Read signed 8-bit value at 0-based byte offset"
+                \\    <primitive: 773>
+                \\    ^self primitiveFailed!
+                \\
+                \\int16At: offset
+                \\    "Read signed 16-bit value at 0-based byte offset (little-endian)"
+                \\    <primitive: 774>
+                \\    ^self primitiveFailed!
+                \\
+                \\int32At: offset
+                \\    "Read signed 32-bit value at 0-based byte offset (little-endian)"
+                \\    <primitive: 775>
+                \\    ^self primitiveFailed!
+                \\
+                \\int64At: offset
+                \\    "Read signed 64-bit value at 0-based byte offset (little-endian)"
+                \\    <primitive: 779>
+                \\    ^self primitiveFailed!
+                \\
+                \\float32At: offset
+                \\    "Read 32-bit float value at 0-based byte offset"
+                \\    <primitive: 776>
+                \\    ^self primitiveFailed!
+                \\
+                \\float64At: offset
+                \\    "Read 64-bit float value at 0-based byte offset"
+                \\    <primitive: 777>
+                \\    ^self primitiveFailed!
+                \\
+                \\uint8At: offset put: value
+                \\    "Write unsigned 8-bit value at 0-based byte offset"
+                \\    <primitive: 780>
+                \\    ^self primitiveFailed!
+                \\
+                \\uint16At: offset put: value
+                \\    "Write unsigned 16-bit value at 0-based byte offset (little-endian)"
+                \\    <primitive: 781>
+                \\    ^self primitiveFailed!
+                \\
+                \\uint32At: offset put: value
+                \\    "Write unsigned 32-bit value at 0-based byte offset (little-endian)"
+                \\    <primitive: 782>
+                \\    ^self primitiveFailed!
+                \\
+                \\uint64At: offset put: value
+                \\    "Write unsigned 64-bit value at 0-based byte offset (little-endian)"
+                \\    <primitive: 789>
+                \\    ^self primitiveFailed!
+                \\
+                \\int8At: offset put: value
+                \\    "Write signed 8-bit value at 0-based byte offset"
+                \\    <primitive: 783>
+                \\    ^self primitiveFailed!
+                \\
+                \\int16At: offset put: value
+                \\    "Write signed 16-bit value at 0-based byte offset (little-endian)"
+                \\    <primitive: 784>
+                \\    ^self primitiveFailed!
+                \\
+                \\int32At: offset put: value
+                \\    "Write signed 32-bit value at 0-based byte offset (little-endian)"
+                \\    <primitive: 785>
+                \\    ^self primitiveFailed!
+                \\
+                \\int64At: offset put: value
+                \\    "Write signed 64-bit value at 0-based byte offset (little-endian)"
+                \\    <primitive: 793>
+                \\    ^self primitiveFailed!
+                \\
+                \\float32At: offset put: value
+                \\    "Write 32-bit float value at 0-based byte offset"
+                \\    <primitive: 786>
+                \\    ^self primitiveFailed!
+                \\
+                \\float64At: offset put: value
+                \\    "Write 64-bit float value at 0-based byte offset"
+                \\    <primitive: 787>
+                \\    ^self primitiveFailed!
+                \\
+                \\address
+                \\    "Return pointer to the byte data as an integer (for FFI)"
+                \\    <primitive: 788>
+                \\    ^self primitiveFailed!
+                \\
+                \\!
+                \\
+                \\Object subclass: #ExternalStructure
+                \\    instanceVariableNames: 'bytes'
+                \\    classVariableNames: ''
+                \\    poolDictionaries: ''
+                \\    classInstanceVariableNames: ''!
+                \\
+                \\!ExternalStructure class methodsFor!
+                \\
+                \\new
+                \\    "Create a new instance with a properly sized byte buffer"
+                \\    ^self basicNew initialize!
+                \\
+                \\byteSize
+                \\    "Subclasses must override to return their struct size in bytes"
+                \\    ^0!
+                \\
+                \\fromBytes: aByteArray
+                \\    "Create an instance wrapping existing byte data"
+                \\    ^self basicNew bytes: aByteArray!
+                \\
+                \\!
+                \\
+                \\!ExternalStructure methodsFor!
+                \\
+                \\initialize
+                \\    "Initialize with a zero-filled byte buffer of the correct size"
+                \\    bytes := ByteArray new: self class byteSize.
+                \\    ^self!
+                \\
+                \\bytes
+                \\    "Return the raw byte data"
+                \\    ^bytes!
+                \\
+                \\bytes: aByteArray
+                \\    "Set the raw byte data"
+                \\    bytes := aByteArray.
+                \\    ^self!
+                \\
+                \\byteSize
+                \\    "Return the size in bytes of this structure"
+                \\    ^self class byteSize!
+                \\
+                \\address
+                \\    "Return the memory address of the byte data (for FFI calls)"
+                \\    ^bytes address!
+                \\
+                \\copy
+                \\    "Return a copy of this structure with its own byte buffer"
+                \\    ^self class fromBytes: bytes copy!
+                \\
+                \\uint8At: offset ^bytes uint8At: offset!
+                \\uint16At: offset ^bytes uint16At: offset!
+                \\uint32At: offset ^bytes uint32At: offset!
+                \\uint64At: offset ^bytes uint64At: offset!
+                \\int8At: offset ^bytes int8At: offset!
+                \\int16At: offset ^bytes int16At: offset!
+                \\int32At: offset ^bytes int32At: offset!
+                \\int64At: offset ^bytes int64At: offset!
+                \\float32At: offset ^bytes float32At: offset!
+                \\float64At: offset ^bytes float64At: offset!
+                \\uint8At: offset put: value ^bytes uint8At: offset put: value!
+                \\uint16At: offset put: value ^bytes uint16At: offset put: value!
+                \\uint32At: offset put: value ^bytes uint32At: offset put: value!
+                \\uint64At: offset put: value ^bytes uint64At: offset put: value!
+                \\int8At: offset put: value ^bytes int8At: offset put: value!
+                \\int16At: offset put: value ^bytes int16At: offset put: value!
+                \\int32At: offset put: value ^bytes int32At: offset put: value!
+                \\int64At: offset put: value ^bytes int64At: offset put: value!
+                \\float32At: offset put: value ^bytes float32At: offset put: value!
+                \\float64At: offset put: value ^bytes float64At: offset put: value!
+                \\
+                \\!
+                \\
+                \\
+            );
+
+            // Generate struct code for the library
+            // Use a fixed buffer for struct output
+            var struct_buf: [1024 * 1024]u8 = undefined; // 1MB buffer
+            var fbs = std.io.fixedBufferStream(&struct_buf);
+            const struct_writer = fbs.writer();
+
+            const success = ffi_gen.generateStructCode(lib_name, struct_writer) catch {
+                std.debug.print("Error generating struct code for {s}\n", .{lib_name});
+                return;
+            };
+
+            // Write generated struct code to stdout
+            _ = try stdout.write(fbs.getWritten());
+
+            if (!success) {
+                std.debug.print("Unknown library: {s}\n", .{lib_name});
+                std.debug.print("Available libraries with struct support: Raylib\n", .{});
+                return;
+            }
+
+            return;
+        }
+    }
+
     // Handle --image <path> and --load-order <path> flags
     var heap: *Heap = undefined;
     var loaded_from_image = false;
     var load_order_path: ?[]const u8 = null;
     var repl_mode = true;
+    var tui_mode = false;
     var arg_index: usize = 1;
     while (arg_index < args.len) : (arg_index += 1) {
         if (std.mem.eql(u8, args[arg_index], "--image") and arg_index + 1 < args.len) {
@@ -70,6 +293,8 @@ pub fn main() !void {
             arg_index += 1; // skip path
         } else if (std.mem.eql(u8, args[arg_index], "--no-repl")) {
             repl_mode = false;
+        } else if (std.mem.eql(u8, args[arg_index], "--tui")) {
+            tui_mode = true;
         }
     }
 
@@ -148,6 +373,9 @@ pub fn main() !void {
                 skip_next = true;
                 continue;
             }
+            if (std.mem.eql(u8, arg, "--tui") or std.mem.eql(u8, arg, "--no-repl")) {
+                continue;
+            }
             continue;
         }
 
@@ -175,6 +403,12 @@ pub fn main() !void {
     }
 
     if (!repl_mode) {
+        return;
+    }
+
+    // TUI mode
+    if (tui_mode) {
+        try tui.runTUI(allocator, heap, &interp);
         return;
     }
 

@@ -103,6 +103,9 @@ pub const Interpreter = struct {
     // this stores the temp_base of the home context we want to return to
     non_local_return_target: usize,
 
+    // Transcript output callback - if set, transcript primitives call this instead of stdout
+    transcript_callback: ?*const fn ([]const u8) void,
+
     pub fn init(heap: *Heap) Interpreter {
         return .{
             .heap = heap,
@@ -127,7 +130,23 @@ pub const Interpreter = struct {
             .primitive_block_depth = 0,
             .primitive_block_bases = [_]usize{0} ** 64,
             .non_local_return_target = 0,
+            .transcript_callback = null,
         };
+    }
+
+    /// Set transcript output callback (for TUI mode)
+    pub fn setTranscriptCallback(self: *Interpreter, callback: ?*const fn ([]const u8) void) void {
+        self.transcript_callback = callback;
+    }
+
+    /// Write to transcript (uses callback if set, otherwise stdout)
+    pub fn writeTranscript(self: *Interpreter, text: []const u8) void {
+        if (self.transcript_callback) |cb| {
+            cb(text);
+        } else {
+            const stdout = std.fs.File.stdout();
+            _ = stdout.write(text) catch {};
+        }
     }
 
     /// Push an exception handler onto the handler stack
@@ -679,15 +698,12 @@ pub const Interpreter = struct {
 
                     // Store: outer temp base (for level 1 access), start PC, num args, enclosing method, receiver, home temp base (for level >= 2)
                     // outer_temp_base = immediate enclosing block's frame (for block args/temps)
-                    // home_temp_base = method's frame (for non-local returns)
-                    // If inside primitive block eval AND at or below the block's context level,
-                    // use home_temp_base. Otherwise use temp_base.
+                    // home_temp_base = method's frame (for non-local returns and level >= 2 variable access)
                     const captured_base = self.temp_base; // immediate enclosing context
-                    const prim_ctx_base = if (self.primitive_block_depth > 0) self.primitive_block_bases[self.primitive_block_depth - 1] else 0;
-                    const home_base = if (self.primitive_block_depth > 0 and self.context_ptr <= prim_ctx_base)
-                        self.home_temp_base // nested block inside primitive-evaluated block
-                    else
-                        self.temp_base; // block in a method (either top-level or called from a block)
+                    // home_base should always be the method's frame (home_temp_base),
+                    // even when creating nested blocks. If we're at the method level,
+                    // home_temp_base == temp_base, so this is correct in all cases.
+                    const home_base = self.home_temp_base;
                     closure.setField(0, Value.fromSmallInt(@intCast(captured_base)), 6); // outer temp base (level 1)
                     closure.setField(1, Value.fromSmallInt(@intCast(self.ip)), 6); // start PC (current position in bytecodes)
                     closure.setField(2, Value.fromSmallInt(num_args), 6); // num args

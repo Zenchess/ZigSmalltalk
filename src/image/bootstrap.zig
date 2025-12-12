@@ -979,6 +979,12 @@ pub fn installCoreMethods(heap: *Heap) !void {
     try installMethod(heap, interval_class, "at:", try createPrimitiveMethod(heap, 1, @intFromEnum(Primitive.interval_at)));
     try installMethod(heap, interval_class, "do:", try createPrimitiveMethod(heap, 1, @intFromEnum(Primitive.interval_do)));
 
+    // Character methods
+    const character_class = heap.getClass(Heap.CLASS_CHARACTER).asObject();
+    try installMethod(heap, character_class, "asciiValue", try createPrimitiveMethod(heap, 0, @intFromEnum(Primitive.char_code)));
+    try installMethod(heap, character_class, "asInteger", try createPrimitiveMethod(heap, 0, @intFromEnum(Primitive.char_code)));
+    try installMethod(heap, character_class, "codePoint", try createPrimitiveMethod(heap, 0, @intFromEnum(Primitive.char_code)));
+
     // UndefinedObject methods (nil)
     const undefined_object_class = heap.getClass(Heap.CLASS_UNDEFINED_OBJECT).asObject();
     try installMethod(heap, undefined_object_class, "isNil", try createPrimitiveMethod(heap, 0, @intFromEnum(Primitive.is_nil)));
@@ -1016,6 +1022,10 @@ pub fn installCoreMethods(heap: *Heap) !void {
     try installClassMethod(heap, byte_array_class, "basicNew", try createPrimitiveMethod(heap, 0, @intFromEnum(Primitive.basic_new)));
     try installClassMethod(heap, byte_array_class, "new:", try createPrimitiveMethod(heap, 1, @intFromEnum(Primitive.basic_new_size)));
     try installClassMethod(heap, byte_array_class, "basicNew:", try createPrimitiveMethod(heap, 1, @intFromEnum(Primitive.basic_new_size)));
+
+    // Character class methods
+    try installClassMethod(heap, character_class, "value:", try createPrimitiveMethod(heap, 1, @intFromEnum(Primitive.char_from_code)));
+    try installClassMethod(heap, character_class, "codePoint:", try createPrimitiveMethod(heap, 1, @intFromEnum(Primitive.char_from_code)));
 }
 
 /// Ensure critical primitive methods are present (used after loading snapshots)

@@ -316,5 +316,5 @@ print: anObject
 	^self show: anObject printString!
 !
 
-"Initialize Transcript global"!
-Transcript := TranscriptStub new!
+"Initialize Transcript global only if not already set"!
+(Transcript isNil or: [Transcript class name = #DeafObject]) ifTrue: [Transcript := TranscriptStub new]!

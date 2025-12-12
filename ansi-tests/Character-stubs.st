@@ -44,4 +44,39 @@ isDigit
 isAlphaNumeric
     "Answer whether the receiver is a letter or digit"
     ^self isLetter or: [self isDigit]!
+
+isLetter
+    "Answer whether the receiver is a letter (a-z, A-Z)"
+    | cp |
+    cp := self codePoint.
+    ^((cp >= 65) and: [cp <= 90]) or: [(cp >= 97) and: [cp <= 122]]!
+
+isLowercase
+    "Answer whether the receiver is a lowercase letter (a-z)"
+    | cp |
+    cp := self codePoint.
+    ^(cp >= 97) and: [cp <= 122]!
+
+isUppercase
+    "Answer whether the receiver is an uppercase letter (A-Z)"
+    | cp |
+    cp := self codePoint.
+    ^(cp >= 65) and: [cp <= 90]!
+
+isGraph
+    "Answer whether the receiver is a printable non-space character"
+    | cp |
+    cp := self codePoint.
+    ^(cp > 32) and: [cp < 127]!
+
+isPrivateUse
+    "Answer whether the receiver is a Unicode private use character"
+    ^false!
+!
+
+!Character methodsFor: 'printing'!
+printOn: aStream
+    "Append the literal representation of the receiver to the stream"
+    aStream nextPut: $$.
+    aStream nextPut: self!
 !

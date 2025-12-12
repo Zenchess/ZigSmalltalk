@@ -556,12 +556,74 @@ pub const Primitive = enum(u16) {
     transcript_flush = 653,
 
     // FFI (Dolphin uses 200+ for VM-internal, we use 700+)
-    ffi_call = 700,
+    ffi_call = 700, // Generic FFI call with sub-primitive
     ffi_callback = 701,
     ffi_malloc = 702,
     ffi_free = 703,
     ffi_read = 704,
     ffi_write = 705,
+
+    // LibC string functions (710-719)
+    ffi_strlen = 710,
+    ffi_puts = 711,
+
+    // LibC math functions (720-749)
+    ffi_sin = 720,
+    ffi_cos = 721,
+    ffi_sqrt = 722,
+    ffi_pow = 723,
+    ffi_exp = 724,
+    ffi_log = 725,
+    ffi_floor = 726,
+    ffi_ceil = 727,
+    ffi_fabs = 728,
+    ffi_atan2 = 729,
+    ffi_tan = 730,
+    ffi_asin = 731,
+    ffi_acos = 732,
+    ffi_atan = 733,
+
+    // Memory operations (750-759)
+    ffi_memset = 750,
+    ffi_memcpy = 751,
+    ffi_read_int8 = 752,
+    ffi_read_int16 = 753,
+    ffi_read_int32 = 754,
+    ffi_read_int64 = 755,
+    ffi_read_float64 = 756,
+    ffi_write_int8 = 757,
+    ffi_write_int32 = 758,
+    ffi_write_float64 = 759,
+
+    // FFI introspection
+    ffi_libraries = 760, // FFI class >> libraries - returns array of library names
+    ffi_functions = 761, // 'LibMath' ffiFunctions - returns array of function names
+
+    // ByteArray/ExternalStructure field access (770-789)
+    // Read operations (receiver is ByteArray, arg is offset)
+    bytes_uint8_at = 770, // ByteArray >> uint8At:
+    bytes_uint16_at = 771, // ByteArray >> uint16At:
+    bytes_uint32_at = 772, // ByteArray >> uint32At:
+    bytes_int8_at = 773, // ByteArray >> int8At:
+    bytes_int16_at = 774, // ByteArray >> int16At:
+    bytes_int32_at = 775, // ByteArray >> int32At:
+    bytes_float32_at = 776, // ByteArray >> float32At:
+    bytes_float64_at = 777, // ByteArray >> float64At:
+    // Write operations (receiver is ByteArray, args are offset and value)
+    bytes_uint8_at_put = 780, // ByteArray >> uint8At:put:
+    bytes_uint16_at_put = 781, // ByteArray >> uint16At:put:
+    bytes_uint32_at_put = 782, // ByteArray >> uint32At:put:
+    bytes_int8_at_put = 783, // ByteArray >> int8At:put:
+    bytes_int16_at_put = 784, // ByteArray >> int16At:put:
+    bytes_int32_at_put = 785, // ByteArray >> int32At:put:
+    bytes_float32_at_put = 786, // ByteArray >> float32At:put:
+    bytes_float64_at_put = 787, // ByteArray >> float64At:put:
+    bytes_address = 788, // ByteArray >> address - returns pointer to data
+
+    // FFI struct introspection (790-799)
+    ffi_struct_names = 790, // 'Raylib' ffiStructNames - returns array of struct names
+    ffi_struct_info = 791, // 'Raylib' ffiStructInfo: #Color - returns struct metadata
+    ffi_call_with_struct = 792, // FFI call that handles struct args/returns
 
     // Reflection primitives (900+)
     class_selectors = 900, // Behavior >> selectors

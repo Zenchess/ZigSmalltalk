@@ -198,18 +198,9 @@ inject: initialValue into: aBlock
     ^result!
 !
 
-!Set methodsFor: 'initialization'!
-initialize
-    "Initialize the receiver - do nothing for simple sets"
-    ^self!
-!
+"REMOVED: Set>>initialize stub - was breaking tally initialization"
+"REMOVED: Set>>do: stub - primitive 800 not implemented, use native Smalltalk"
 
-!Set methodsFor: 'enumerating'!
-do: aBlock
-    "Evaluate aBlock for each element in the set"
-    <primitive: 800>
-    ^self!
-!
 
 !Set methodsFor: 'adding'!
 addAll: aCollection
@@ -445,4 +436,20 @@ value: opBlock shouldRaise: anException
     | ok |
     ok := [opBlock value. false] on: anException do: [:ex | true].
     self assert: ok!
+
+selector: aSelector inProtocol: aSymbol behavesLike: arrays
+    "Simplified version that works around issues with asANSITestArray and multi-line"
+    arrays do: [:each | self runBehavesTest: each selector: aSelector protocol: aSymbol]!
+
+runBehavesTest: each selector: aSelector protocol: aSymbol
+    "Helper for selector:inProtocol:behavesLike:"
+    | opResult first args |
+    first := each first.
+    args := each copyFrom: 2 to: each size - 1.
+    opResult := first perform: aSelector withArguments: args.
+    self assert: (opResult = each last)!
+
+asANSITestArray: arrays
+    "Simplified - just return the arrays unchanged"
+    ^arrays!
 !

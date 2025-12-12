@@ -3,6 +3,8 @@ const object = @import("object.zig");
 const memory = @import("memory.zig");
 const bytecodes = @import("bytecodes.zig");
 const interpreter_mod = @import("interpreter.zig");
+const ffi = @import("ffi.zig");
+const ffi_autogen = @import("ffi_autogen.zig");
 
 const Value = object.Value;
 const Object = object.Object;
@@ -283,6 +285,67 @@ pub fn executePrimitive(interp: *Interpreter, prim_index: u16) InterpreterError!
         // Global lookup primitives
         .global_at => primGlobalAt(interp),
         .global_at_ifAbsent => primGlobalAtIfAbsent(interp),
+
+        // FFI primitives
+        .ffi_malloc => primFFIMalloc(interp),
+        .ffi_free => primFFIFree(interp),
+        .ffi_strlen => primFFIStrlen(interp),
+        .ffi_puts => primFFIPuts(interp),
+        .ffi_sin => primFFISin(interp),
+        .ffi_cos => primFFICos(interp),
+        .ffi_sqrt => primFFISqrt(interp),
+        .ffi_pow => primFFIPow(interp),
+        .ffi_exp => primFFIExp(interp),
+        .ffi_log => primFFILog(interp),
+        .ffi_floor => primFFIFloor(interp),
+        .ffi_ceil => primFFICeil(interp),
+        .ffi_fabs => primFFIFabs(interp),
+        .ffi_atan2 => primFFIAtan2(interp),
+        .ffi_tan => primFFITan(interp),
+        .ffi_asin => primFFIAsin(interp),
+        .ffi_acos => primFFIAcos(interp),
+        .ffi_atan => primFFIAtan(interp),
+        .ffi_memset => primFFIMemset(interp),
+        .ffi_memcpy => primFFIMemcpy(interp),
+        .ffi_read_int8 => primFFIReadInt8(interp),
+        .ffi_read_int16 => primFFIReadInt16(interp),
+        .ffi_read_int32 => primFFIReadInt32(interp),
+        .ffi_read_int64 => primFFIReadInt64(interp),
+        .ffi_read_float64 => primFFIReadFloat64(interp),
+        .ffi_write_int8 => primFFIWriteInt8(interp),
+        .ffi_write_int32 => primFFIWriteInt32(interp),
+        .ffi_write_float64 => primFFIWriteFloat64(interp),
+
+        // Generic auto-generated FFI call
+        .ffi_call => primFFIGenericCall(interp),
+
+        // FFI introspection
+        .ffi_libraries => primFFILibraries(interp),
+        .ffi_functions => primFFIFunctions(interp),
+
+        // ByteArray/ExternalStructure field access primitives
+        .bytes_uint8_at => primBytesUint8At(interp),
+        .bytes_uint16_at => primBytesUint16At(interp),
+        .bytes_uint32_at => primBytesUint32At(interp),
+        .bytes_int8_at => primBytesInt8At(interp),
+        .bytes_int16_at => primBytesInt16At(interp),
+        .bytes_int32_at => primBytesInt32At(interp),
+        .bytes_float32_at => primBytesFloat32At(interp),
+        .bytes_float64_at => primBytesFloat64At(interp),
+        .bytes_uint8_at_put => primBytesUint8AtPut(interp),
+        .bytes_uint16_at_put => primBytesUint16AtPut(interp),
+        .bytes_uint32_at_put => primBytesUint32AtPut(interp),
+        .bytes_int8_at_put => primBytesInt8AtPut(interp),
+        .bytes_int16_at_put => primBytesInt16AtPut(interp),
+        .bytes_int32_at_put => primBytesInt32AtPut(interp),
+        .bytes_float32_at_put => primBytesFloat32AtPut(interp),
+        .bytes_float64_at_put => primBytesFloat64AtPut(interp),
+        .bytes_address => primBytesAddress(interp),
+
+        // FFI struct introspection
+        .ffi_struct_names => primFFIStructNames(interp),
+        .ffi_struct_info => primFFIStructInfo(interp),
+        .ffi_call_with_struct => primFFICallWithStruct(interp),
 
         else => InterpreterError.PrimitiveFailed,
     };
@@ -1673,9 +1736,25 @@ fn primSize(interp: *Interpreter) InterpreterError!Value {
     }
 
     const obj = recv.asObject();
+    const format = obj.header.getFormat();
 
-    // For variable-size objects, return the size from the header
-    // This works for Arrays, Strings, ByteArrays, etc.
+    // For variable objects, basicSize returns only the indexed slots (not named instance vars)
+    if (format == .variable) {
+        // Get the number of named instance variables from the class
+        const class_val = interp.heap.getClass(obj.header.class_index);
+        if (class_val.isObject()) {
+            const class_obj = class_val.asObject();
+            const format_val = class_obj.getField(Heap.CLASS_FIELD_FORMAT, Heap.CLASS_NUM_FIELDS);
+            if (format_val.isSmallInt()) {
+                const info = Heap.decodeInstanceSpec(format_val.asSmallInt());
+                const total_size = obj.header.size;
+                const indexed_size = if (total_size > info.inst_size) total_size - info.inst_size else 0;
+                return Value.fromSmallInt(@intCast(indexed_size));
+            }
+        }
+    }
+
+    // For other objects (Arrays, Strings, ByteArrays, etc.), return total size
     return Value.fromSmallInt(@intCast(obj.header.size));
 }
 
@@ -1767,6 +1846,7 @@ fn primCharCode(interp: *Interpreter) InterpreterError!Value {
 
 fn primCharFromCode(interp: *Interpreter) InterpreterError!Value {
     const code = try interp.pop();
+    _ = try interp.pop(); // Pop receiver (Character class)
 
     if (code.isSmallInt()) {
         const cp = code.asSmallInt();
@@ -1775,7 +1855,6 @@ fn primCharFromCode(interp: *Interpreter) InterpreterError!Value {
         }
     }
 
-    try interp.push(code);
     return InterpreterError.PrimitiveFailed;
 }
 
@@ -7144,14 +7223,13 @@ fn primIdentityHash(interp: *Interpreter) InterpreterError!Value {
 
 fn primTranscriptShow(interp: *Interpreter) InterpreterError!Value {
     // Primitive 650: Transcript >> show:
-    // Output the string representation of an object to stdout
+    // Output the string representation of an object to transcript
     const obj = try interp.pop();
     const receiver = try interp.pop(); // Pop the receiver (Transcript)
 
-    // Get string representation and output to stdout
+    // Get string representation and output to transcript (via callback or stdout)
     const str_repr = try objectPrintString(interp, obj);
-    const stdout = std.fs.File.stdout();
-    _ = stdout.write(str_repr) catch {};
+    interp.writeTranscript(str_repr);
 
     // Return self (the receiver) for chaining
     return receiver;
@@ -7159,16 +7237,15 @@ fn primTranscriptShow(interp: *Interpreter) InterpreterError!Value {
 
 fn primTranscriptCr(interp: *Interpreter) InterpreterError!Value {
     // Primitive 651: Transcript >> cr
-    // Output a newline to stdout
+    // Output a newline to transcript
     const receiver = try interp.pop(); // Pop the receiver (Transcript)
-    const stdout = std.fs.File.stdout();
-    _ = stdout.write("\n") catch {};
+    interp.writeTranscript("\n");
     return receiver; // Return self for chaining
 }
 
 fn primTranscriptNextPutAll(interp: *Interpreter) InterpreterError!Value {
     // Primitive 652: Transcript >> nextPutAll:
-    // Output a string directly to stdout
+    // Output a string directly to transcript
     const str = try interp.pop();
     const receiver = try interp.pop(); // Pop the receiver (Transcript)
 
@@ -7176,8 +7253,7 @@ fn primTranscriptNextPutAll(interp: *Interpreter) InterpreterError!Value {
         const str_obj = str.asObject();
         const byte_size = @as(usize, @intCast(str_obj.header.size));
         const bytes = str_obj.bytes(byte_size);
-        const stdout = std.fs.File.stdout();
-        _ = stdout.write(bytes[0..byte_size]) catch {};
+        interp.writeTranscript(bytes[0..byte_size]);
     }
 
     return receiver; // Return self for chaining
@@ -7288,4 +7364,1153 @@ fn primGlobalAtIfAbsent(interp: *Interpreter) InterpreterError!Value {
 
     // Not found - primitive fails, Smalltalk fallback handles absent block
     return InterpreterError.PrimitiveFailed;
+}
+
+// ============================================================================
+// FFI Primitives
+// ============================================================================
+
+fn primFFIMalloc(interp: *Interpreter) InterpreterError!Value {
+    const size = try interp.pop();
+    _ = try interp.pop(); // receiver (LibC class)
+
+    var args = [_]Value{size};
+    const result = ffi.libc_malloc(interp.heap, &args) catch {
+        try interp.push(size);
+        return InterpreterError.PrimitiveFailed;
+    };
+    return result;
+}
+
+fn primFFIFree(interp: *Interpreter) InterpreterError!Value {
+    const ptr = try interp.pop();
+    _ = try interp.pop(); // receiver
+
+    var args = [_]Value{ptr};
+    _ = ffi.libc_free(interp.heap, &args) catch {
+        try interp.push(ptr);
+        return InterpreterError.PrimitiveFailed;
+    };
+    return Value.nil;
+}
+
+fn primFFIStrlen(interp: *Interpreter) InterpreterError!Value {
+    const str = try interp.pop();
+    _ = try interp.pop(); // receiver
+
+    var args = [_]Value{str};
+    const result = ffi.libc_strlen(interp.heap, &args) catch {
+        try interp.push(str);
+        return InterpreterError.PrimitiveFailed;
+    };
+    return result;
+}
+
+fn primFFIPuts(interp: *Interpreter) InterpreterError!Value {
+    const str = try interp.pop();
+    _ = try interp.pop(); // receiver
+
+    var args = [_]Value{str};
+    const result = ffi.libc_puts(interp.heap, &args, interp.heap.allocator) catch {
+        try interp.push(str);
+        return InterpreterError.PrimitiveFailed;
+    };
+    return result;
+}
+
+fn primFFISin(interp: *Interpreter) InterpreterError!Value {
+    const x = try interp.pop();
+    _ = try interp.pop(); // receiver
+
+    var args = [_]Value{x};
+    const result = ffi.libc_sin(interp.heap, &args) catch {
+        try interp.push(x);
+        return InterpreterError.PrimitiveFailed;
+    };
+    return result;
+}
+
+fn primFFICos(interp: *Interpreter) InterpreterError!Value {
+    const x = try interp.pop();
+    _ = try interp.pop(); // receiver
+
+    var args = [_]Value{x};
+    const result = ffi.libc_cos(interp.heap, &args) catch {
+        try interp.push(x);
+        return InterpreterError.PrimitiveFailed;
+    };
+    return result;
+}
+
+fn primFFISqrt(interp: *Interpreter) InterpreterError!Value {
+    const x = try interp.pop();
+    _ = try interp.pop(); // receiver
+
+    var args = [_]Value{x};
+    const result = ffi.libc_sqrt(interp.heap, &args) catch {
+        try interp.push(x);
+        return InterpreterError.PrimitiveFailed;
+    };
+    return result;
+}
+
+fn primFFIPow(interp: *Interpreter) InterpreterError!Value {
+    const y = try interp.pop();
+    const x = try interp.pop();
+    _ = try interp.pop(); // receiver
+
+    var args = [_]Value{ x, y };
+    const result = ffi.libc_pow(interp.heap, &args) catch {
+        try interp.push(y);
+        try interp.push(x);
+        return InterpreterError.PrimitiveFailed;
+    };
+    return result;
+}
+
+fn primFFIExp(interp: *Interpreter) InterpreterError!Value {
+    const x = try interp.pop();
+    _ = try interp.pop(); // receiver
+
+    var args = [_]Value{x};
+    const result = ffi.libc_exp(interp.heap, &args) catch {
+        try interp.push(x);
+        return InterpreterError.PrimitiveFailed;
+    };
+    return result;
+}
+
+fn primFFILog(interp: *Interpreter) InterpreterError!Value {
+    const x = try interp.pop();
+    _ = try interp.pop(); // receiver
+
+    var args = [_]Value{x};
+    const result = ffi.libc_log(interp.heap, &args) catch {
+        try interp.push(x);
+        return InterpreterError.PrimitiveFailed;
+    };
+    return result;
+}
+
+fn primFFIFloor(interp: *Interpreter) InterpreterError!Value {
+    const x = try interp.pop();
+    _ = try interp.pop(); // receiver
+
+    var args = [_]Value{x};
+    const result = ffi.libc_floor(interp.heap, &args) catch {
+        try interp.push(x);
+        return InterpreterError.PrimitiveFailed;
+    };
+    return result;
+}
+
+fn primFFICeil(interp: *Interpreter) InterpreterError!Value {
+    const x = try interp.pop();
+    _ = try interp.pop(); // receiver
+
+    var args = [_]Value{x};
+    const result = ffi.libc_ceil(interp.heap, &args) catch {
+        try interp.push(x);
+        return InterpreterError.PrimitiveFailed;
+    };
+    return result;
+}
+
+fn primFFIFabs(interp: *Interpreter) InterpreterError!Value {
+    const x = try interp.pop();
+    _ = try interp.pop(); // receiver
+
+    var args = [_]Value{x};
+    const result = ffi.libc_abs_float(interp.heap, &args) catch {
+        try interp.push(x);
+        return InterpreterError.PrimitiveFailed;
+    };
+    return result;
+}
+
+fn primFFIAtan2(interp: *Interpreter) InterpreterError!Value {
+    const x = try interp.pop();
+    const y = try interp.pop();
+    _ = try interp.pop(); // receiver
+
+    var args = [_]Value{ y, x };
+    const result = ffi.libc_atan2(interp.heap, &args) catch {
+        try interp.push(x);
+        try interp.push(y);
+        return InterpreterError.PrimitiveFailed;
+    };
+    return result;
+}
+
+fn primFFITan(interp: *Interpreter) InterpreterError!Value {
+    const x = try interp.pop();
+    _ = try interp.pop(); // receiver
+
+    var args = [_]Value{x};
+    const result = ffi.libc_tan(interp.heap, &args) catch {
+        try interp.push(x);
+        return InterpreterError.PrimitiveFailed;
+    };
+    return result;
+}
+
+fn primFFIAsin(interp: *Interpreter) InterpreterError!Value {
+    const x = try interp.pop();
+    _ = try interp.pop(); // receiver
+
+    var args = [_]Value{x};
+    const result = ffi.libc_asin(interp.heap, &args) catch {
+        try interp.push(x);
+        return InterpreterError.PrimitiveFailed;
+    };
+    return result;
+}
+
+fn primFFIAcos(interp: *Interpreter) InterpreterError!Value {
+    const x = try interp.pop();
+    _ = try interp.pop(); // receiver
+
+    var args = [_]Value{x};
+    const result = ffi.libc_acos(interp.heap, &args) catch {
+        try interp.push(x);
+        return InterpreterError.PrimitiveFailed;
+    };
+    return result;
+}
+
+fn primFFIAtan(interp: *Interpreter) InterpreterError!Value {
+    const x = try interp.pop();
+    _ = try interp.pop(); // receiver
+
+    var args = [_]Value{x};
+    const result = ffi.libc_atan(interp.heap, &args) catch {
+        try interp.push(x);
+        return InterpreterError.PrimitiveFailed;
+    };
+    return result;
+}
+
+fn primFFIMemset(interp: *Interpreter) InterpreterError!Value {
+    const size = try interp.pop();
+    const val = try interp.pop();
+    const ptr = try interp.pop();
+    _ = try interp.pop(); // receiver
+
+    var args = [_]Value{ ptr, val, size };
+    const result = ffi.libc_memset(interp.heap, &args) catch {
+        try interp.push(size);
+        try interp.push(val);
+        try interp.push(ptr);
+        return InterpreterError.PrimitiveFailed;
+    };
+    return result;
+}
+
+fn primFFIMemcpy(interp: *Interpreter) InterpreterError!Value {
+    const size = try interp.pop();
+    const src = try interp.pop();
+    const dest = try interp.pop();
+    _ = try interp.pop(); // receiver
+
+    var args = [_]Value{ dest, src, size };
+    const result = ffi.libc_memcpy(interp.heap, &args) catch {
+        try interp.push(size);
+        try interp.push(src);
+        try interp.push(dest);
+        return InterpreterError.PrimitiveFailed;
+    };
+    return result;
+}
+
+fn primFFIReadInt8(interp: *Interpreter) InterpreterError!Value {
+    const ptr = try interp.pop();
+    _ = try interp.pop(); // receiver
+
+    var args = [_]Value{ptr};
+    const result = ffi.readInt8(interp.heap, &args) catch {
+        try interp.push(ptr);
+        return InterpreterError.PrimitiveFailed;
+    };
+    return result;
+}
+
+fn primFFIReadInt16(interp: *Interpreter) InterpreterError!Value {
+    const ptr = try interp.pop();
+    _ = try interp.pop(); // receiver
+
+    var args = [_]Value{ptr};
+    const result = ffi.readInt16(interp.heap, &args) catch {
+        try interp.push(ptr);
+        return InterpreterError.PrimitiveFailed;
+    };
+    return result;
+}
+
+fn primFFIReadInt32(interp: *Interpreter) InterpreterError!Value {
+    const ptr = try interp.pop();
+    _ = try interp.pop(); // receiver
+
+    var args = [_]Value{ptr};
+    const result = ffi.readInt32(interp.heap, &args) catch {
+        try interp.push(ptr);
+        return InterpreterError.PrimitiveFailed;
+    };
+    return result;
+}
+
+fn primFFIReadInt64(interp: *Interpreter) InterpreterError!Value {
+    const ptr = try interp.pop();
+    _ = try interp.pop(); // receiver
+
+    var args = [_]Value{ptr};
+    const result = ffi.readInt64(interp.heap, &args) catch {
+        try interp.push(ptr);
+        return InterpreterError.PrimitiveFailed;
+    };
+    return result;
+}
+
+fn primFFIReadFloat64(interp: *Interpreter) InterpreterError!Value {
+    const ptr = try interp.pop();
+    _ = try interp.pop(); // receiver
+
+    var args = [_]Value{ptr};
+    const result = ffi.readFloat64(interp.heap, &args) catch {
+        try interp.push(ptr);
+        return InterpreterError.PrimitiveFailed;
+    };
+    return result;
+}
+
+fn primFFIWriteInt8(interp: *Interpreter) InterpreterError!Value {
+    const val = try interp.pop();
+    const ptr = try interp.pop();
+    _ = try interp.pop(); // receiver
+
+    var args = [_]Value{ ptr, val };
+    _ = ffi.writeInt8(interp.heap, &args) catch {
+        try interp.push(val);
+        try interp.push(ptr);
+        return InterpreterError.PrimitiveFailed;
+    };
+    return Value.nil;
+}
+
+fn primFFIWriteInt32(interp: *Interpreter) InterpreterError!Value {
+    const val = try interp.pop();
+    const ptr = try interp.pop();
+    _ = try interp.pop(); // receiver
+
+    var args = [_]Value{ ptr, val };
+    _ = ffi.writeInt32(interp.heap, &args) catch {
+        try interp.push(val);
+        try interp.push(ptr);
+        return InterpreterError.PrimitiveFailed;
+    };
+    return Value.nil;
+}
+
+fn primFFIWriteFloat64(interp: *Interpreter) InterpreterError!Value {
+    const val = try interp.pop();
+    const ptr = try interp.pop();
+    _ = try interp.pop(); // receiver
+
+    var args = [_]Value{ ptr, val };
+    _ = ffi.writeFloat64(interp.heap, &args) catch {
+        try interp.push(val);
+        try interp.push(ptr);
+        return InterpreterError.PrimitiveFailed;
+    };
+    return Value.nil;
+}
+
+// ============================================================================
+// Generic Auto-Generated FFI Call
+// ============================================================================
+
+/// Generic FFI call primitive
+/// Stack: receiver (library name as String/Symbol) args (Array) funcName (String/Symbol)
+/// Usage in Smalltalk: LibMath ffiCall: #sin with: { 1.0 }
+fn primFFIGenericCall(interp: *Interpreter) InterpreterError!Value {
+    // Stack for 'LibMath' ffiCall: #sin with: { 1.0 }
+    // Pop in reverse order of how they were pushed
+    const args_val = try interp.pop();      // { 1.0 } - second keyword arg
+    const func_name_val = try interp.pop(); // #sin - first keyword arg
+    const receiver = try interp.pop();      // 'LibMath' - receiver
+
+    // Get library name from receiver (should be a class name like 'LibMath')
+    const lib_name = getStringFromValue(interp.heap, receiver) orelse {
+        // Restore stack in original order (receiver first, then args in order)
+        try interp.push(receiver);
+        try interp.push(func_name_val);
+        try interp.push(args_val);
+        return InterpreterError.PrimitiveFailed;
+    };
+
+    // Get function name
+    const func_name = getStringFromValue(interp.heap, func_name_val) orelse {
+        try interp.push(receiver);
+        try interp.push(func_name_val);
+        try interp.push(args_val);
+        return InterpreterError.PrimitiveFailed;
+    };
+
+    // Extract arguments from array
+    // Note: header.size is the number of slots, not bytes
+    var args_slice: []const Value = &.{};
+    if (args_val.isObject()) {
+        const args_obj = args_val.asObject();
+        if (args_obj.header.class_index == Heap.CLASS_ARRAY) {
+            const arr_size = args_obj.header.size; // size IS the slot count
+            args_slice = args_obj.fields(arr_size);
+        }
+    }
+
+    // Call the FFI function
+    const result = ffi_autogen.callFFI(lib_name, func_name, interp.heap, args_slice, interp.heap.allocator) catch {
+        try interp.push(receiver);
+        try interp.push(func_name_val);
+        try interp.push(args_val);
+        return InterpreterError.PrimitiveFailed;
+    };
+
+    return result;
+}
+
+/// Helper to extract a string from a Value (String or Symbol)
+fn getStringFromValue(_: *Heap, val: Value) ?[]const u8 {
+    if (val.isObject()) {
+        const obj = val.asObject();
+        if (obj.header.class_index == Heap.CLASS_STRING or
+            obj.header.class_index == Heap.CLASS_SYMBOL)
+        {
+            return obj.bytes(obj.header.size);
+        }
+    }
+    // Also check for class objects - they might have a name
+    if (val.isObject()) {
+        const obj = val.asObject();
+        // If it's a class, get its name
+        if (obj.header.size >= 8 * @sizeOf(Value)) {
+            const class_fields = obj.fields(8);
+            const name_val = class_fields[Heap.CLASS_FIELD_NAME];
+            if (name_val.isObject()) {
+                const name_obj = name_val.asObject();
+                if (name_obj.header.class_index == Heap.CLASS_STRING or
+                    name_obj.header.class_index == Heap.CLASS_SYMBOL)
+                {
+                    return name_obj.bytes(name_obj.header.size);
+                }
+            }
+        }
+    }
+    return null;
+}
+
+// ============================================================================
+// FFI Introspection Primitives
+// ============================================================================
+
+/// Primitive 760: FFI libraries
+/// Returns an Array of library name Strings
+fn primFFILibraries(interp: *Interpreter) InterpreterError!Value {
+    _ = try interp.pop(); // receiver
+
+    const lib_names = ffi_autogen.available_libraries;
+
+    // Allocate result array
+    const result = interp.heap.allocateObject(Heap.CLASS_ARRAY, lib_names.len, .variable) catch {
+        return InterpreterError.OutOfMemory;
+    };
+
+    // Fill with library names as Strings
+    for (lib_names, 0..) |name, i| {
+        const str = interp.heap.allocateString(name) catch {
+            return InterpreterError.OutOfMemory;
+        };
+        result.setField(i, str, lib_names.len);
+    }
+
+    return Value.fromObject(result);
+}
+
+/// Primitive 761: FFI functions for a library
+/// Receiver is library name as String, returns Array of function name Strings
+fn primFFIFunctions(interp: *Interpreter) InterpreterError!Value {
+    const receiver = try interp.pop();
+
+    // Get library name from receiver
+    const lib_name = getStringFromValue(interp.heap, receiver) orelse {
+        try interp.push(receiver);
+        return InterpreterError.PrimitiveFailed;
+    };
+
+    // Get function names for this library
+    const func_names = ffi_autogen.getLibraryFunctionNames(lib_name) orelse {
+        try interp.push(receiver);
+        return InterpreterError.PrimitiveFailed;
+    };
+
+    // Allocate result array
+    const result = interp.heap.allocateObject(Heap.CLASS_ARRAY, func_names.len, .variable) catch {
+        return InterpreterError.OutOfMemory;
+    };
+
+    // Fill with function names as Strings
+    for (func_names, 0..) |name, i| {
+        const str = interp.heap.allocateString(name) catch {
+            return InterpreterError.OutOfMemory;
+        };
+        result.setField(i, str, func_names.len);
+    }
+
+    return Value.fromObject(result);
+}
+
+// ============================================================================
+// ByteArray/ExternalStructure Field Access Primitives
+// ============================================================================
+// These primitives allow reading and writing typed values at byte offsets
+// within ByteArray objects, enabling C struct interop.
+
+/// Helper to get byte data from a byte object (ByteArray, String, etc.)
+fn getByteObjectData(val: Value) ?[]u8 {
+    if (!val.isObject()) return null;
+    const obj = val.asObject();
+
+    // Check if it's a byte-type object
+    const class_idx = obj.header.class_index;
+    if (class_idx == Heap.CLASS_BYTE_ARRAY or
+        class_idx == Heap.CLASS_STRING or
+        class_idx == Heap.CLASS_SYMBOL)
+    {
+        return obj.bytes(obj.header.size);
+    }
+    return null;
+}
+
+/// Primitive 770: ByteArray >> uint8At: offset
+/// Read unsigned 8-bit value at 0-based byte offset
+fn primBytesUint8At(interp: *Interpreter) InterpreterError!Value {
+    const offset_val = try interp.pop();
+    const receiver = try interp.pop();
+
+    const bytes = getByteObjectData(receiver) orelse {
+        try interp.push(receiver);
+        try interp.push(offset_val);
+        return InterpreterError.PrimitiveFailed;
+    };
+
+    if (!offset_val.isSmallInt()) {
+        try interp.push(receiver);
+        try interp.push(offset_val);
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    const offset: usize = @intCast(offset_val.asSmallInt());
+    if (offset >= bytes.len) {
+        try interp.push(receiver);
+        try interp.push(offset_val);
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    return Value.fromSmallInt(@intCast(bytes[offset]));
+}
+
+/// Primitive 771: ByteArray >> uint16At: offset
+/// Read unsigned 16-bit value at 0-based byte offset (little-endian)
+fn primBytesUint16At(interp: *Interpreter) InterpreterError!Value {
+    const offset_val = try interp.pop();
+    const receiver = try interp.pop();
+
+    const bytes = getByteObjectData(receiver) orelse {
+        try interp.push(receiver);
+        try interp.push(offset_val);
+        return InterpreterError.PrimitiveFailed;
+    };
+
+    if (!offset_val.isSmallInt()) {
+        try interp.push(receiver);
+        try interp.push(offset_val);
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    const offset: usize = @intCast(offset_val.asSmallInt());
+    if (offset + 2 > bytes.len) {
+        try interp.push(receiver);
+        try interp.push(offset_val);
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    const val = std.mem.readInt(u16, bytes[offset..][0..2], .little);
+    return Value.fromSmallInt(@intCast(val));
+}
+
+/// Primitive 772: ByteArray >> uint32At: offset
+/// Read unsigned 32-bit value at 0-based byte offset (little-endian)
+fn primBytesUint32At(interp: *Interpreter) InterpreterError!Value {
+    const offset_val = try interp.pop();
+    const receiver = try interp.pop();
+
+    const bytes = getByteObjectData(receiver) orelse {
+        try interp.push(receiver);
+        try interp.push(offset_val);
+        return InterpreterError.PrimitiveFailed;
+    };
+
+    if (!offset_val.isSmallInt()) {
+        try interp.push(receiver);
+        try interp.push(offset_val);
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    const offset: usize = @intCast(offset_val.asSmallInt());
+    if (offset + 4 > bytes.len) {
+        try interp.push(receiver);
+        try interp.push(offset_val);
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    const val = std.mem.readInt(u32, bytes[offset..][0..4], .little);
+    return Value.fromSmallInt(@intCast(val));
+}
+
+/// Primitive 773: ByteArray >> int8At: offset
+/// Read signed 8-bit value at 0-based byte offset
+fn primBytesInt8At(interp: *Interpreter) InterpreterError!Value {
+    const offset_val = try interp.pop();
+    const receiver = try interp.pop();
+
+    const bytes = getByteObjectData(receiver) orelse {
+        try interp.push(receiver);
+        try interp.push(offset_val);
+        return InterpreterError.PrimitiveFailed;
+    };
+
+    if (!offset_val.isSmallInt()) {
+        try interp.push(receiver);
+        try interp.push(offset_val);
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    const offset: usize = @intCast(offset_val.asSmallInt());
+    if (offset >= bytes.len) {
+        try interp.push(receiver);
+        try interp.push(offset_val);
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    const val: i8 = @bitCast(bytes[offset]);
+    return Value.fromSmallInt(@intCast(val));
+}
+
+/// Primitive 774: ByteArray >> int16At: offset
+/// Read signed 16-bit value at 0-based byte offset (little-endian)
+fn primBytesInt16At(interp: *Interpreter) InterpreterError!Value {
+    const offset_val = try interp.pop();
+    const receiver = try interp.pop();
+
+    const bytes = getByteObjectData(receiver) orelse {
+        try interp.push(receiver);
+        try interp.push(offset_val);
+        return InterpreterError.PrimitiveFailed;
+    };
+
+    if (!offset_val.isSmallInt()) {
+        try interp.push(receiver);
+        try interp.push(offset_val);
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    const offset: usize = @intCast(offset_val.asSmallInt());
+    if (offset + 2 > bytes.len) {
+        try interp.push(receiver);
+        try interp.push(offset_val);
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    const val = std.mem.readInt(i16, bytes[offset..][0..2], .little);
+    return Value.fromSmallInt(@intCast(val));
+}
+
+/// Primitive 775: ByteArray >> int32At: offset
+/// Read signed 32-bit value at 0-based byte offset (little-endian)
+fn primBytesInt32At(interp: *Interpreter) InterpreterError!Value {
+    const offset_val = try interp.pop();
+    const receiver = try interp.pop();
+
+    const bytes = getByteObjectData(receiver) orelse {
+        try interp.push(receiver);
+        try interp.push(offset_val);
+        return InterpreterError.PrimitiveFailed;
+    };
+
+    if (!offset_val.isSmallInt()) {
+        try interp.push(receiver);
+        try interp.push(offset_val);
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    const offset: usize = @intCast(offset_val.asSmallInt());
+    if (offset + 4 > bytes.len) {
+        try interp.push(receiver);
+        try interp.push(offset_val);
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    const val = std.mem.readInt(i32, bytes[offset..][0..4], .little);
+    return Value.fromSmallInt(@intCast(val));
+}
+
+/// Primitive 776: ByteArray >> float32At: offset
+/// Read 32-bit float value at 0-based byte offset
+fn primBytesFloat32At(interp: *Interpreter) InterpreterError!Value {
+    const offset_val = try interp.pop();
+    const receiver = try interp.pop();
+
+    const bytes = getByteObjectData(receiver) orelse {
+        try interp.push(receiver);
+        try interp.push(offset_val);
+        return InterpreterError.PrimitiveFailed;
+    };
+
+    if (!offset_val.isSmallInt()) {
+        try interp.push(receiver);
+        try interp.push(offset_val);
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    const offset: usize = @intCast(offset_val.asSmallInt());
+    if (offset + 4 > bytes.len) {
+        try interp.push(receiver);
+        try interp.push(offset_val);
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    const bits = std.mem.readInt(u32, bytes[offset..][0..4], .little);
+    const val: f32 = @bitCast(bits);
+    const float_obj = interp.heap.allocateFloat(@floatCast(val)) catch {
+        return InterpreterError.OutOfMemory;
+    };
+    return float_obj;
+}
+
+/// Primitive 777: ByteArray >> float64At: offset
+/// Read 64-bit float value at 0-based byte offset
+fn primBytesFloat64At(interp: *Interpreter) InterpreterError!Value {
+    const offset_val = try interp.pop();
+    const receiver = try interp.pop();
+
+    const bytes = getByteObjectData(receiver) orelse {
+        try interp.push(receiver);
+        try interp.push(offset_val);
+        return InterpreterError.PrimitiveFailed;
+    };
+
+    if (!offset_val.isSmallInt()) {
+        try interp.push(receiver);
+        try interp.push(offset_val);
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    const offset: usize = @intCast(offset_val.asSmallInt());
+    if (offset + 8 > bytes.len) {
+        try interp.push(receiver);
+        try interp.push(offset_val);
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    const bits = std.mem.readInt(u64, bytes[offset..][0..8], .little);
+    const val: f64 = @bitCast(bits);
+    const float_obj = interp.heap.allocateFloat(val) catch {
+        return InterpreterError.OutOfMemory;
+    };
+    return float_obj;
+}
+
+/// Primitive 780: ByteArray >> uint8At: offset put: value
+/// Write unsigned 8-bit value at 0-based byte offset
+fn primBytesUint8AtPut(interp: *Interpreter) InterpreterError!Value {
+    const value_val = try interp.pop();
+    const offset_val = try interp.pop();
+    const receiver = try interp.pop();
+
+    const bytes = getByteObjectData(receiver) orelse {
+        try interp.push(receiver);
+        try interp.push(offset_val);
+        try interp.push(value_val);
+        return InterpreterError.PrimitiveFailed;
+    };
+
+    if (!offset_val.isSmallInt() or !value_val.isSmallInt()) {
+        try interp.push(receiver);
+        try interp.push(offset_val);
+        try interp.push(value_val);
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    const offset: usize = @intCast(offset_val.asSmallInt());
+    if (offset >= bytes.len) {
+        try interp.push(receiver);
+        try interp.push(offset_val);
+        try interp.push(value_val);
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    const val: u8 = @truncate(@as(u64, @intCast(value_val.asSmallInt())));
+    bytes[offset] = val;
+    return receiver; // Return receiver for chaining
+}
+
+/// Primitive 781: ByteArray >> uint16At: offset put: value
+/// Write unsigned 16-bit value at 0-based byte offset (little-endian)
+fn primBytesUint16AtPut(interp: *Interpreter) InterpreterError!Value {
+    const value_val = try interp.pop();
+    const offset_val = try interp.pop();
+    const receiver = try interp.pop();
+
+    const bytes = getByteObjectData(receiver) orelse {
+        try interp.push(receiver);
+        try interp.push(offset_val);
+        try interp.push(value_val);
+        return InterpreterError.PrimitiveFailed;
+    };
+
+    if (!offset_val.isSmallInt() or !value_val.isSmallInt()) {
+        try interp.push(receiver);
+        try interp.push(offset_val);
+        try interp.push(value_val);
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    const offset: usize = @intCast(offset_val.asSmallInt());
+    if (offset + 2 > bytes.len) {
+        try interp.push(receiver);
+        try interp.push(offset_val);
+        try interp.push(value_val);
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    const val: u16 = @truncate(@as(u64, @intCast(value_val.asSmallInt())));
+    std.mem.writeInt(u16, bytes[offset..][0..2], val, .little);
+    return receiver;
+}
+
+/// Primitive 782: ByteArray >> uint32At: offset put: value
+/// Write unsigned 32-bit value at 0-based byte offset (little-endian)
+fn primBytesUint32AtPut(interp: *Interpreter) InterpreterError!Value {
+    const value_val = try interp.pop();
+    const offset_val = try interp.pop();
+    const receiver = try interp.pop();
+
+    const bytes = getByteObjectData(receiver) orelse {
+        try interp.push(receiver);
+        try interp.push(offset_val);
+        try interp.push(value_val);
+        return InterpreterError.PrimitiveFailed;
+    };
+
+    if (!offset_val.isSmallInt() or !value_val.isSmallInt()) {
+        try interp.push(receiver);
+        try interp.push(offset_val);
+        try interp.push(value_val);
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    const offset: usize = @intCast(offset_val.asSmallInt());
+    if (offset + 4 > bytes.len) {
+        try interp.push(receiver);
+        try interp.push(offset_val);
+        try interp.push(value_val);
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    const val: u32 = @truncate(@as(u64, @intCast(value_val.asSmallInt())));
+    std.mem.writeInt(u32, bytes[offset..][0..4], val, .little);
+    return receiver;
+}
+
+/// Primitive 783: ByteArray >> int8At: offset put: value
+/// Write signed 8-bit value at 0-based byte offset
+fn primBytesInt8AtPut(interp: *Interpreter) InterpreterError!Value {
+    const value_val = try interp.pop();
+    const offset_val = try interp.pop();
+    const receiver = try interp.pop();
+
+    const bytes = getByteObjectData(receiver) orelse {
+        try interp.push(receiver);
+        try interp.push(offset_val);
+        try interp.push(value_val);
+        return InterpreterError.PrimitiveFailed;
+    };
+
+    if (!offset_val.isSmallInt() or !value_val.isSmallInt()) {
+        try interp.push(receiver);
+        try interp.push(offset_val);
+        try interp.push(value_val);
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    const offset: usize = @intCast(offset_val.asSmallInt());
+    if (offset >= bytes.len) {
+        try interp.push(receiver);
+        try interp.push(offset_val);
+        try interp.push(value_val);
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    const val: i8 = @truncate(value_val.asSmallInt());
+    bytes[offset] = @bitCast(val);
+    return receiver;
+}
+
+/// Primitive 784: ByteArray >> int16At: offset put: value
+/// Write signed 16-bit value at 0-based byte offset (little-endian)
+fn primBytesInt16AtPut(interp: *Interpreter) InterpreterError!Value {
+    const value_val = try interp.pop();
+    const offset_val = try interp.pop();
+    const receiver = try interp.pop();
+
+    const bytes = getByteObjectData(receiver) orelse {
+        try interp.push(receiver);
+        try interp.push(offset_val);
+        try interp.push(value_val);
+        return InterpreterError.PrimitiveFailed;
+    };
+
+    if (!offset_val.isSmallInt() or !value_val.isSmallInt()) {
+        try interp.push(receiver);
+        try interp.push(offset_val);
+        try interp.push(value_val);
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    const offset: usize = @intCast(offset_val.asSmallInt());
+    if (offset + 2 > bytes.len) {
+        try interp.push(receiver);
+        try interp.push(offset_val);
+        try interp.push(value_val);
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    const val: i16 = @truncate(value_val.asSmallInt());
+    std.mem.writeInt(i16, bytes[offset..][0..2], val, .little);
+    return receiver;
+}
+
+/// Primitive 785: ByteArray >> int32At: offset put: value
+/// Write signed 32-bit value at 0-based byte offset (little-endian)
+fn primBytesInt32AtPut(interp: *Interpreter) InterpreterError!Value {
+    const value_val = try interp.pop();
+    const offset_val = try interp.pop();
+    const receiver = try interp.pop();
+
+    const bytes = getByteObjectData(receiver) orelse {
+        try interp.push(receiver);
+        try interp.push(offset_val);
+        try interp.push(value_val);
+        return InterpreterError.PrimitiveFailed;
+    };
+
+    if (!offset_val.isSmallInt() or !value_val.isSmallInt()) {
+        try interp.push(receiver);
+        try interp.push(offset_val);
+        try interp.push(value_val);
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    const offset: usize = @intCast(offset_val.asSmallInt());
+    if (offset + 4 > bytes.len) {
+        try interp.push(receiver);
+        try interp.push(offset_val);
+        try interp.push(value_val);
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    const val: i32 = @truncate(value_val.asSmallInt());
+    std.mem.writeInt(i32, bytes[offset..][0..4], val, .little);
+    return receiver;
+}
+
+/// Primitive 786: ByteArray >> float32At: offset put: value
+/// Write 32-bit float value at 0-based byte offset
+fn primBytesFloat32AtPut(interp: *Interpreter) InterpreterError!Value {
+    const value_val = try interp.pop();
+    const offset_val = try interp.pop();
+    const receiver = try interp.pop();
+
+    const bytes = getByteObjectData(receiver) orelse {
+        try interp.push(receiver);
+        try interp.push(offset_val);
+        try interp.push(value_val);
+        return InterpreterError.PrimitiveFailed;
+    };
+
+    if (!offset_val.isSmallInt()) {
+        try interp.push(receiver);
+        try interp.push(offset_val);
+        try interp.push(value_val);
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    const offset: usize = @intCast(offset_val.asSmallInt());
+    if (offset + 4 > bytes.len) {
+        try interp.push(receiver);
+        try interp.push(offset_val);
+        try interp.push(value_val);
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    // Get float value from SmallInteger or Float object
+    var float_val: f32 = 0;
+    if (value_val.isSmallInt()) {
+        float_val = @floatFromInt(value_val.asSmallInt());
+    } else if (value_val.isObject()) {
+        const obj = value_val.asObject();
+        if (obj.header.class_index == Heap.CLASS_FLOAT) {
+            const float_bytes = obj.bytes(8);
+            const f64_val: f64 = @bitCast(float_bytes[0..8].*);
+            float_val = @floatCast(f64_val);
+        } else {
+            try interp.push(receiver);
+            try interp.push(offset_val);
+            try interp.push(value_val);
+            return InterpreterError.PrimitiveFailed;
+        }
+    } else {
+        try interp.push(receiver);
+        try interp.push(offset_val);
+        try interp.push(value_val);
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    const bits: u32 = @bitCast(float_val);
+    std.mem.writeInt(u32, bytes[offset..][0..4], bits, .little);
+    return receiver;
+}
+
+/// Primitive 787: ByteArray >> float64At: offset put: value
+/// Write 64-bit float value at 0-based byte offset
+fn primBytesFloat64AtPut(interp: *Interpreter) InterpreterError!Value {
+    const value_val = try interp.pop();
+    const offset_val = try interp.pop();
+    const receiver = try interp.pop();
+
+    const bytes = getByteObjectData(receiver) orelse {
+        try interp.push(receiver);
+        try interp.push(offset_val);
+        try interp.push(value_val);
+        return InterpreterError.PrimitiveFailed;
+    };
+
+    if (!offset_val.isSmallInt()) {
+        try interp.push(receiver);
+        try interp.push(offset_val);
+        try interp.push(value_val);
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    const offset: usize = @intCast(offset_val.asSmallInt());
+    if (offset + 8 > bytes.len) {
+        try interp.push(receiver);
+        try interp.push(offset_val);
+        try interp.push(value_val);
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    // Get float value from SmallInteger or Float object
+    var float_val: f64 = 0;
+    if (value_val.isSmallInt()) {
+        float_val = @floatFromInt(value_val.asSmallInt());
+    } else if (value_val.isObject()) {
+        const obj = value_val.asObject();
+        if (obj.header.class_index == Heap.CLASS_FLOAT) {
+            const float_bytes = obj.bytes(8);
+            float_val = @bitCast(float_bytes[0..8].*);
+        } else {
+            try interp.push(receiver);
+            try interp.push(offset_val);
+            try interp.push(value_val);
+            return InterpreterError.PrimitiveFailed;
+        }
+    } else {
+        try interp.push(receiver);
+        try interp.push(offset_val);
+        try interp.push(value_val);
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    const bits: u64 = @bitCast(float_val);
+    std.mem.writeInt(u64, bytes[offset..][0..8], bits, .little);
+    return receiver;
+}
+
+/// Primitive 788: ByteArray >> address
+/// Return pointer to the byte data as an integer (for FFI)
+fn primBytesAddress(interp: *Interpreter) InterpreterError!Value {
+    const receiver = try interp.pop();
+
+    const bytes = getByteObjectData(receiver) orelse {
+        try interp.push(receiver);
+        return InterpreterError.PrimitiveFailed;
+    };
+
+    const addr: i61 = @intCast(@intFromPtr(bytes.ptr));
+    return Value.fromSmallInt(addr);
+}
+
+// ============================================================================
+// FFI Struct Introspection Primitives (placeholders for now)
+// ============================================================================
+
+/// Primitive 790: 'LibName' ffiStructNames
+/// Returns array of struct names available in the library
+fn primFFIStructNames(interp: *Interpreter) InterpreterError!Value {
+    const receiver = try interp.pop();
+
+    // TODO: Implement once struct detection is added to ffi_autogen
+    // For now, return empty array
+    _ = getStringFromValue(interp.heap, receiver) orelse {
+        try interp.push(receiver);
+        return InterpreterError.PrimitiveFailed;
+    };
+
+    // Return empty array for now
+    const result = interp.heap.allocateObject(Heap.CLASS_ARRAY, 0, .variable) catch {
+        return InterpreterError.OutOfMemory;
+    };
+    return Value.fromObject(result);
+}
+
+/// Primitive 791: 'LibName' ffiStructInfo: #StructName
+/// Returns struct metadata as a Dictionary or Array
+fn primFFIStructInfo(interp: *Interpreter) InterpreterError!Value {
+    const struct_name = try interp.pop();
+    const receiver = try interp.pop();
+
+    // TODO: Implement once struct detection is added to ffi_autogen
+    // For now, validate arguments and return nil (struct not found)
+    _ = getStringFromValue(interp.heap, receiver) orelse {
+        try interp.push(receiver);
+        try interp.push(struct_name);
+        return InterpreterError.PrimitiveFailed;
+    };
+
+    // Validate struct_name is a symbol/string
+    _ = getStringFromValue(interp.heap, struct_name) orelse {
+        try interp.push(receiver);
+        try interp.push(struct_name);
+        return InterpreterError.PrimitiveFailed;
+    };
+
+    // Return nil for now (struct not found)
+    return Value.nil;
+}
+
+/// Primitive 792: FFI call that handles struct arguments and returns
+/// This wraps ffi_call with struct marshaling support
+fn primFFICallWithStruct(interp: *Interpreter) InterpreterError!Value {
+    // For now, delegate to regular FFI call
+    // TODO: Add struct-aware marshaling
+    return primFFIGenericCall(interp);
 }
