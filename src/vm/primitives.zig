@@ -5,6 +5,10 @@ const bytecodes = @import("bytecodes.zig");
 const interpreter_mod = @import("interpreter.zig");
 const ffi = @import("ffi.zig");
 const ffi_autogen = @import("ffi_autogen.zig");
+const ffi_runtime = @import("ffi_runtime.zig");
+const ffi_generated = @import("ffi_generated.zig");
+const filein = @import("../image/filein.zig");
+const obj_loader = @import("obj_loader.zig");
 
 const Value = object.Value;
 const Object = object.Object;
@@ -174,12 +178,14 @@ pub fn executePrimitive(interp: *Interpreter, prim_index: u16) InterpreterError!
         .float_truncated => primFloatTruncated(interp),
         .float_abs => primFloatAbs(interp),
         .float_negate => primFloatNegate(interp),
+        .float_print_string => primFloatPrintString(interp),
         .small_as_float => primSmallAsFloat(interp),
 
         // ====================================================================
         // String operations
         // ====================================================================
         .string_concat => primStringConcat(interp),
+        .string_append => primStringConcat(interp), // Dolphin/ANSI primitive 218
         .string_compare => primStringCompare(interp),
         .string_less_than => primStringLessThan(interp),
         .string_greater_than => primStringGreaterThan(interp),
@@ -346,6 +352,14 @@ pub fn executePrimitive(interp: *Interpreter, prim_index: u16) InterpreterError!
         .ffi_struct_names => primFFIStructNames(interp),
         .ffi_struct_info => primFFIStructInfo(interp),
         .ffi_call_with_struct => primFFICallWithStruct(interp),
+        .ffi_runtime_call => primFFIRuntimeCall(interp),
+        .ffi_glew_function => primFFIGlewFunction(interp),
+        .ffi_glew_experimental => primFFIGlewExperimental(interp),
+
+        // Dynamic class and method creation
+        .subclass_create => primSubclassCreate(interp),
+        .compile_method => primCompileMethod(interp),
+        .load_obj_file => primLoadOBJFile(interp),
 
         else => InterpreterError.PrimitiveFailed,
     };
@@ -1698,11 +1712,36 @@ fn primAtPut(interp: *Interpreter) InterpreterError!Value {
 
     const obj = recv.asObject();
     const base_idx: usize = @intCast(index.asSmallInt() - 1);
+    const format = obj.header.getFormat();
+
+    // For bytes format objects (Strings, ByteArrays), store a single byte
+    if (format == .bytes) {
+        const bytes_data = obj.bytes(obj.header.size);
+        if (base_idx >= bytes_data.len) {
+            try interp.push(recv);
+            try interp.push(index);
+            try interp.push(val);
+            return InterpreterError.PrimitiveFailed;
+        }
+        // Value can be a Character or SmallInt representing a byte
+        var byte_val: u8 = 0;
+        if (val.isCharacter()) {
+            byte_val = @truncate(val.asCharacter());
+        } else if (val.isSmallInt()) {
+            byte_val = @truncate(@as(u64, @intCast(val.asSmallInt())));
+        } else {
+            try interp.push(recv);
+            try interp.push(index);
+            try interp.push(val);
+            return InterpreterError.PrimitiveFailed;
+        }
+        bytes_data[base_idx] = byte_val;
+        return val;
+    }
 
     // For variable subclasses (like OrderedCollection), basicAt:put: indexes into
     // the indexed part AFTER the named instance variables
     var idx = base_idx;
-    const format = obj.header.getFormat();
     if (format == .variable) {
         // Get number of named instance variables from the class
         const class_val = interp.heap.getClass(obj.header.class_index);
@@ -4054,6 +4093,31 @@ fn primFloatNegate(interp: *Interpreter) InterpreterError!Value {
     return InterpreterError.PrimitiveFailed;
 }
 
+/// Primitive 169: Float >> printString
+/// Convert Float to its decimal string representation
+fn primFloatPrintString(interp: *Interpreter) InterpreterError!Value {
+    const receiver = try interp.pop();
+
+    const fv = interp.heap.getFloatValue(receiver);
+    if (fv != null) {
+        // Format the float value
+        var buf: [64]u8 = undefined;
+        const str = std.fmt.bufPrint(&buf, "{d}", .{fv.?}) catch {
+            try interp.push(receiver);
+            return InterpreterError.PrimitiveFailed;
+        };
+
+        // Create a String object
+        return interp.heap.allocateString(str) catch {
+            try interp.push(receiver);
+            return InterpreterError.OutOfMemory;
+        };
+    }
+
+    try interp.push(receiver);
+    return InterpreterError.PrimitiveFailed;
+}
+
 fn primSmallAsFloat(interp: *Interpreter) InterpreterError!Value {
     const a = try interp.pop();
 
@@ -6234,16 +6298,17 @@ fn primFileClose(interp: *Interpreter) InterpreterError!Value {
 }
 
 fn primFileRead(interp: *Interpreter) InterpreterError!Value {
-    // Stack: startingAt, buffer, count, stream
+    // Stack order for readInto:count:startingAt: is receiver, buffer, count, startPos
+    // So we pop in reverse: startPos, count, buffer, receiver
     const starting_at = try interp.pop();
-    const buffer = try interp.pop();
     const count = try interp.pop();
+    const buffer = try interp.pop();
     const stream = try interp.pop();
 
     if (!stream.isObject() or !buffer.isObject()) {
         try interp.push(stream);
-        try interp.push(count);
         try interp.push(buffer);
+        try interp.push(count);
         try interp.push(starting_at);
         return InterpreterError.PrimitiveFailed;
     }
@@ -6254,8 +6319,8 @@ fn primFileRead(interp: *Interpreter) InterpreterError!Value {
     const handle_val = stream_obj.getField(4, 5);
     if (!handle_val.isSmallInt()) {
         try interp.push(stream);
-        try interp.push(count);
         try interp.push(buffer);
+        try interp.push(count);
         try interp.push(starting_at);
         return InterpreterError.PrimitiveFailed;
     }
@@ -6263,8 +6328,8 @@ fn primFileRead(interp: *Interpreter) InterpreterError!Value {
     const handle: usize = @intCast(handle_val.asSmallInt());
     const file = getFileHandle(handle) orelse {
         try interp.push(stream);
-        try interp.push(count);
         try interp.push(buffer);
+        try interp.push(count);
         try interp.push(starting_at);
         return InterpreterError.PrimitiveFailed;
     };
@@ -6274,8 +6339,8 @@ fn primFileRead(interp: *Interpreter) InterpreterError!Value {
 
     if (buffer_obj.header.getFormat() != .bytes) {
         try interp.push(stream);
-        try interp.push(count);
         try interp.push(buffer);
+        try interp.push(count);
         try interp.push(starting_at);
         return InterpreterError.PrimitiveFailed;
     }
@@ -6283,16 +6348,16 @@ fn primFileRead(interp: *Interpreter) InterpreterError!Value {
     const buf_bytes = buffer_obj.bytes(buffer_obj.header.size);
     if (start + count_val > buf_bytes.len) {
         try interp.push(stream);
-        try interp.push(count);
         try interp.push(buffer);
+        try interp.push(count);
         try interp.push(starting_at);
         return InterpreterError.PrimitiveFailed;
     }
 
     const bytes_read = file.read(buf_bytes[start .. start + count_val]) catch {
         try interp.push(stream);
-        try interp.push(count);
         try interp.push(buffer);
+        try interp.push(count);
         try interp.push(starting_at);
         return InterpreterError.PrimitiveFailed;
     };
@@ -6301,16 +6366,17 @@ fn primFileRead(interp: *Interpreter) InterpreterError!Value {
 }
 
 fn primFileWrite(interp: *Interpreter) InterpreterError!Value {
-    // Stack: startingAt, buffer, count, stream
+    // Stack order for writeFrom:count:startingAt: is receiver, buffer, count, startPos
+    // So we pop in reverse: startPos, count, buffer, receiver
     const starting_at = try interp.pop();
-    const buffer = try interp.pop();
     const count = try interp.pop();
+    const buffer = try interp.pop();
     const stream = try interp.pop();
 
     if (!stream.isObject() or !buffer.isObject()) {
         try interp.push(stream);
-        try interp.push(count);
         try interp.push(buffer);
+        try interp.push(count);
         try interp.push(starting_at);
         return InterpreterError.PrimitiveFailed;
     }
@@ -6321,8 +6387,8 @@ fn primFileWrite(interp: *Interpreter) InterpreterError!Value {
     const handle_val = stream_obj.getField(4, 5);
     if (!handle_val.isSmallInt()) {
         try interp.push(stream);
-        try interp.push(count);
         try interp.push(buffer);
+        try interp.push(count);
         try interp.push(starting_at);
         return InterpreterError.PrimitiveFailed;
     }
@@ -6330,8 +6396,8 @@ fn primFileWrite(interp: *Interpreter) InterpreterError!Value {
     const handle: usize = @intCast(handle_val.asSmallInt());
     const file = getFileHandle(handle) orelse {
         try interp.push(stream);
-        try interp.push(count);
         try interp.push(buffer);
+        try interp.push(count);
         try interp.push(starting_at);
         return InterpreterError.PrimitiveFailed;
     };
@@ -6341,8 +6407,8 @@ fn primFileWrite(interp: *Interpreter) InterpreterError!Value {
 
     if (buffer_obj.header.getFormat() != .bytes) {
         try interp.push(stream);
-        try interp.push(count);
         try interp.push(buffer);
+        try interp.push(count);
         try interp.push(starting_at);
         return InterpreterError.PrimitiveFailed;
     }
@@ -6350,16 +6416,16 @@ fn primFileWrite(interp: *Interpreter) InterpreterError!Value {
     const buf_bytes = buffer_obj.bytes(buffer_obj.header.size);
     if (start + count_val > buf_bytes.len) {
         try interp.push(stream);
-        try interp.push(count);
         try interp.push(buffer);
+        try interp.push(count);
         try interp.push(starting_at);
         return InterpreterError.PrimitiveFailed;
     }
 
     const bytes_written = file.write(buf_bytes[start .. start + count_val]) catch {
         try interp.push(stream);
-        try interp.push(count);
         try interp.push(buffer);
+        try interp.push(count);
         try interp.push(starting_at);
         return InterpreterError.PrimitiveFailed;
     };
@@ -7767,7 +7833,8 @@ fn primFFIGenericCall(interp: *Interpreter) InterpreterError!Value {
     }
 
     // Call the FFI function
-    const result = ffi_autogen.callFFI(lib_name, func_name, interp.heap, args_slice, interp.heap.allocator) catch {
+    const result = ffi_autogen.callFFI(lib_name, func_name, interp.heap, args_slice, interp.heap.allocator) catch |err| {
+        std.debug.print("FFI FAIL: {s}::{s} err={}\n", .{ lib_name, func_name, err });
         try interp.push(receiver);
         try interp.push(func_name_val);
         try interp.push(args_val);
@@ -8463,48 +8530,104 @@ fn primBytesAddress(interp: *Interpreter) InterpreterError!Value {
 // FFI Struct Introspection Primitives (placeholders for now)
 // ============================================================================
 
-/// Primitive 790: 'LibName' ffiStructNames
+/// Primitive 790: FFILibrary structNamesFor: 'LibName'
 /// Returns array of struct names available in the library
 fn primFFIStructNames(interp: *Interpreter) InterpreterError!Value {
-    const receiver = try interp.pop();
+    // Stack order for structNamesFor: is: receiver, libraryName
+    const lib_name_val = try interp.pop();  // libraryName (arg1)
+    _ = try interp.pop();                    // receiver (FFILibrary class)
 
-    // TODO: Implement once struct detection is added to ffi_autogen
-    // For now, return empty array
-    _ = getStringFromValue(interp.heap, receiver) orelse {
-        try interp.push(receiver);
+    const lib_name = getStringFromValue(interp.heap, lib_name_val) orelse {
         return InterpreterError.PrimitiveFailed;
     };
 
-    // Return empty array for now
-    const result = interp.heap.allocateObject(Heap.CLASS_ARRAY, 0, .variable) catch {
+    // Get struct names from ffi_generated
+    const struct_names = ffi_generated.getLibraryStructNames(lib_name) orelse {
+        // Library doesn't support structs or unknown library - return empty array
+        const empty_arr = interp.heap.allocateObject(Heap.CLASS_ARRAY, 0, .variable) catch {
+            return InterpreterError.OutOfMemory;
+        };
+        return Value.fromObject(empty_arr);
+    };
+
+    // Create array of symbols for struct names
+    const result_obj = interp.heap.allocateObject(Heap.CLASS_ARRAY, struct_names.len, .variable) catch {
         return InterpreterError.OutOfMemory;
     };
-    return Value.fromObject(result);
+    const slots = result_obj.fields(struct_names.len);
+
+    for (struct_names, 0..) |name, i| {
+        const symbol = interp.heap.internSymbol(name) catch {
+            return InterpreterError.OutOfMemory;
+        };
+        slots[i] = symbol;
+    }
+
+    return Value.fromObject(result_obj);
 }
 
-/// Primitive 791: 'LibName' ffiStructInfo: #StructName
-/// Returns struct metadata as a Dictionary or Array
+/// Primitive 791: FFILibrary structInfo: #StructName for: 'LibName'
+/// Returns struct metadata as an Array: #(size #(field1Name field1Offset field1Size field1Type) ...)
 fn primFFIStructInfo(interp: *Interpreter) InterpreterError!Value {
-    const struct_name = try interp.pop();
-    const receiver = try interp.pop();
+    // Stack order for structInfo:for: is: receiver, structName, libraryName
+    const lib_name_val = try interp.pop();      // libraryName (arg2)
+    const struct_name_val = try interp.pop();   // structName (arg1)
+    _ = try interp.pop();                        // receiver (FFILibrary class)
 
-    // TODO: Implement once struct detection is added to ffi_autogen
-    // For now, validate arguments and return nil (struct not found)
-    _ = getStringFromValue(interp.heap, receiver) orelse {
-        try interp.push(receiver);
-        try interp.push(struct_name);
+    const lib_name = getStringFromValue(interp.heap, lib_name_val) orelse {
         return InterpreterError.PrimitiveFailed;
     };
 
-    // Validate struct_name is a symbol/string
-    _ = getStringFromValue(interp.heap, struct_name) orelse {
-        try interp.push(receiver);
-        try interp.push(struct_name);
+    const struct_name = getStringFromValue(interp.heap, struct_name_val) orelse {
         return InterpreterError.PrimitiveFailed;
     };
 
-    // Return nil for now (struct not found)
-    return Value.nil;
+    // Get struct info from ffi_generated
+    const info = ffi_generated.getStructInfo(lib_name, struct_name) orelse {
+        // Struct not found
+        return Value.nil;
+    };
+
+    // Create result array: #(size #(field1...) #(field2...) ...)
+    // Each field is: #(name offset size accessorType)
+    const result_obj = interp.heap.allocateObject(Heap.CLASS_ARRAY, 1 + info.fields.len, .variable) catch {
+        return InterpreterError.OutOfMemory;
+    };
+    const slots = result_obj.fields(1 + info.fields.len);
+
+    // First element is the struct size
+    slots[0] = Value.fromSmallInt(@intCast(info.size));
+
+    // Remaining elements are field info arrays
+    for (info.fields, 0..) |field, i| {
+        // Create field array: #(name offset size accessorType)
+        const field_obj = interp.heap.allocateObject(Heap.CLASS_ARRAY, 4, .variable) catch {
+            return InterpreterError.OutOfMemory;
+        };
+        const field_slots = field_obj.fields(4);
+
+        // Field name as string (for easier concatenation in Smalltalk)
+        const name_str = interp.heap.allocateString(field.name) catch {
+            return InterpreterError.OutOfMemory;
+        };
+        field_slots[0] = name_str;
+
+        // Field offset
+        field_slots[1] = Value.fromSmallInt(@intCast(field.offset));
+
+        // Field size
+        field_slots[2] = Value.fromSmallInt(@intCast(field.size));
+
+        // Accessor type as string (for easier concatenation in Smalltalk)
+        const type_str = interp.heap.allocateString(field.accessor_type) catch {
+            return InterpreterError.OutOfMemory;
+        };
+        field_slots[3] = type_str;
+
+        slots[1 + i] = Value.fromObject(field_obj);
+    }
+
+    return Value.fromObject(result_obj);
 }
 
 /// Primitive 792: FFI call that handles struct arguments and returns
@@ -8513,4 +8636,229 @@ fn primFFICallWithStruct(interp: *Interpreter) InterpreterError!Value {
     // For now, delegate to regular FFI call
     // TODO: Add struct-aware marshaling
     return primFFIGenericCall(interp);
+}
+
+/// Primitive 793: Runtime FFI call via libffi
+/// Stack: receiver (function pointer as Integer), signature (String), args (Array)
+/// Usage: fnPtr ffiCallWithSignature: 'uint32(uint32,string)' args: { 35633. 'hello' }
+/// Signature format: "returnType(argType1,argType2,...)"
+/// Types: void, int, uint, int32, uint32, int64, uint64, float, double, pointer, string
+fn primFFIRuntimeCall(interp: *Interpreter) InterpreterError!Value {
+    const args_val = try interp.pop(); // args array
+    const sig_val = try interp.pop(); // signature string
+    const receiver = try interp.pop(); // function pointer
+
+    // Get function pointer from receiver (should be SmallInt with address)
+    const fn_ptr: *const anyopaque = blk: {
+        if (receiver.isSmallInt()) {
+            const addr: usize = @intCast(receiver.asSmallInt());
+            if (addr == 0) {
+                try interp.push(receiver);
+                try interp.push(sig_val);
+                try interp.push(args_val);
+                return InterpreterError.PrimitiveFailed;
+            }
+            break :blk @ptrFromInt(addr);
+        }
+        try interp.push(receiver);
+        try interp.push(sig_val);
+        try interp.push(args_val);
+        return InterpreterError.PrimitiveFailed;
+    };
+
+    // Get signature string
+    const signature = getStringFromValue(interp.heap, sig_val) orelse {
+        try interp.push(receiver);
+        try interp.push(sig_val);
+        try interp.push(args_val);
+        return InterpreterError.PrimitiveFailed;
+    };
+
+    // Extract arguments from array
+    var args_slice: []const Value = &.{};
+    if (args_val.isObject()) {
+        const args_obj = args_val.asObject();
+        if (args_obj.header.class_index == Heap.CLASS_ARRAY) {
+            const arr_size = args_obj.header.size;
+            args_slice = args_obj.fields(arr_size);
+        }
+    }
+
+    // Call via runtime FFI
+    const result = ffi_runtime.callWithSignature(
+        fn_ptr,
+        signature,
+        args_slice,
+        interp.heap,
+        interp.heap.allocator,
+    ) catch |err| {
+        std.debug.print("Runtime FFI error: {}\n", .{err});
+        try interp.push(receiver);
+        try interp.push(sig_val);
+        try interp.push(args_val);
+        return InterpreterError.PrimitiveFailed;
+    };
+
+    return result;
+}
+
+/// Primitive 794: Get GLEW function pointer by name
+/// Stack: receiver (function name as String)
+/// Returns: Integer (function pointer address) or nil if not found
+fn primFFIGlewFunction(interp: *Interpreter) InterpreterError!Value {
+    const receiver = try interp.pop();
+
+    // Get function name
+    const func_name = getStringFromValue(interp.heap, receiver) orelse {
+        try interp.push(receiver);
+        return InterpreterError.PrimitiveFailed;
+    };
+
+    // Look up function pointer using glXGetProcAddress
+    if (ffi_generated.getGLEWFunctionPointer(func_name)) |ptr| {
+        const as_i61: i61 = @intCast(ptr);
+        return Value.fromSmallInt(as_i61);
+    }
+
+    return Value.nil;
+}
+
+/// Primitive 795: Set glewExperimental flag
+/// Stack: receiver (Boolean - true or false)
+/// Returns: receiver
+fn primFFIGlewExperimental(interp: *Interpreter) InterpreterError!Value {
+    const receiver = try interp.pop();
+
+    // Check if true or false
+    const value = if (receiver.eql(Value.@"true"))
+        true
+    else if (receiver.eql(Value.@"false"))
+        false
+    else {
+        try interp.push(receiver);
+        return InterpreterError.PrimitiveFailed;
+    };
+
+    ffi_generated.setGlewExperimental(value);
+    return receiver;
+}
+
+// ============================================================================
+// Dynamic Class and Method Creation Primitives
+// ============================================================================
+
+fn primSubclassCreate(interp: *Interpreter) InterpreterError!Value {
+    // Primitive 796: Class >> subclass: #Name
+    // Creates a new subclass of the receiver with the given name
+    const name_val = try interp.pop();
+    const superclass_val = try interp.pop();
+
+    // Verify superclass is a class object
+    if (!superclass_val.isObject()) {
+        try interp.push(superclass_val);
+        try interp.push(name_val);
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    // Get class name from symbol
+    const name_str = getStringFromValue(interp.heap, name_val) orelse {
+        try interp.push(superclass_val);
+        try interp.push(name_val);
+        return InterpreterError.PrimitiveFailed;
+    };
+
+    const superclass_obj = superclass_val.asObject();
+
+    // Create the new class using createDynamicClass
+    const new_class = filein.createDynamicClass(
+        interp.heap,
+        name_str,
+        superclass_obj,
+        "", // inst_var_names
+        "", // class_var_names
+        "", // pool_dict_names
+        "", // class_inst_var_names
+        .normal, // class_format
+        null, // existing_class
+    ) catch {
+        try interp.push(superclass_val);
+        try interp.push(name_val);
+        return InterpreterError.PrimitiveFailed;
+    };
+
+    return Value.fromObject(new_class);
+}
+
+fn primCompileMethod(interp: *Interpreter) InterpreterError!Value {
+    // Primitive 797: Class >> compile: 'source'
+    // Compiles and installs a method from source code
+    const source_val = try interp.pop();
+    const class_val = try interp.pop();
+
+    // Verify class is a class object
+    if (!class_val.isObject()) {
+        std.debug.print("DEBUG primCompileMethod: class_val is not object\n", .{});
+        try interp.push(class_val);
+        try interp.push(source_val);
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    // Get source string
+    const source_str = getStringFromValue(interp.heap, source_val) orelse {
+        try interp.push(class_val);
+        try interp.push(source_val);
+        return InterpreterError.PrimitiveFailed;
+    };
+
+    const class_obj = class_val.asObject();
+
+    // Use FileIn to compile the method
+    filein.compileAndInstallMethod(interp.heap, class_obj, source_str) catch {
+        try interp.push(class_val);
+        try interp.push(source_val);
+        return InterpreterError.PrimitiveFailed;
+    };
+
+    return class_val;
+}
+
+/// Primitive 798: OBJLoader >> load: 'path'
+/// Loads an OBJ file and returns an Array: {vertexData. indexData. vertexCount. indexCount}
+fn primLoadOBJFile(interp: *Interpreter) InterpreterError!Value {
+    const path_val = try interp.pop();
+    const receiver = try interp.pop();
+    _ = receiver;
+
+    // Get path string
+    const path_str = getStringFromValue(interp.heap, path_val) orelse {
+        try interp.push(path_val);
+        return InterpreterError.PrimitiveFailed;
+    };
+
+    // Load OBJ file
+    var mesh = obj_loader.loadOBJ(path_str, interp.heap.allocator) catch {
+        std.debug.print("Failed to load OBJ: {s}\n", .{path_str});
+        try interp.push(path_val);
+        return InterpreterError.PrimitiveFailed;
+    };
+    defer mesh.deinit();
+
+    // Convert to ByteArrays
+    const arrays = obj_loader.meshToByteArrays(&mesh, interp.heap) catch {
+        try interp.push(path_val);
+        return InterpreterError.PrimitiveFailed;
+    };
+
+    // Create result array: {vertexData, indexData, vertexCount, indexCount}
+    const result = interp.heap.allocateArray(4) catch {
+        return InterpreterError.OutOfMemory;
+    };
+    const result_obj = result.asObject();
+    const fields = result_obj.fields(4);
+    fields[0] = arrays.vertices;
+    fields[1] = arrays.indices;
+    fields[2] = Value.fromSmallInt(@intCast(mesh.vertices.len));
+    fields[3] = Value.fromSmallInt(@intCast(mesh.indices.len));
+
+    return result;
 }

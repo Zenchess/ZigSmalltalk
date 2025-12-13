@@ -31,6 +31,17 @@ pub fn build(b: *std.Build) void {
     // Link C library for FFI
     exe.linkLibC();
 
+    // Add FloatTest library for debugging float passing
+    exe.addIncludePath(.{ .cwd_relative = "/tmp" });
+    exe.addLibraryPath(.{ .cwd_relative = "/tmp" });
+    exe.linkSystemLibrary("floattest");
+
+    // Link GLEW for modern OpenGL
+    exe.linkSystemLibrary("GLEW");
+
+    // Link libffi for runtime FFI
+    exe.linkSystemLibrary("ffi");
+
     // Read ffi-config.json and link required libraries
     linkFFILibraries(b, exe);
 

@@ -12,3 +12,6 @@ zig-out/
 .DS_Store
 Thumbs.db
 Dolphin/
+
+# Demo files (user-specific paths)
+chess-opengl.st

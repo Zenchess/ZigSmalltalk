@@ -88,11 +88,20 @@ pub fn main() !void {
             }
         }
 
+        // Check for glew flag
+        var glew = false;
+        if (lib_val.object.get("glew")) |glew_val| {
+            if (glew_val == .bool) {
+                glew = glew_val.bool;
+            }
+        }
+
         try libraries.append(allocator, .{
             .name = try allocator.dupe(u8, name_val.string),
             .headers = try headers.toOwnedSlice(allocator),
             .functions = try functions.toOwnedSlice(allocator),
             .auto_discover = auto_discover,
+            .glew = glew,
         });
     }
 
@@ -111,6 +120,7 @@ const Library = struct {
     headers: [][]u8,
     functions: [][]u8,
     auto_discover: bool, // If true, auto-discover all functions at compile time
+    glew: bool, // If true, add GLEW helper functions
 };
 
 fn generateDefault(allocator: std.mem.Allocator) !void {
@@ -191,6 +201,15 @@ fn generateFile(allocator: std.mem.Allocator, libraries: []const Library) !void 
         \\
     );
 
+    // Check if any library uses GLEW
+    var has_glew = false;
+    for (libraries) |lib| {
+        if (lib.glew) {
+            has_glew = true;
+            break;
+        }
+    }
+
     // Generate @cImport for each library
     for (libraries) |lib| {
         var buf: [4096]u8 = undefined;
@@ -204,9 +223,16 @@ fn generateFile(allocator: std.mem.Allocator, libraries: []const Library) !void 
         try file.writeAll("});\n\n");
     }
 
-    // Generate combined 'c' import for backwards compatibility
+    // Add GLX import if we have GLEW
+    if (has_glew) {
+        try file.writeAll("/// GLX for glXGetProcAddress\npub const GLX = @cImport({\n    @cInclude(\"GL/glx.h\");\n});\n\n");
+    }
+
+    // Generate combined 'c' import for backwards compatibility (excluding GLEW to avoid conflicts)
     try file.writeAll("/// Combined C imports (for backwards compatibility)\npub const c = @cImport({\n");
     for (libraries) |lib| {
+        // Skip GLEW libraries since they conflict with other GL includes
+        if (lib.glew) continue;
         for (lib.headers) |header| {
             var buf: [256]u8 = undefined;
             const len = std.fmt.bufPrint(&buf, "    @cInclude(\"{s}\");\n", .{header}) catch continue;
@@ -257,9 +283,15 @@ fn generateFile(allocator: std.mem.Allocator, libraries: []const Library) !void 
     for (libraries) |lib| {
         var buf: [512]u8 = undefined;
         if (lib.auto_discover) {
-            // Use auto-discovery
-            const len = std.fmt.bufPrint(&buf, "pub const {s}_binding = ffi_autogen.FFILibraryAuto({s}, \"{s}\");\n", .{ lib.name, lib.name, lib.name }) catch continue;
-            try file.writeAll(len);
+            if (lib.glew) {
+                // GLEW has untranslatable macros, use FFILibraryAuto without struct support
+                const len = std.fmt.bufPrint(&buf, "pub const {s}_binding = ffi_autogen.FFILibraryAuto({s}, \"{s}\");\n", .{ lib.name, lib.name, lib.name }) catch continue;
+                try file.writeAll(len);
+            } else {
+                // Use auto-discovery with struct support
+                const len = std.fmt.bufPrint(&buf, "pub const {s}_binding = ffi_autogen.FFILibraryWithStructs({s}, \"{s}\");\n", .{ lib.name, lib.name, lib.name }) catch continue;
+                try file.writeAll(len);
+            }
         } else {
             // Use explicit function list
             const len = std.fmt.bufPrint(&buf, "pub const {s}_binding = ffi_autogen.FFILibrary({s}, \"{s}\", &library_functions.{s});\n", .{ lib.name, lib.name, lib.name, lib.name }) catch continue;
@@ -295,5 +327,71 @@ fn generateFile(allocator: std.mem.Allocator, libraries: []const Library) !void 
         const len = std.fmt.bufPrint(&buf, "    if (std.mem.eql(u8, library, \"{s}\")) return {s}_binding.getFunctionNames();\n", .{ lib.name, lib.name }) catch continue;
         try file.writeAll(len);
     }
-    try file.writeAll("    return null;\n}\n");
+    try file.writeAll("    return null;\n}\n\n");
+
+    // Generate getLibraryStructNames dispatch (only for auto-discover libraries without glew)
+    try file.writeAll("/// Get struct names for a library\n");
+    try file.writeAll("pub fn getLibraryStructNames(library: []const u8) ?[]const []const u8 {\n");
+    for (libraries) |lib| {
+        if (lib.auto_discover and !lib.glew) {
+            var buf: [256]u8 = undefined;
+            const len = std.fmt.bufPrint(&buf, "    if (std.mem.eql(u8, library, \"{s}\")) return {s}_binding.getStructNames();\n", .{ lib.name, lib.name }) catch continue;
+            try file.writeAll(len);
+        }
+    }
+    try file.writeAll("    return null;\n}\n\n");
+
+    // Generate getStructInfo dispatch
+    try file.writeAll("/// Get struct info by name\n");
+    try file.writeAll("pub fn getStructInfo(library: []const u8, struct_name: []const u8) ?ffi_autogen.StructInfo {\n");
+    for (libraries) |lib| {
+        if (lib.auto_discover and !lib.glew) {
+            var buf: [256]u8 = undefined;
+            const len = std.fmt.bufPrint(&buf, "    if (std.mem.eql(u8, library, \"{s}\")) return {s}_binding.getStruct(struct_name);\n", .{ lib.name, lib.name }) catch continue;
+            try file.writeAll(len);
+        }
+    }
+    try file.writeAll("    return null;\n}\n\n");
+
+    // Generate generateStructCode dispatch
+    try file.writeAll("/// Generate Smalltalk code for all structs in a library\n");
+    try file.writeAll("pub fn generateStructCode(library: []const u8, writer: anytype) !bool {\n");
+    for (libraries) |lib| {
+        if (lib.auto_discover and !lib.glew) {
+            var buf: [256]u8 = undefined;
+            const len = std.fmt.bufPrint(&buf, "    if (std.mem.eql(u8, library, \"{s}\")) {{\n        try {s}_binding.generateStructCode(writer);\n        return true;\n    }}\n", .{ lib.name, lib.name }) catch continue;
+            try file.writeAll(len);
+        }
+    }
+    try file.writeAll("    return false;\n}\n");
+
+    // Add GLEW helper functions if any library uses GLEW
+    if (has_glew) {
+        try file.writeAll(
+            \\
+            \\/// Set glewExperimental to GL_TRUE (required for core profile contexts)
+            \\pub fn setGlewExperimental(value: bool) void {
+            \\    GL.glewExperimental = if (value) GL.GL_TRUE else GL.GL_FALSE;
+            \\}
+            \\
+            \\/// Get an OpenGL function pointer by name using glXGetProcAddress
+            \\/// Returns the function pointer address for use with runtime FFI
+            \\/// NOTE: Requires a valid OpenGL context to be current
+            \\pub fn getGLEWFunctionPointer(name: []const u8) ?usize {
+            \\    // Create null-terminated string for glXGetProcAddress
+            \\    var name_buf: [256]u8 = undefined;
+            \\    if (name.len >= name_buf.len) return null;
+            \\    @memcpy(name_buf[0..name.len], name);
+            \\    name_buf[name.len] = 0;
+            \\
+            \\    // Use glXGetProcAddress to dynamically get the function pointer
+            \\    const proc = GLX.glXGetProcAddress(@ptrCast(&name_buf));
+            \\    if (proc) |p| {
+            \\        return @intFromPtr(p);
+            \\    }
+            \\    return null;
+            \\}
+            \\
+        );
+    }
 }

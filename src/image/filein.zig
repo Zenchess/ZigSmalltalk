@@ -230,11 +230,17 @@ pub fn parseMethodHeader(chunk: []const u8) ?Chunk {
 
 /// Check if a chunk is a class definition
 pub fn isClassDefinition(chunk: []const u8) bool {
-    // Class definitions typically start with a superclass name and "subclass:"
-    return std.mem.indexOf(u8, chunk, "subclass:") != null or
+    // Class definitions must have both subclass: and instanceVariableNames:
+    // This distinguishes them from method bodies that might use subclass:
+    const has_subclass = std.mem.indexOf(u8, chunk, "subclass:") != null or
         std.mem.indexOf(u8, chunk, "variableSubclass:") != null or
         std.mem.indexOf(u8, chunk, "variableByteSubclass:") != null or
         std.mem.indexOf(u8, chunk, "variableWordSubclass:") != null;
+
+    if (!has_subclass) return false;
+
+    // Class definitions must also have instanceVariableNames: (even if empty)
+    return std.mem.indexOf(u8, chunk, "instanceVariableNames:") != null;
 }
 
 /// Check if a chunk is a method definition marker
@@ -524,6 +530,8 @@ pub const FileIn = struct {
         if (self.interp == null) {
             const interp_ptr = self.allocator.create(interpreter.Interpreter) catch return;
             interp_ptr.* = interpreter.Interpreter.init(self.heap);
+            // Register interpreter with heap for GC stack tracing
+            self.heap.interpreter = interp_ptr;
             self.interp = interp_ptr;
         }
 
@@ -567,8 +575,10 @@ pub const FileIn = struct {
         // Execute - for a DoIt, receiver is nil and there are no args
         _ = interp_ptr.execute(method, Value.nil, &[_]Value{}) catch |err| {
             // Execution failed - log it for debugging
-            std.debug.print("  Expression execution failed: {any}\n", .{err});
-            std.debug.print("    Chunk: {s}...\n", .{chunk[0..@min(60, chunk.len)]});
+            if (DEBUG_VERBOSE) {
+                std.debug.print("  Expression execution failed: {any}\n", .{err});
+                std.debug.print("    Chunk: {s}...\n", .{chunk[0..@min(60, chunk.len)]});
+            }
             return;
         };
 
@@ -597,76 +607,106 @@ pub const FileIn = struct {
         //     poolDictionaries: ''
         //     classInstanceVariableNames: ''
 
+        // Skip any leading comments (text in double quotes)
+        var effective_chunk = chunk;
+        while (effective_chunk.len > 0) {
+            const trimmed = std.mem.trimLeft(u8, effective_chunk, " \t\r\n");
+            if (trimmed.len > 0 and trimmed[0] == '"') {
+                // Skip this comment - find closing quote
+                var i: usize = 1;
+                while (i < trimmed.len) : (i += 1) {
+                    if (trimmed[i] == '"') {
+                        // Check for escaped quote ""
+                        if (i + 1 < trimmed.len and trimmed[i + 1] == '"') {
+                            i += 1; // Skip escaped quote
+                        } else {
+                            // End of comment
+                            effective_chunk = trimmed[i + 1 ..];
+                            break;
+                        }
+                    }
+                }
+                if (i >= trimmed.len) {
+                    // Unclosed comment - use remaining text
+                    effective_chunk = "";
+                    break;
+                }
+            } else {
+                effective_chunk = trimmed;
+                break;
+            }
+        }
+
         // Determine the class format type
         var class_format: object.ClassFormat = .normal;
         var subclass_keyword: []const u8 = "subclass:";
 
-        if (std.mem.indexOf(u8, chunk, "variableByteSubclass:") != null) {
+        if (std.mem.indexOf(u8, effective_chunk, "variableByteSubclass:") != null) {
             class_format = .bytes;
             subclass_keyword = "variableByteSubclass:";
-        } else if (std.mem.indexOf(u8, chunk, "variableWordSubclass:") != null) {
+        } else if (std.mem.indexOf(u8, effective_chunk, "variableWordSubclass:") != null) {
             class_format = .words;
             subclass_keyword = "variableWordSubclass:";
-        } else if (std.mem.indexOf(u8, chunk, "variableSubclass:") != null) {
+        } else if (std.mem.indexOf(u8, effective_chunk, "variableSubclass:") != null) {
             class_format = .variable;
             subclass_keyword = "variableSubclass:";
         }
 
         // Find superclass name (first identifier before "subclass:")
-        const subclass_idx = std.mem.indexOf(u8, chunk, subclass_keyword) orelse
+        const subclass_idx = std.mem.indexOf(u8, effective_chunk, subclass_keyword) orelse
             return FileInError.InvalidChunkFormat;
 
-        const superclass_name = std.mem.trim(u8, chunk[0..subclass_idx], " \t\r\n");
+        const superclass_name = std.mem.trim(u8, effective_chunk[0..subclass_idx], " \t\r\n");
         if (superclass_name.len == 0) return FileInError.InvalidChunkFormat;
 
         // Find class name after "#"
-        const hash_idx = std.mem.indexOf(u8, chunk[subclass_idx..], "#") orelse
+        const hash_idx = std.mem.indexOf(u8, effective_chunk[subclass_idx..], "#") orelse
             return FileInError.InvalidChunkFormat;
         const class_start = subclass_idx + hash_idx + 1;
 
         var class_end = class_start;
-        while (class_end < chunk.len and isIdentChar(chunk[class_end])) {
+        while (class_end < effective_chunk.len and isIdentChar(effective_chunk[class_end])) {
             class_end += 1;
         }
-        const class_name = chunk[class_start..class_end];
+        const class_name = effective_chunk[class_start..class_end];
         if (class_name.len == 0) return FileInError.InvalidChunkFormat;
 
         // Find instance variable names
         var inst_var_names: []const u8 = "";
-        if (std.mem.indexOf(u8, chunk, "instanceVariableNames:")) |idx| {
-            if (std.mem.indexOfScalarPos(u8, chunk, idx, '\'')) |start| {
-                if (std.mem.indexOfScalarPos(u8, chunk, start + 1, '\'')) |end| {
-                    inst_var_names = chunk[start + 1 .. end];
+        if (std.mem.indexOf(u8, effective_chunk, "instanceVariableNames:")) |idx| {
+            if (std.mem.indexOfScalarPos(u8, effective_chunk, idx, '\'')) |start| {
+                if (std.mem.indexOfScalarPos(u8, effective_chunk, start + 1, '\'')) |end| {
+                    inst_var_names = effective_chunk[start + 1 .. end];
                 }
             }
         }
 
         // Find class variable names
         var class_var_names: []const u8 = "";
-        if (std.mem.indexOf(u8, chunk, "classVariableNames:")) |idx| {
-            if (std.mem.indexOfScalarPos(u8, chunk, idx, '\'')) |start| {
-                if (std.mem.indexOfScalarPos(u8, chunk, start + 1, '\'')) |end| {
-                    class_var_names = chunk[start + 1 .. end];
+        if (std.mem.indexOf(u8, effective_chunk, "classVariableNames:")) |idx| {
+            if (std.mem.indexOfScalarPos(u8, effective_chunk, idx, '\'')) |start| {
+                if (std.mem.indexOfScalarPos(u8, effective_chunk, start + 1, '\'')) |end| {
+                    class_var_names = effective_chunk[start + 1 .. end];
                 }
             }
         }
 
         // Find pool dictionaries
         var pool_dict_names: []const u8 = "";
-        if (std.mem.indexOf(u8, chunk, "poolDictionaries:")) |idx| {
-            if (std.mem.indexOfScalarPos(u8, chunk, idx, '\'')) |start| {
-                if (std.mem.indexOfScalarPos(u8, chunk, start + 1, '\'')) |end| {
-                    pool_dict_names = chunk[start + 1 .. end];
+        if (std.mem.indexOf(u8, effective_chunk, "poolDictionaries:")) |idx| {
+            if (std.mem.indexOfScalarPos(u8, effective_chunk, idx, '\'')) |start| {
+                if (std.mem.indexOfScalarPos(u8, effective_chunk, start + 1, '\'')) |end| {
+                    pool_dict_names = effective_chunk[start + 1 .. end];
                 }
             }
         }
 
         // Find class instance variable names
         var class_inst_var_names: []const u8 = "";
-        if (std.mem.indexOf(u8, chunk, "classInstanceVariableNames:")) |idx| {
-            if (std.mem.indexOfScalarPos(u8, chunk, idx, '\'')) |start| {
-                if (std.mem.indexOfScalarPos(u8, chunk, start + 1, '\'')) |end| {
-                    class_inst_var_names = chunk[start + 1 .. end];
+        if (std.mem.indexOf(u8, effective_chunk, "classInstanceVariableNames:")) |idx| {
+            if (std.mem.indexOfScalarPos(u8, effective_chunk, idx, '\'')) |start| {
+                if (std.mem.indexOfScalarPos(u8, effective_chunk, start + 1, '\'')) |end| {
+                    class_inst_var_names = effective_chunk[start + 1 .. end];
                 }
             }
         }
@@ -676,7 +716,7 @@ pub const FileIn = struct {
             Value.nil
         else
             self.heap.getGlobal(superclass_name) orelse {
-                std.debug.print("Superclass not found: {s}\n", .{superclass_name});
+                if (DEBUG_VERBOSE) std.debug.print("Superclass not found: {s}\n", .{superclass_name});
                 return FileInError.ClassNotFound;
             };
 
@@ -706,14 +746,6 @@ pub const FileIn = struct {
         try self.heap.setGlobal(class_name, Value.fromObject(new_class));
 
         if (existing_class == null) self.classes_defined += 1;
-        const format_name = switch (class_format) {
-            .normal => "subclass",
-            .variable => "variableSubclass",
-            .bytes => "variableByteSubclass",
-            .words => "variableWordSubclass",
-            else => "subclass",
-        };
-        std.debug.print("Created/updated class: {s} ({s} of {s})\n", .{ class_name, format_name, superclass_name });
     }
 
     /// Process a method category marker
@@ -764,7 +796,7 @@ pub const FileIn = struct {
 
         // Extract selector from signature
         const selector = extractSelector(signature) orelse {
-            std.debug.print("  Failed to extract selector from signature: '{s}'\n", .{signature});
+            if (DEBUG_VERBOSE) std.debug.print("  Failed to extract selector from signature: '{s}'\n", .{signature});
             return FileInError.InvalidMethodDefinition;
         };
 
@@ -837,7 +869,7 @@ pub const FileIn = struct {
         //     std.debug.print("\n", .{});
         // }
 
-        if (std.mem.eql(u8, selector, "initialize") and std.mem.eql(u8, class_name, "LookupTable")) {
+        if (DEBUG_VERBOSE and std.mem.eql(u8, selector, "initialize") and std.mem.eql(u8, class_name, "LookupTable")) {
             std.debug.print("DEBUG compile LookupTable>>initialize inst_vars count={}\n", .{gen.instance_variables.len});
             for (gen.instance_variables, 0..) |iv, idx| {
                 std.debug.print("  inst_var[{}] = {s}\n", .{ idx, iv });
@@ -896,11 +928,6 @@ pub const FileIn = struct {
 
         // Install the method in the class
         const class_obj = target_class_val.asObject();
-        if (self.current_is_class_side) {
-            std.debug.print("  Installing class method: {s} >> {s}\n", .{ class_name, selector });
-        } else {
-            std.debug.print("  Installing instance method: {s} >> {s}\n", .{ class_name, selector });
-        }
         try installMethodInClass(self.heap, class_obj, selector, method, self.current_is_class_side);
 
         // ProtocolSpec file defines protocol-building helpers as instance methods, but ANSI DB
@@ -914,7 +941,6 @@ pub const FileIn = struct {
                 const meta_val = class_obj.getField(Heap.CLASS_FIELD_METACLASS, Heap.CLASS_NUM_FIELDS);
                 if (meta_val.isObject()) {
                     const meta = meta_val.asObject();
-                    std.debug.print("  Installing class method (duplicated) ProtocolSpec >> {s}\n", .{selector});
                     try installMethodInClass(self.heap, meta, selector, method, true);
                 }
             }
@@ -1030,7 +1056,7 @@ pub const FileIn = struct {
 };
 
 /// Extract the selector from a method signature
-fn extractSelector(signature: []const u8) ?[]const u8 {
+pub fn extractSelector(signature: []const u8) ?[]const u8 {
     if (signature.len == 0) return null;
 
     // Unary selector: just an identifier
@@ -1251,14 +1277,25 @@ fn isIdentStartChar(c: u8) bool {
 
 /// Install a compiled method into a class's method dictionary
 /// Note: class_obj should already be the metaclass for class-side methods
-fn installMethodInClass(heap: *Heap, class_obj: *object.Object, selector: []const u8, method: *object.CompiledMethod, is_class_side: bool) !void {
+pub fn installMethodInClass(heap: *Heap, class_obj: *object.Object, selector: []const u8, method: *object.CompiledMethod, is_class_side: bool) !void {
     _ = is_class_side; // class_obj is already resolved to metaclass when needed
+
+    // Debug: get class name
+    const debug_name_val = class_obj.getField(Heap.CLASS_FIELD_NAME, Heap.CLASS_NUM_FIELDS);
+    var class_name: []const u8 = "???";
+    if (debug_name_val.isObject()) {
+        const debug_name_obj = debug_name_val.asObject();
+        if (debug_name_obj.header.class_index == Heap.CLASS_SYMBOL) {
+            class_name = debug_name_obj.bytes(debug_name_obj.header.size);
+        }
+    }
 
     // Get or create method dictionary
     const method_dict_val = class_obj.getField(Heap.CLASS_FIELD_METHOD_DICT, Heap.CLASS_NUM_FIELDS);
 
     if (method_dict_val.isNil()) {
         // Create new method dictionary
+        if (DEBUG_VERBOSE) std.debug.print("DEBUG installMethodInClass: '{s}' >> {s} - creating new method dict at {*}\n", .{ class_name, selector, class_obj });
         const new_dict = try heap.allocateObject(Heap.CLASS_ARRAY, 2, .variable);
         const sym = heap.internSymbol(selector) catch return error.OutOfMemory;
         new_dict.setField(0, sym, 2);
@@ -1430,7 +1467,7 @@ fn setClassVarValue(heap: *Heap, class_obj: *object.Object, name: []const u8, va
 }
 
 /// Create a new class dynamically at runtime
-fn createDynamicClass(heap: *Heap, name: []const u8, superclass: ?*object.Object, inst_var_names: []const u8, class_var_names: []const u8, pool_dict_names: []const u8, class_inst_var_names: []const u8, class_format: object.ClassFormat, existing_class: ?*object.Object) !*object.Object {
+pub fn createDynamicClass(heap: *Heap, name: []const u8, superclass: ?*object.Object, inst_var_names: []const u8, class_var_names: []const u8, pool_dict_names: []const u8, class_inst_var_names: []const u8, class_format: object.ClassFormat, existing_class: ?*object.Object) !*object.Object {
     // Allocate or reuse a class object
     const class = existing_class orelse try heap.allocateObject(Heap.CLASS_CLASS, Heap.CLASS_NUM_FIELDS, .normal);
 
@@ -1580,7 +1617,7 @@ fn createDynamicClass(heap: *Heap, name: []const u8, superclass: ?*object.Object
     // Register the class in the class table to get a class index (only for new classes)
     if (existing_class == null) {
         const class_index = try heap.registerClass(Value.fromObject(class));
-        _ = class_index;
+        if (DEBUG_VERBOSE) std.debug.print("DEBUG createDynamicClass: registered class '{s}' at index {}\n", .{ name, class_index });
     }
 
     return class;
@@ -1664,6 +1701,69 @@ fn createDynamicMetaclass(heap: *Heap, class: *object.Object, name: []const u8, 
     }
 
     return metaclass;
+}
+
+/// Compile and install a method from source code into a class
+/// This is a public API for dynamic method compilation at runtime
+pub fn compileAndInstallMethod(heap: *Heap, class_obj: *object.Object, source: []const u8) !void {
+    // Parse the method source to extract selector
+    var first_line_end: usize = 0;
+    while (first_line_end < source.len and source[first_line_end] != '\n' and source[first_line_end] != '\r') {
+        first_line_end += 1;
+    }
+
+    const signature = std.mem.trim(u8, source[0..first_line_end], " \t");
+    const selector = extractSelector(signature) orelse {
+        return error.InvalidMethodDefinition;
+    };
+
+    // Use a temporary arena for parsing
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // Parse the method
+    var p = Parser.init(alloc, source);
+    const ast = p.parseMethod() catch return error.CompilationFailed;
+
+    // Generate code
+    var gen = CodeGenerator.init(alloc, heap, std.heap.page_allocator);
+    defer gen.deinit();
+    gen.source_code = source;
+
+    // Get instance variables from the class hierarchy
+    var inst_var_list: std.ArrayListUnmanaged([]const u8) = .{};
+    defer inst_var_list.deinit(alloc);
+
+    var walk_class = Value.fromObject(class_obj);
+    while (walk_class.isObject()) {
+        const walk_obj = walk_class.asObject();
+        const inst_vars = walk_obj.getField(Heap.CLASS_FIELD_INST_VARS, Heap.CLASS_NUM_FIELDS);
+        if (inst_vars.isObject()) {
+            const vars_array = inst_vars.asObject();
+            const vars_size = vars_array.header.size;
+            var i: usize = vars_size;
+            while (i > 0) {
+                i -= 1;
+                const var_sym = vars_array.getField(i, vars_size);
+                if (var_sym.isObject()) {
+                    const sym_obj = var_sym.asObject();
+                    if (sym_obj.header.class_index == Heap.CLASS_SYMBOL) {
+                        const var_name = sym_obj.bytes(sym_obj.header.size);
+                        inst_var_list.insert(alloc, 0, var_name) catch {};
+                    }
+                }
+            }
+        }
+        walk_class = walk_obj.getField(Heap.CLASS_FIELD_SUPERCLASS, Heap.CLASS_NUM_FIELDS);
+    }
+    gen.instance_variables = inst_var_list.items;
+
+    // Compile the method
+    const method = gen.compileMethod(ast) catch return error.CompilationFailed;
+
+    // Install the method
+    try installMethodInClass(heap, class_obj, selector, method, false);
 }
 
 // Tests

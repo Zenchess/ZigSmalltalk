@@ -6,6 +6,9 @@ const ObjectHeader = object.ObjectHeader;
 const ClassFormat = object.ClassFormat;
 const CompiledMethod = object.CompiledMethod;
 
+// Forward declaration for interpreter reference
+const Interpreter = @import("interpreter.zig").Interpreter;
+
 /// Heap - manages all Smalltalk objects
 pub const Heap = struct {
     allocator: std.mem.Allocator,
@@ -27,6 +30,9 @@ pub const Heap = struct {
 
     // Hash counter for identity hashes
     next_hash: u32 = 1,
+
+    // Interpreter reference for GC stack tracing
+    interpreter: ?*Interpreter = null,
 
     // Well-known class indices
     pub const CLASS_OBJECT: u32 = 0;
@@ -431,6 +437,47 @@ pub const Heap = struct {
             entry.value_ptr.* = try self.copyObject(entry.value_ptr.*);
         }
 
+        // 4. Interpreter stack (critical for GC during execution)
+        if (self.interpreter) |interp| {
+            // Trace all values on the stack
+            for (interp.stack[0..interp.sp]) |*slot| {
+                slot.* = try self.copyObject(slot.*);
+            }
+            // Trace current receiver
+            interp.receiver = try self.copyObject(interp.receiver);
+            // Trace method class
+            interp.method_class = try self.copyObject(interp.method_class);
+            // Trace current method - always copy as it's a heap object
+            const method_val = Value.fromObject(@ptrCast(@alignCast(interp.method)));
+            const new_method_val = try self.copyObject(method_val);
+            if (new_method_val.isObject()) {
+                interp.method = @ptrCast(@alignCast(new_method_val.asObject()));
+            }
+            // Trace context stack
+            for (interp.contexts[0..interp.context_ptr]) |*ctx| {
+                ctx.receiver = try self.copyObject(ctx.receiver);
+                ctx.method_class = try self.copyObject(ctx.method_class);
+                if (ctx.closure) |closure| {
+                    ctx.closure = try self.copyObject(closure);
+                }
+                // Trace context method - always copy as it's a heap object
+                const ctx_method_val = Value.fromObject(@ptrCast(@alignCast(ctx.method)));
+                const new_ctx_method_val = try self.copyObject(ctx_method_val);
+                if (new_ctx_method_val.isObject()) {
+                    ctx.method = @ptrCast(@alignCast(new_ctx_method_val.asObject()));
+                }
+            }
+            // Trace exception handler values
+            for (interp.exception_handlers[0..interp.handler_ptr]) |*handler| {
+                handler.exception_class = try self.copyObject(handler.exception_class);
+                handler.handler_block = try self.copyObject(handler.handler_block);
+            }
+            // Trace last MNU receiver
+            interp.last_mnu_receiver = try self.copyObject(interp.last_mnu_receiver);
+            // Trace current exception
+            interp.current_exception = try self.copyObject(interp.current_exception);
+        }
+
         // Scan copied objects (Cheney's algorithm)
         var scan_ptr: usize = 0;
         while (scan_ptr < self.alloc_ptr) {
@@ -475,6 +522,23 @@ pub const Heap = struct {
         }
 
         const old_obj = value.asObject();
+        const obj_addr = @intFromPtr(old_obj);
+
+        // Check if already in new space (from_space after swap) - already copied
+        const new_space_start = @intFromPtr(self.from_space.ptr);
+        const new_space_end = new_space_start + self.alloc_ptr;
+        if (obj_addr >= new_space_start and obj_addr < new_space_end) {
+            return value; // Already in new space, no need to copy
+        }
+
+        // Validate pointer is within old space (to_space after swap)
+        const old_space_start = @intFromPtr(self.to_space.ptr);
+        const old_space_end = old_space_start + self.space_size;
+        if (obj_addr < old_space_start or obj_addr >= old_space_end) {
+            // This is not a valid heap pointer - return unchanged
+            // This might be FFI data that looks like a pointer, or corrupted data
+            return value;
+        }
 
         // Check if already copied (forwarding pointer in old location)
         if (old_obj.header.isMarked()) {

@@ -66,6 +66,42 @@ fn valueToCType(comptime T: type, val: Value, heap: *Heap, allocator: std.mem.Al
         const child = ptr_info.child;
         const is_c_pointer = (ptr_info.size == .c);
 
+        // Special case: [*c][*c]const u8 or similar (char** - array of strings)
+        if (@typeInfo(child) == .pointer) {
+            const inner_ptr_info = @typeInfo(child).pointer;
+            const inner_child = inner_ptr_info.child;
+            // Check if this is char** (pointer to pointer to char)
+            if (inner_child == u8 or ((@typeInfo(inner_child) == .int) and @typeInfo(inner_child).int.bits == 8)) {
+                // Accept Array of Strings
+                if (val.isObject()) {
+                    const obj = val.asObject();
+                    if (obj.header.class_index == Heap.CLASS_ARRAY) {
+                        const arr_fields = obj.fields(obj.header.size);
+                        // Allocate array of C string pointers
+                        const c_strings = allocator.alloc([*c]const u8, arr_fields.len) catch return FFIError.AllocationFailed;
+                        for (arr_fields, 0..) |elem, i| {
+                            if (elem.isObject()) {
+                                const str_obj = elem.asObject();
+                                if (str_obj.header.class_index == Heap.CLASS_STRING or
+                                    str_obj.header.class_index == Heap.CLASS_SYMBOL)
+                                {
+                                    const str_bytes = str_obj.bytes(str_obj.header.size);
+                                    const c_str = allocator.allocSentinel(u8, str_bytes.len, 0) catch return FFIError.AllocationFailed;
+                                    @memcpy(c_str, str_bytes);
+                                    c_strings[i] = c_str.ptr;
+                                } else {
+                                    return FFIError.TypeMismatch;
+                                }
+                            } else {
+                                return FFIError.TypeMismatch;
+                            }
+                        }
+                        return @ptrCast(c_strings.ptr);
+                    }
+                }
+            }
+        }
+
         // Special case: [*c]const u8 or [*:0]const u8 (C strings)
         if (child == u8 or ((@typeInfo(child) == .int) and @typeInfo(child).int.bits == 8)) {
             // For C pointers, nil maps to null (address 0)
@@ -85,8 +121,72 @@ fn valueToCType(comptime T: type, val: Value, heap: *Heap, allocator: std.mem.Al
                     @memcpy(c_str, bytes);
                     return @ptrCast(c_str.ptr);
                 }
+                // Also accept ByteArray for raw byte buffers
+                if (obj.header.class_index == Heap.CLASS_BYTE_ARRAY) {
+                    const bytes = obj.bytes(obj.header.size);
+                    return @ptrCast(bytes.ptr);
+                }
             }
             return FFIError.TypeMismatch;
+        }
+
+        // Special case: pointer to int/uint types - accept ByteArray as output buffer
+        if (@typeInfo(child) == .int) {
+            if (val.isObject()) {
+                const obj = val.asObject();
+                if (obj.header.class_index == Heap.CLASS_BYTE_ARRAY) {
+                    // Return pointer to ByteArray's data for C to write to
+                    const bytes = obj.bytes(obj.header.size);
+                    return @ptrCast(@alignCast(bytes.ptr));
+                }
+                // Also accept Array of integers - allocate and convert
+                if (obj.header.class_index == Heap.CLASS_ARRAY) {
+                    const arr_fields = obj.fields(obj.header.size);
+                    const int_array = allocator.alloc(child, arr_fields.len) catch return FFIError.AllocationFailed;
+                    for (arr_fields, 0..) |elem, i| {
+                        if (elem.isSmallInt()) {
+                            int_array[i] = @intCast(elem.asSmallInt());
+                        } else {
+                            return FFIError.TypeMismatch;
+                        }
+                    }
+                    return @ptrCast(int_array.ptr);
+                }
+            }
+        }
+
+        // Special case: pointer to float types - accept ByteArray or Array
+        if (@typeInfo(child) == .float) {
+            if (val.isObject()) {
+                const obj = val.asObject();
+                if (obj.header.class_index == Heap.CLASS_BYTE_ARRAY) {
+                    // Return pointer to ByteArray's data for C to write to
+                    const bytes = obj.bytes(obj.header.size);
+                    return @ptrCast(@alignCast(bytes.ptr));
+                }
+                // Accept Array of numbers - allocate and convert to float array
+                if (obj.header.class_index == Heap.CLASS_ARRAY) {
+                    const arr_fields = obj.fields(obj.header.size);
+                    const float_array = allocator.alloc(child, arr_fields.len) catch return FFIError.AllocationFailed;
+                    for (arr_fields, 0..) |elem, i| {
+                        if (elem.isSmallInt()) {
+                            float_array[i] = @floatFromInt(elem.asSmallInt());
+                        } else if (elem.isObject()) {
+                            const float_obj = elem.asObject();
+                            if (float_obj.header.class_index == Heap.CLASS_FLOAT) {
+                                const float_bytes = float_obj.bytes(8);
+                                const float_val: f64 = @bitCast(float_bytes[0..8].*);
+                                float_array[i] = @floatCast(float_val);
+                            } else {
+                                return FFIError.TypeMismatch;
+                            }
+                        } else {
+                            return FFIError.TypeMismatch;
+                        }
+                    }
+                    return @ptrCast(float_array.ptr);
+                }
+            }
         }
 
         // Generic pointer - from integer address or nil
@@ -110,7 +210,14 @@ fn valueToCType(comptime T: type, val: Value, heap: *Heap, allocator: std.mem.Al
     if (@typeInfo(T) == .optional) {
         const child = @typeInfo(T).optional.child;
         if (@typeInfo(child) == .pointer) {
+            // Accept nil or SmallInt(0) as null for optional pointers
             if (val.isNil()) return null;
+            if (val.isSmallInt() and val.asSmallInt() == 0) return null;
+            // For non-zero values, recurse but allow the pointer to be created
+            if (val.isSmallInt()) {
+                const addr: usize = @intCast(val.asSmallInt());
+                return @ptrFromInt(addr);
+            }
             return valueToCType(child, val, heap, allocator);
         }
     }
@@ -320,6 +427,9 @@ fn shouldSkipDecl(name: []const u8) bool {
     // Skip internal/reserved names (start with underscore)
     if (name.len > 0 and name[0] == '_') return true;
 
+    // Skip C struct tag names (prefer typedef names like Vector2 over struct_Vector2)
+    if (std.mem.startsWith(u8, name, "struct_")) return true;
+
     // Skip all-uppercase names (typically C macros)
     var all_upper = true;
     for (name) |c| {
@@ -386,7 +496,7 @@ fn shouldSkipDecl(name: []const u8) bool {
 
 /// Count all wrappable functions in a @cImport (auto-discovery)
 fn countAllWrappableFunctions(comptime CImport: type) usize {
-    @setEvalBranchQuota(1000000);
+    @setEvalBranchQuota(10000000);
     const decls = @typeInfo(CImport).@"struct".decls;
     comptime var count: usize = 0;
 
@@ -406,7 +516,7 @@ fn countAllWrappableFunctions(comptime CImport: type) usize {
 
 /// Auto-discover and generate registry for ALL wrappable functions in a @cImport
 pub fn generateRegistryAuto(comptime CImport: type) [countAllWrappableFunctions(CImport)]FFIFunction {
-    @setEvalBranchQuota(1000000);
+    @setEvalBranchQuota(10000000);
     const count = countAllWrappableFunctions(CImport);
     const decls = @typeInfo(CImport).@"struct".decls;
 
@@ -780,7 +890,7 @@ fn isWrappableStruct(comptime T: type) bool {
 
 /// Count wrappable structs in a @cImport
 fn countWrappableStructs(comptime CImport: type) usize {
-    @setEvalBranchQuota(1000000);
+    @setEvalBranchQuota(10000000);
     const decls = @typeInfo(CImport).@"struct".decls;
     comptime var count: usize = 0;
 
@@ -802,7 +912,7 @@ fn countWrappableStructs(comptime CImport: type) usize {
 
 /// Get all struct infos from a @cImport
 pub fn getStructInfos(comptime CImport: type) [countWrappableStructs(CImport)]StructInfo {
-    @setEvalBranchQuota(1000000);
+    @setEvalBranchQuota(10000000);
     const count = countWrappableStructs(CImport);
     const decls = @typeInfo(CImport).@"struct".decls;
 

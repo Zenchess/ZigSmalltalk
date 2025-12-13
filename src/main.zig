@@ -300,7 +300,7 @@ pub fn main() !void {
 
     if (!loaded_from_image) {
         // Initialize heap (64MB default)
-        heap = try Heap.init(allocator, 64 * 1024 * 1024);
+        heap = try Heap.init(allocator, 512 * 1024 * 1024); // 512MB to reduce GC frequency
         // Bootstrap core classes
         try bootstrap.bootstrap(heap);
     }
@@ -309,6 +309,8 @@ pub fn main() !void {
 
     // Create interpreter
     var interp = Interpreter.init(heap);
+    // Register interpreter with heap for GC stack tracing
+    heap.interpreter = &interp;
 
     // Process load-order file if specified
     if (load_order_path) |order_path| {
@@ -324,10 +326,6 @@ pub fn main() !void {
         };
         defer allocator.free(order_content);
 
-        var total_methods: usize = 0;
-        var total_classes: usize = 0;
-        var total_expressions: usize = 0;
-
         // Process each line as a file path
         var lines = std.mem.splitAny(u8, order_content, "\n\r");
         while (lines.next()) |line| {
@@ -336,28 +334,23 @@ pub fn main() !void {
             if (trimmed_line.len == 0) continue;
             if (trimmed_line[0] == '#') continue;
 
-            std.debug.print("Loading: {s}\n", .{trimmed_line});
             var file_in = filein.FileIn.init(allocator, heap);
             defer file_in.deinit();
 
             file_in.loadFile(trimmed_line) catch |err| {
-                const err_msg = switch (err) {
-                    filein.FileInError.FileNotFound => "File not found",
-                    filein.FileInError.ClassNotFound => "Class not found",
-                    filein.FileInError.InvalidMethodDefinition => "Invalid method definition",
-                    filein.FileInError.CompilationFailed => "Compilation failed",
-                    else => "Unknown error",
-                };
-                std.debug.print("  Error: {s}\n", .{err_msg});
+                if (!tui_mode) {
+                    const err_msg = switch (err) {
+                        filein.FileInError.FileNotFound => "File not found",
+                        filein.FileInError.ClassNotFound => "Class not found",
+                        filein.FileInError.InvalidMethodDefinition => "Invalid method definition",
+                        filein.FileInError.CompilationFailed => "Compilation failed",
+                        else => "Unknown error",
+                    };
+                    std.debug.print("Loading: {s} - Error: {s}\n", .{ trimmed_line, err_msg });
+                }
                 continue;
             };
-
-            total_methods += file_in.methods_loaded;
-            total_classes += file_in.classes_defined;
-            total_expressions += file_in.expressions_evaluated;
         }
-
-        std.debug.print("Load order complete: {d} methods, {d} classes, {d} expressions\n", .{ total_methods, total_classes, total_expressions });
     }
 
     var skip_next: bool = false;
@@ -379,28 +372,28 @@ pub fn main() !void {
             continue;
         }
 
-        // Load file
-        std.debug.print("Loading file: {s}\n", .{arg});
+        // Load file (silently for TUI mode)
         var file_in = filein.FileIn.init(allocator, heap);
         defer file_in.deinit();
 
         file_in.loadFile(arg) catch |err| {
-            const err_msg = switch (err) {
-                filein.FileInError.FileNotFound => "File not found",
-                filein.FileInError.ClassNotFound => "Class not found",
-                filein.FileInError.InvalidMethodDefinition => "Invalid method definition",
-                filein.FileInError.CompilationFailed => "Compilation failed",
-                else => "Unknown error",
-            };
-            std.debug.print("Error loading {s}: {s}\n", .{ arg, err_msg });
+            if (!tui_mode) {
+                const err_msg = switch (err) {
+                    filein.FileInError.FileNotFound => "File not found",
+                    filein.FileInError.ClassNotFound => "Class not found",
+                    filein.FileInError.InvalidMethodDefinition => "Invalid method definition",
+                    filein.FileInError.CompilationFailed => "Compilation failed",
+                    else => "Unknown error",
+                };
+                std.debug.print("Error loading {s}: {s}\n", .{ arg, err_msg });
+            }
             continue;
         };
-        if (file_in.expressions_evaluated > 0) {
-            std.debug.print("Loaded {d} methods, {d} classes, {d} expressions from {s}\n", .{ file_in.methods_loaded, file_in.classes_defined, file_in.expressions_evaluated, arg });
-        } else {
-            std.debug.print("Loaded {d} methods, {d} classes from {s}\n", .{ file_in.methods_loaded, file_in.classes_defined, arg });
-        }
     }
+
+    // Re-register main interpreter with heap after file loading
+    // (FileIn may have temporarily registered its own interpreter)
+    heap.interpreter = &interp;
 
     if (!repl_mode) {
         return;

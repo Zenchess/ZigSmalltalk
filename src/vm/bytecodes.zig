@@ -459,6 +459,7 @@ pub const Primitive = enum(u16) {
     float_truncated = 166, // Float >> truncated
     large_as_float = 167, // LargeInteger >> asFloat
     small_as_float = 168, // SmallInteger >> asFloat
+    float_print_string = 169, // Float >> printString
     float_abs = 205, // Float >> abs
     float_less_or_equal = 214, // Float >> <=
     float_negate = 215, // Float >> negated (our extension)
@@ -624,6 +625,12 @@ pub const Primitive = enum(u16) {
     ffi_struct_names = 790, // 'Raylib' ffiStructNames - returns array of struct names
     ffi_struct_info = 791, // 'Raylib' ffiStructInfo: #Color - returns struct metadata
     ffi_call_with_struct = 792, // FFI call that handles struct args/returns
+    ffi_runtime_call = 793, // Runtime FFI call via libffi - for function pointers
+    ffi_glew_function = 794, // Get GLEW function pointer by name
+    ffi_glew_experimental = 795, // Set glewExperimental flag
+    subclass_create = 796, // Class >> subclass: #Name - create a new subclass dynamically
+    compile_method = 797, // Class >> compile: 'source' - compile and install method
+    load_obj_file = 798, // OBJLoader >> load: 'path' - load OBJ file, returns {vertexData. indexData. vertexCount. indexCount}
 
     // Reflection primitives (900+)
     class_selectors = 900, // Behavior >> selectors
