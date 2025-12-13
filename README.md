@@ -325,6 +325,12 @@ Contributions and pull requests are welcome. Please open an issue to discuss maj
 
 MIT License - see [LICENSE](LICENSE) file.
 
+### Third-Party Licenses
+
+This project includes the ANSI Smalltalk class library from **Dolphin Smalltalk** by Object Arts, which is also MIT licensed. See [LICENSES/DOLPHIN-SMALLTALK.txt](LICENSES/DOLPHIN-SMALLTALK.txt) for details.
+
 ## Acknowledgments
 
-This implementation draws inspiration from classic Smalltalk systems including Dolphin Smalltalk and ANSI Smalltalk standards, while taking advantage of Zig's systems programming capabilities for performance and C interoperability.
+This project uses the **ANSI Smalltalk class library** from [Dolphin Smalltalk](https://github.com/dolphinsmalltalk/Dolphin) by Object Arts. The class files in `ansi-tests/` are derived from Dolphin's implementation of the ANSI Smalltalk standard.
+
+The VM implementation takes advantage of Zig's systems programming capabilities for performance and C interoperability.
