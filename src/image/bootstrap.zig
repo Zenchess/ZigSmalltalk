@@ -2,12 +2,18 @@ const std = @import("std");
 const memory = @import("../vm/memory.zig");
 const object = @import("../vm/object.zig");
 const bytecodes = @import("../vm/bytecodes.zig");
+const build_options = @import("build_options");
 
 const Heap = memory.Heap;
 const Value = object.Value;
 const Object = object.Object;
 const ClassFormat = object.ClassFormat;
 const Primitive = bytecodes.Primitive;
+
+// FFI generated bindings (only available when FFI is enabled)
+const ffi_generated = if (build_options.ffi_enabled) @import("../vm/ffi_generated.zig") else undefined;
+const ffi_autogen = if (build_options.ffi_enabled) @import("../vm/ffi_autogen.zig") else undefined;
+const ffi_enabled = build_options.ffi_enabled;
 
 /// Bootstrap the core Smalltalk classes
 /// This creates the minimal class hierarchy needed to start the system
@@ -16,8 +22,6 @@ pub fn bootstrap(heap: *Heap) !void {
     // but Metaclass is a subclass of Class. We solve this by:
     // 1. Creating stub class objects first
     // 2. Fixing up the class pointers afterwards
-
-    std.debug.print("Bootstrapping Zig Smalltalk...\n", .{});
 
     // Phase 1: Create all class objects with placeholder class references
 
@@ -609,26 +613,6 @@ pub fn bootstrap(heap: *Heap) !void {
     // Phase 6: Install core methods
     try installCoreMethods(heap);
 
-    // Debug: confirm bootstrap class layouts match interpreter expectations
-    const dbg_string_fmt = string_class.getField(Heap.CLASS_FIELD_FORMAT, Heap.CLASS_NUM_FIELDS);
-    const dbg_string_meta = string_class.getField(Heap.CLASS_FIELD_METACLASS, Heap.CLASS_NUM_FIELDS);
-    if (dbg_string_fmt.isSmallInt()) {
-        std.debug.print("DEBUG bootstrap String format field = SmallInt({})\n", .{dbg_string_fmt.asSmallInt()});
-    } else {
-        std.debug.print("DEBUG bootstrap String format field = non-int (nil? {})\n", .{dbg_string_fmt.isNil()});
-    }
-    if (dbg_string_meta.isObject()) {
-        const meta_fmt = dbg_string_meta.asObject().getField(Heap.CLASS_FIELD_FORMAT, Heap.METACLASS_NUM_FIELDS);
-        if (meta_fmt.isSmallInt()) {
-            std.debug.print("DEBUG bootstrap String metaclass format = SmallInt({})\n", .{meta_fmt.asSmallInt()});
-        } else {
-            std.debug.print("DEBUG bootstrap String metaclass format = non-int (nil? {})\n", .{meta_fmt.isNil()});
-        }
-    } else {
-        std.debug.print("DEBUG bootstrap String metaclass missing\n", .{});
-    }
-
-    std.debug.print("Bootstrap complete. {} classes created.\n", .{heap.class_table.items.len});
 }
 
 fn createClassObject(heap: *Heap, class_index: u32) !*Object {
@@ -846,6 +830,7 @@ pub fn installCoreMethods(heap: *Heap) !void {
     try installMethod(heap, small_int_class, "to:do:", try createPrimitiveMethod(heap, 2, @intFromEnum(Primitive.to_do)));
     try installMethod(heap, small_int_class, "to:by:do:", try createPrimitiveMethod(heap, 3, @intFromEnum(Primitive.to_by_do)));
     try installMethod(heap, small_int_class, "factorial", try createPrimitiveMethod(heap, 0, @intFromEnum(Primitive.factorial)));
+    try installMethod(heap, small_int_class, "printString", try createPrimitiveMethod(heap, 0, @intFromEnum(Primitive.small_int_print_string))); // 44
 
     // String methods - Dolphin compatible
     try installMethod(heap, string_class, "size", try createPrimitiveMethod(heap, 0, @intFromEnum(Primitive.size))); // 62
@@ -862,6 +847,7 @@ pub fn installCoreMethods(heap: *Heap) !void {
     try installMethod(heap, string_class, ">=", try createPrimitiveMethod(heap, 1, @intFromEnum(Primitive.string_greater_or_equal)));
     try installMethod(heap, string_class, "=", try createPrimitiveMethod(heap, 1, @intFromEnum(Primitive.string_equal)));
     try installMethod(heap, string_class, "copyFrom:to:", try createPrimitiveMethod(heap, 2, @intFromEnum(Primitive.string_copy_from_to)));
+    try installMethod(heap, string_class, "ffiCall:with:", try createPrimitiveMethod(heap, 2, @intFromEnum(Primitive.ffi_call_with_struct))); // 792
 
     // Array methods - Dolphin compatible
     const array_class = heap.getClass(Heap.CLASS_ARRAY).asObject();
@@ -965,6 +951,7 @@ pub fn installCoreMethods(heap: *Heap) !void {
     try installMethod(heap, float_class, "truncated", try createPrimitiveMethod(heap, 0, @intFromEnum(Primitive.float_truncated))); // 166
     try installMethod(heap, float_class, "abs", try createPrimitiveMethod(heap, 0, @intFromEnum(Primitive.float_abs))); // 205
     try installMethod(heap, float_class, "negated", try createPrimitiveMethod(heap, 0, @intFromEnum(Primitive.float_negate))); // our extension
+    try installMethod(heap, float_class, "printString", try createPrimitiveMethod(heap, 0, @intFromEnum(Primitive.float_print_string))); // 169
 
     // SmallInteger >> asFloat
     try installMethod(heap, small_int_class, "asFloat", try createPrimitiveMethod(heap, 0, @intFromEnum(Primitive.small_as_float))); // 168
@@ -1058,6 +1045,332 @@ pub fn ensureCorePrimitives(heap: *Heap) !void {
 
     // Always install the instSize primitive to avoid MethodNotUnderstood during copies
     try installMethod(heap, behavior_obj.?, "instSize", try createPrimitiveMethod(heap, 0, @intFromEnum(Primitive.class_inst_size)));
+}
+
+/// Bootstrap FFI library classes with auto-generated methods
+/// Creates a Smalltalk class for each configured FFI library and installs
+/// class methods for each C function that wrap the ffiCall:with: primitive
+pub fn bootstrapFFILibraries(heap: *Heap) !void {
+    if (!ffi_enabled) return;
+
+    // Get Object class as superclass for FFI libraries
+    const object_class_val = heap.getClass(Heap.CLASS_OBJECT);
+    if (!object_class_val.isObject()) return;
+    const object_class = object_class_val.asObject();
+
+    // Iterate through all configured libraries
+    for (ffi_generated.library_names) |lib_name| {
+        // Skip LibC and LibMath - they're defined in ffi.st with optimized primitives
+        if (std.mem.eql(u8, lib_name, "LibC") or std.mem.eql(u8, lib_name, "LibMath")) {
+            continue;
+        }
+
+        // Check if class already exists in globals
+        if (heap.globals.get(lib_name) != null) {
+            continue;
+        }
+
+        // Create the class (this also pre-allocates the method dictionary)
+        _ = try createFFILibraryClass(heap, object_class, lib_name);
+
+        // Get functions for this library and install methods
+        if (ffi_generated.getLibraryFunctions(lib_name)) |functions| {
+            var installed_count: usize = 0;
+            for (functions) |func| {
+                // IMPORTANT: Order matters for GC safety!
+                // 1. First intern the selector (may trigger GC)
+                const selector_str = buildFFISelector(func.name, func.arg_count);
+                const selector = try heap.internSymbol(selector_str);
+
+                // 2. Re-fetch class/metaclass (GC may have moved them)
+                const lib_class_val = heap.globals.get(lib_name) orelse continue;
+                if (!lib_class_val.isObject()) continue;
+                const lib_class = lib_class_val.asObject();
+                const metaclass_val = lib_class.getField(Heap.CLASS_FIELD_METACLASS, Heap.CLASS_NUM_FIELDS);
+                if (!metaclass_val.isObject()) continue;
+                const metaclass = metaclass_val.asObject();
+
+                // 3. Create method (allocates literals, then method off-heap)
+                //    After this, NO MORE HEAP ALLOCATIONS until method is installed!
+                const method = try createFFIMethod(heap, lib_name, func.name, func.arg_count) orelse continue;
+
+                // 4. Install method (method dict is pre-allocated, no GC here)
+                try installMethodWithSelector(heap, metaclass, selector, method);
+                installed_count += 1;
+            }
+            std.debug.print("FFI: Installed {d} methods for {s}\n", .{ installed_count, lib_name });
+        }
+    }
+}
+
+/// Build a Smalltalk selector from a C function name and arg count
+/// e.g., "sin" with 1 arg -> "sin:"
+///       "pow" with 2 args -> "pow:with:"
+///       "InitWindow" with 3 args -> "InitWindow:with:and:"
+fn buildFFISelector(func_name: []const u8, arg_count: usize) []const u8 {
+    // Use static buffer for selector construction
+    const Static = struct {
+        var buf: [256]u8 = undefined;
+    };
+
+    var pos: usize = 0;
+
+    // Copy function name
+    for (func_name) |c| {
+        if (pos < Static.buf.len - 1) {
+            Static.buf[pos] = c;
+            pos += 1;
+        }
+    }
+
+    if (arg_count == 0) {
+        return Static.buf[0..pos];
+    }
+
+    // Add first colon
+    if (pos < Static.buf.len - 1) {
+        Static.buf[pos] = ':';
+        pos += 1;
+    }
+
+    // Add additional keyword args
+    var i: usize = 1;
+    while (i < arg_count) : (i += 1) {
+        const keyword = switch (i) {
+            1 => "with:",
+            2 => "and:",
+            3 => "also:",
+            4 => "plus:",
+            else => "arg:",
+        };
+        for (keyword) |c| {
+            if (pos < Static.buf.len - 1) {
+                Static.buf[pos] = c;
+                pos += 1;
+            }
+        }
+    }
+
+    return Static.buf[0..pos];
+}
+
+/// Create an FFI library class as a subclass of Object
+fn createFFILibraryClass(heap: *Heap, superclass: *Object, name: []const u8) !*Object {
+    // Allocate class object
+    const class = try heap.allocateObject(Heap.CLASS_CLASS, Heap.CLASS_NUM_FIELDS, .normal);
+
+    // Set up class fields
+    const name_sym = try heap.internSymbol(name);
+    class.setField(Heap.CLASS_FIELD_NAME, name_sym, Heap.CLASS_NUM_FIELDS);
+    class.setField(Heap.CLASS_FIELD_SUPERCLASS, Value.fromObject(superclass), Heap.CLASS_NUM_FIELDS);
+    class.setField(Heap.CLASS_FIELD_METHOD_DICT, Value.nil, Heap.CLASS_NUM_FIELDS);
+    class.setField(Heap.CLASS_FIELD_FORMAT, Value.fromSmallInt(@intFromEnum(ClassFormat.normal)), Heap.CLASS_NUM_FIELDS);
+    class.setField(Heap.CLASS_FIELD_INST_VARS, Value.nil, Heap.CLASS_NUM_FIELDS);
+
+    // Create and link metaclass (metaclass has one extra field: thisClass)
+    const metaclass = try heap.allocateObject(Heap.CLASS_METACLASS, Heap.METACLASS_NUM_FIELDS, .normal);
+    metaclass.setField(Heap.CLASS_FIELD_NAME, name_sym, Heap.METACLASS_NUM_FIELDS);
+    // Metaclass's superclass should be the superclass's metaclass (e.g., Object class)
+    const super_metaclass = superclass.getField(Heap.CLASS_FIELD_METACLASS, Heap.CLASS_NUM_FIELDS);
+    metaclass.setField(Heap.CLASS_FIELD_SUPERCLASS, super_metaclass, Heap.METACLASS_NUM_FIELDS);
+    metaclass.setField(Heap.CLASS_FIELD_FORMAT, Value.fromSmallInt(@intFromEnum(ClassFormat.normal)), Heap.METACLASS_NUM_FIELDS);
+    metaclass.setField(Heap.METACLASS_FIELD_THIS_CLASS, Value.fromObject(class), Heap.METACLASS_NUM_FIELDS);
+    class.setField(Heap.CLASS_FIELD_METACLASS, Value.fromObject(metaclass), Heap.CLASS_NUM_FIELDS);
+
+    // Register class in globals FIRST (so we can re-fetch it after GC)
+    try heap.globals.put(heap.allocator, name, Value.fromObject(class));
+
+    // Pre-allocate method dictionary for metaclass (large enough for ~600 FFI methods)
+    // This prevents GC during method installation
+    const method_dict_size: usize = 1200; // 600 methods * 2 slots each
+    const method_dict = try heap.allocateObject(Heap.CLASS_ARRAY, method_dict_size, .variable);
+
+    // Initialize all slots to nil
+    const dict_fields = method_dict.fields(method_dict_size);
+    for (0..method_dict_size) |i| {
+        dict_fields[i] = Value.nil;
+    }
+
+    // Re-fetch class and metaclass (GC may have moved them during method_dict allocation)
+    const class_val = heap.globals.get(name) orelse return error.OutOfMemory;
+    const fresh_class = class_val.asObject();
+    const fresh_metaclass = fresh_class.getField(Heap.CLASS_FIELD_METACLASS, Heap.CLASS_NUM_FIELDS).asObject();
+    fresh_metaclass.setField(Heap.CLASS_FIELD_METHOD_DICT, Value.fromObject(method_dict), Heap.METACLASS_NUM_FIELDS);
+
+    return fresh_class;
+}
+
+/// Create an FFI wrapper method that calls 'LibName' ffiCall: #funcName with: { args }
+/// The method sends ffiCall:with: to the library name symbol (symbols work as receivers too)
+fn createFFIMethod(heap: *Heap, lib_name: []const u8, func_name: []const u8, arg_count: usize) !?*object.CompiledMethod {
+    // Build bytecodes for the method:
+    // 1. Push library name symbol literal (receiver for ffiCall:with:)
+    // 2. Push function name symbol literal (first arg)
+    // 3. Build array from method arguments (second arg)
+    // 4. Send ffiCall:with: message (2 args)
+    // 5. Return result
+
+    const num_literals: usize = 3; // lib_name symbol, func_name symbol, #ffiCall:with: selector
+    const header_size = @sizeOf(object.CompiledMethod.MethodHeader);
+    const literals_size = num_literals * @sizeOf(Value);
+
+    var bytecode_buf: [64]u8 = undefined;
+    var bc_len: usize = 0;
+
+    // Push library name symbol (literal 0) - this is the receiver for ffiCall:with:
+    bytecode_buf[bc_len] = 0x20; // push_literal_constant
+    bc_len += 1;
+    bytecode_buf[bc_len] = 0; // literal index 0
+    bc_len += 1;
+
+    // Push function name symbol (literal 1) - first argument to ffiCall:with:
+    bytecode_buf[bc_len] = 0x20; // push_literal_constant
+    bc_len += 1;
+    bytecode_buf[bc_len] = 1; // literal index 1
+    bc_len += 1;
+
+    // Build array from method arguments
+    if (arg_count == 0) {
+        // Create empty array
+        bytecode_buf[bc_len] = 0xC6; // make_array
+        bc_len += 1;
+        bytecode_buf[bc_len] = 0; // 0 elements
+        bc_len += 1;
+    } else {
+        // Push all method arguments (temp vars 0..arg_count-1)
+        // Use single-byte push_temporary_N opcodes (0x10-0x1F for temps 0-15)
+        // or extended push_temporary (0x2A + index) for temps >= 16
+        var i: usize = 0;
+        while (i < arg_count) : (i += 1) {
+            if (i < 16) {
+                // Single-byte opcode: push_temporary_0 (0x10) through push_temporary_15 (0x1F)
+                bytecode_buf[bc_len] = @intCast(0x10 + i);
+                bc_len += 1;
+            } else {
+                // Extended: push_temporary (0x2A) + index byte
+                bytecode_buf[bc_len] = 0x2A;
+                bc_len += 1;
+                bytecode_buf[bc_len] = @intCast(i);
+                bc_len += 1;
+            }
+        }
+        // Create array from stack elements
+        bytecode_buf[bc_len] = 0xC6; // make_array
+        bc_len += 1;
+        bytecode_buf[bc_len] = @intCast(arg_count);
+        bc_len += 1;
+    }
+
+    // Send ffiCall:with: (2 arguments) - selector is literal 2
+    bytecode_buf[bc_len] = 0x80; // send
+    bc_len += 1;
+    bytecode_buf[bc_len] = 2; // literal index 2 (selector)
+    bc_len += 1;
+    bytecode_buf[bc_len] = 2; // num args
+    bc_len += 1;
+
+    // Return the result
+    bytecode_buf[bc_len] = 0xA4; // return_top
+    bc_len += 1;
+
+    // GC-SAFE ALLOCATION STRATEGY:
+    // The problem: Each heap allocation can trigger GC, which moves objects.
+    // Local variables holding heap pointers become STALE after GC.
+    //
+    // Solution:
+    // 1. Pre-intern all symbols (they go into symbol_table which IS traced by GC)
+    // 2. Allocate the method OFF-HEAP (CompiledMethod has different layout than Object)
+    // 3. Re-fetch FRESH pointers from symbol_table (GC updated them)
+    // 4. Store fresh pointers - no more allocations after this point
+
+    // Step 1: Pre-intern all symbols (may trigger GC, but symbols survive in symbol_table)
+    _ = try heap.internSymbol(lib_name);
+    _ = try heap.internSymbol(func_name);
+    _ = try heap.internSymbol("ffiCall:with:");
+
+    // Step 2: Allocate method OFF-HEAP (CompiledMethod doesn't use ObjectHeader)
+    const total_size = header_size + literals_size + bc_len;
+    const mem = try std.heap.page_allocator.alignedAlloc(u8, std.mem.Alignment.of(object.CompiledMethod), total_size);
+    const method: *object.CompiledMethod = @ptrCast(mem.ptr);
+
+    // Step 3: Re-fetch FRESH symbol pointers from symbol_table
+    // These are guaranteed to be valid because symbol_table is traced by GC
+    const lib_sym = heap.symbol_table.get(lib_name) orelse return null;
+    const func_sym = heap.symbol_table.get(func_name) orelse return null;
+    const sel_sym = heap.symbol_table.get("ffiCall:with:") orelse return null;
+
+    // Step 4: Set up method - NO MORE HEAP ALLOCATIONS from here
+    method.header = .{
+        .num_args = @intCast(arg_count),
+        .num_temps = @intCast(arg_count),
+        .num_literals = @intCast(num_literals),
+        .primitive_index = 0,
+        .flags = .{},
+        .bytecode_size = @intCast(bc_len),
+    };
+
+    // Store fresh literals
+    const literals_ptr: [*]Value = @ptrFromInt(@intFromPtr(method) + header_size);
+    literals_ptr[0] = lib_sym;
+    literals_ptr[1] = func_sym;
+    literals_ptr[2] = sel_sym;
+
+    // Copy bytecodes
+    const bc_ptr: [*]u8 = @ptrFromInt(@intFromPtr(method) + header_size + literals_size);
+    @memcpy(bc_ptr[0..bc_len], bytecode_buf[0..bc_len]);
+
+    return method;
+}
+
+/// Install a method with an already-created selector symbol
+fn installMethodWithSelector(heap: *Heap, class: *Object, selector: Value, method: *object.CompiledMethod) !void {
+    // Determine the number of fields - metaclasses have one extra field
+    const num_fields = if (class.header.class_index == Heap.CLASS_METACLASS)
+        Heap.METACLASS_NUM_FIELDS
+    else
+        Heap.CLASS_NUM_FIELDS;
+
+    // Get or create method dictionary
+    var dict_val = class.getField(Heap.CLASS_FIELD_METHOD_DICT, num_fields);
+    var dict: *Object = undefined;
+
+    if (dict_val.isNil()) {
+        // Create new method dictionary - large enough for Raylib's ~550 functions
+        // Each entry takes 2 slots (selector + method), so 1200 slots = 600 methods
+        const initial_size: usize = 1200;
+        dict = try heap.allocateObject(Heap.CLASS_ARRAY, initial_size, .variable);
+        // Initialize all slots to nil
+        const fields = dict.fields(initial_size);
+        for (0..initial_size) |i| {
+            fields[i] = Value.nil;
+        }
+        class.setField(Heap.CLASS_FIELD_METHOD_DICT, Value.fromObject(dict), num_fields);
+    } else {
+        dict = dict_val.asObject();
+    }
+
+    // Find empty slot or existing selector
+    const dict_size = dict.header.size;
+    var slot: usize = 0;
+    var checked: usize = 0;
+    while (slot + 1 < dict_size) : (slot += 2) {
+        const existing = dict.getField(slot, dict_size);
+        checked += 1;
+        if (existing.isNil()) {
+            // Found empty slot
+            dict.setField(slot, selector, dict_size);
+            dict.setField(slot + 1, Value.fromObject(@ptrCast(method)), dict_size);
+            return;
+        }
+        // Check if selector already exists (update method)
+        if (existing.bits == selector.bits) {
+            dict.setField(slot + 1, Value.fromObject(@ptrCast(method)), dict_size);
+            return;
+        }
+    }
+
+    // Dictionary full - this shouldn't happen with 1024 slots
+    std.debug.print("WARNING: Method dictionary full (checked {d} slots, dict_size={d}, dict@{*})\n", .{ checked, dict_size, dict });
 }
 
 test "bootstrap creates core classes" {

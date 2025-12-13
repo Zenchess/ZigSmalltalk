@@ -381,7 +381,8 @@ pub const Interpreter = struct {
                 .push_literal => {
                     const index = self.fetchByte();
                     const literals = self.method.getLiterals();
-                    try self.push(literals[index]);
+                    const lit_val = literals[index];
+                    try self.push(lit_val);
                 },
                 .push_literal_variable => {
                     const index = self.fetchByte();
@@ -1458,7 +1459,12 @@ pub const Interpreter = struct {
     fn getSuperclass(_: *Interpreter, class: Value) Value {
         if (class.isObject()) {
             const class_obj = class.asObject();
-            return class_obj.getField(Heap.CLASS_FIELD_SUPERCLASS, Heap.CLASS_NUM_FIELDS);
+            // Metaclasses have one extra field
+            const num_fields = if (class_obj.header.class_index == Heap.CLASS_METACLASS)
+                Heap.METACLASS_NUM_FIELDS
+            else
+                Heap.CLASS_NUM_FIELDS;
+            return class_obj.getField(Heap.CLASS_FIELD_SUPERCLASS, num_fields);
         }
         return Value.nil;
     }
@@ -1471,8 +1477,14 @@ pub const Interpreter = struct {
             if (class.isObject()) {
                 const class_obj = class.asObject();
 
+                // Metaclasses have one extra field, so use the correct field count
+                const num_fields = if (class_obj.header.class_index == Heap.CLASS_METACLASS)
+                    Heap.METACLASS_NUM_FIELDS
+                else
+                    Heap.CLASS_NUM_FIELDS;
+
                 // Get method dictionary
-                const method_dict = class_obj.getField(Heap.CLASS_FIELD_METHOD_DICT, Heap.CLASS_NUM_FIELDS);
+                const method_dict = class_obj.getField(Heap.CLASS_FIELD_METHOD_DICT, num_fields);
 
                 if (method_dict.isObject()) {
                     // Look up selector in method dictionary
@@ -1482,7 +1494,7 @@ pub const Interpreter = struct {
                 }
 
                 // Move to superclass
-                class = class_obj.getField(Heap.CLASS_FIELD_SUPERCLASS, Heap.CLASS_NUM_FIELDS);
+                class = class_obj.getField(Heap.CLASS_FIELD_SUPERCLASS, num_fields);
             } else {
                 break;
             }
@@ -1502,7 +1514,14 @@ pub const Interpreter = struct {
         while (!class.isNil()) {
             if (class.isObject()) {
                 const class_obj = class.asObject();
-                const method_dict = class_obj.getField(Heap.CLASS_FIELD_METHOD_DICT, Heap.CLASS_NUM_FIELDS);
+
+                // Metaclasses have one extra field, so use the correct field count
+                const num_fields = if (class_obj.header.class_index == Heap.CLASS_METACLASS)
+                    Heap.METACLASS_NUM_FIELDS
+                else
+                    Heap.CLASS_NUM_FIELDS;
+
+                const method_dict = class_obj.getField(Heap.CLASS_FIELD_METHOD_DICT, num_fields);
                 if (method_dict.isObject()) {
                     if (self.lookupInMethodDict(method_dict, selector)) |method| {
                         return MethodLookup{
@@ -1511,7 +1530,7 @@ pub const Interpreter = struct {
                         };
                     }
                 }
-                class = class_obj.getField(Heap.CLASS_FIELD_SUPERCLASS, Heap.CLASS_NUM_FIELDS);
+                class = class_obj.getField(Heap.CLASS_FIELD_SUPERCLASS, num_fields);
             } else {
                 break;
             }
@@ -1558,7 +1577,8 @@ pub const Interpreter = struct {
                     const method_val = dict_obj.getField(i + 1, dict_size);
                     if (method_val.isObject()) {
                         // The method value points to a CompiledMethod
-                        return @ptrCast(@alignCast(method_val.asObject()));
+                        const found_method: *CompiledMethod = @ptrCast(@alignCast(method_val.asObject()));
+                        return found_method;
                     }
                 }
             }

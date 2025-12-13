@@ -453,6 +453,10 @@ pub const Heap = struct {
             if (new_method_val.isObject()) {
                 interp.method = @ptrCast(@alignCast(new_method_val.asObject()));
             }
+            // IMPORTANT: Also trace literals of off-heap methods!
+            // Off-heap methods (allocated with page_allocator) aren't scanned by the
+            // normal GC scan loop, so we need to explicitly trace their literals.
+            try self.traceMethodLiterals(interp.method);
             // Trace context stack
             for (interp.contexts[0..interp.context_ptr]) |*ctx| {
                 ctx.receiver = try self.copyObject(ctx.receiver);
@@ -466,6 +470,8 @@ pub const Heap = struct {
                 if (new_ctx_method_val.isObject()) {
                     ctx.method = @ptrCast(@alignCast(new_ctx_method_val.asObject()));
                 }
+                // Also trace literals of off-heap methods in context stack
+                try self.traceMethodLiterals(ctx.method);
             }
             // Trace exception handler values
             for (interp.exception_handlers[0..interp.handler_ptr]) |*handler| {
@@ -582,6 +588,31 @@ pub const Heap = struct {
         old_obj.header.hash = @intCast(new_ptr);
 
         return Value.fromObject(new_obj);
+    }
+
+    /// Trace literals in a method that may be off-heap.
+    /// Off-heap methods (allocated with page_allocator) aren't scanned by the
+    /// normal GC scan loop, so we need to explicitly trace their literals.
+    fn traceMethodLiterals(self: *Heap, method: *CompiledMethod) !void {
+        const method_addr = @intFromPtr(method);
+        const old_space_start = @intFromPtr(self.to_space.ptr);
+        const old_space_end = old_space_start + self.space_size;
+        const new_space_start = @intFromPtr(self.from_space.ptr);
+        const new_space_end = new_space_start + self.alloc_ptr;
+
+        // If method is in GC heap (either old or new space), its literals will be
+        // traced by the normal scan loop. Only trace off-heap methods.
+        if ((method_addr >= old_space_start and method_addr < old_space_end) or
+            (method_addr >= new_space_start and method_addr < new_space_end))
+        {
+            return; // In-heap method, will be scanned normally
+        }
+
+        // Method is off-heap - explicitly trace its literals
+        const literals = method.getLiterals();
+        for (literals) |*lit| {
+            lit.* = try self.copyObject(lit.*);
+        }
     }
 
     fn objectFieldCount(self: *Heap, obj: *Object) usize {
