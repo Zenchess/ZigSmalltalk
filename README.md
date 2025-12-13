@@ -11,7 +11,7 @@ This project was inspired by limitations encountered when attempting to load an 
 - **64-bit tagged pointer VM** with 61-bit SmallIntegers
 - **Semi-space copying garbage collector** with interpreter stack tracing
 - **Terminal UI (TUI)** with mouse support, multiple tabs, and syntax highlighting
-- **Compile-time C FFI generation** from JSON configuration
+- **Compile-time C FFI generation** configurable through the TUI
 - **Automatic C struct bindings** with getter/setter method generation
 - **OBJ file loader** for 3D model loading
 - **ANSI Smalltalk compliance** (~88% of ANSI test suite passing)
@@ -119,9 +119,19 @@ You can also use `Ctrl+1` through `Ctrl+4` to switch tabs.
 
 ZigSmalltalk can automatically generate bindings for C libraries at compile time.
 
-### Configuration
+### Configuration via TUI
 
-Edit `ffi-config.json` to specify libraries:
+The easiest way to configure FFI bindings is through the **FFI Config** tab (`F4`) in the TUI:
+
+1. Press `F4` to open the FFI Config tab
+2. Add libraries by specifying the library name, headers, and link name
+3. Enable/disable libraries as needed
+4. Press `Ctrl+S` to save the configuration
+5. Rebuild with `zig build gen-ffi && zig build`
+
+### Advanced: Direct JSON Configuration
+
+The configuration is stored in `ffi-config.json`:
 
 ```json
 {
@@ -132,13 +142,6 @@ Edit `ffi-config.json` to specify libraries:
       "link": "glfw",
       "enabled": true,
       "functions": ["glfwInit", "glfwCreateWindow", "glfwPollEvents"]
-    },
-    {
-      "name": "LibC",
-      "headers": ["stdio.h", "stdlib.h", "string.h"],
-      "link": "c",
-      "enabled": true,
-      "functions": ["puts", "printf", "malloc", "free"]
     }
   ]
 }
