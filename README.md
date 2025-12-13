@@ -34,6 +34,9 @@ zig build run
 # Run the TUI
 zig build run -- --tui
 
+# Run the TUI with ANSI classes pre-loaded
+./tui.sh
+
 # Load Smalltalk files
 zig build run -- file1.st file2.st
 
