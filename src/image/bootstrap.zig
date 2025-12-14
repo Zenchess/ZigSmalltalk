@@ -600,6 +600,13 @@ pub fn bootstrap(heap: *Heap) !void {
     // Create DeafObject singleton instance and set Transcript global
     const deaf_object_instance = try heap.allocateObject(Heap.CLASS_DEAF_OBJECT, 0, .normal);
     try heap.setGlobal("Transcript", Value.fromObject(deaf_object_instance));
+
+    // Create Smalltalk dictionary instance (system dictionary for globals)
+    const smalltalk_dict = try heap.allocateObject(Heap.CLASS_DICTIONARY, 2, .normal);
+    smalltalk_dict.setField(0, Value.fromSmallInt(0), 2); // tally = 0
+    smalltalk_dict.setField(1, Value.nil, 2); // array = nil (will be initialized on first put)
+    try heap.setGlobal("Smalltalk", Value.fromObject(smalltalk_dict));
+
     try heap.setGlobal("Association", Value.fromObject(association_class));
     try heap.setGlobal("PoolDictionary", Value.fromObject(pool_dictionary_class));
     try heap.setGlobal("Magnitude", Value.fromObject(magnitude_class));
@@ -750,6 +757,35 @@ pub fn installClassMethod(heap: *Heap, class: *Object, selector: []const u8, met
     }
 }
 
+/// Create a method that just returns self (for Object>>yourself)
+pub fn createYourselfMethod(heap: *Heap) !*object.CompiledMethod {
+    _ = heap;
+    const bytecode_size: usize = 1;
+    const num_literals: usize = 0;
+
+    const header_size = @sizeOf(object.CompiledMethod.MethodHeader);
+    const literals_size = num_literals * @sizeOf(Value);
+    const total_size = header_size + literals_size + bytecode_size;
+
+    const mem = try std.heap.page_allocator.alignedAlloc(u8, std.mem.Alignment.of(object.CompiledMethod), total_size);
+    const method: *object.CompiledMethod = @ptrCast(mem.ptr);
+
+    method.header = .{
+        .num_args = 0,
+        .num_temps = 0,
+        .num_literals = 0,
+        .primitive_index = 0,
+        .flags = .{},
+        .bytecode_size = @intCast(bytecode_size),
+    };
+
+    // Bytecode: return self (receiver)
+    const bytecodes_ptr: [*]u8 = @ptrFromInt(@intFromPtr(method) + header_size + literals_size);
+    bytecodes_ptr[0] = 0xA0; // return_receiver
+
+    return method;
+}
+
 /// Create a primitive method (method that just calls a primitive)
 pub fn createPrimitiveMethod(heap: *Heap, num_args: u8, primitive_index: u16) !*object.CompiledMethod {
     // A primitive method has:
@@ -882,6 +918,7 @@ pub fn installCoreMethods(heap: *Heap) !void {
     try installMethod(heap, object_class, "basicAt:", try createPrimitiveMethod(heap, 1, @intFromEnum(Primitive.at))); // 60
     try installMethod(heap, object_class, "basicAt:put:", try createPrimitiveMethod(heap, 2, @intFromEnum(Primitive.at_put))); // 61
     try installMethod(heap, object_class, "printString", try createPrimitiveMethod(heap, 0, @intFromEnum(Primitive.print_string)));
+    try installMethod(heap, object_class, "yourself", try createYourselfMethod(heap)); // Returns self
 
     // Error handling methods
     try installMethod(heap, object_class, "doesNotUnderstand:", try createPrimitiveMethod(heap, 1, @intFromEnum(Primitive.does_not_understand)));
@@ -981,6 +1018,12 @@ pub fn installCoreMethods(heap: *Heap) !void {
     try installMethod(heap, object_class, "isNil", try createPrimitiveMethod(heap, 0, @intFromEnum(Primitive.is_nil_false)));
     try installMethod(heap, object_class, "notNil", try createPrimitiveMethod(heap, 0, @intFromEnum(Primitive.not_nil)));
 
+    // Dictionary methods - keyed access for hash tables
+    const dictionary_class = heap.getClass(Heap.CLASS_DICTIONARY).asObject();
+    try installMethod(heap, dictionary_class, "at:", try createPrimitiveMethod(heap, 1, @intFromEnum(Primitive.dict_at)));
+    try installMethod(heap, dictionary_class, "at:put:", try createPrimitiveMethod(heap, 2, @intFromEnum(Primitive.dict_at_put)));
+    try installMethod(heap, dictionary_class, "at:ifAbsent:", try createPrimitiveMethod(heap, 2, @intFromEnum(Primitive.dict_at_if_absent)));
+
     // ========================================================================
     // Class-side methods (installed on metaclasses)
     // ========================================================================
@@ -1013,6 +1056,17 @@ pub fn installCoreMethods(heap: *Heap) !void {
     // Character class methods
     try installClassMethod(heap, character_class, "value:", try createPrimitiveMethod(heap, 1, @intFromEnum(Primitive.char_from_code)));
     try installClassMethod(heap, character_class, "codePoint:", try createPrimitiveMethod(heap, 1, @intFromEnum(Primitive.char_from_code)));
+
+    // ========================================================================
+    // Process/Timing primitives (Dolphin-compatible primitive numbers)
+    // ========================================================================
+
+    // SmallInteger class methods for timing
+    try installClassMethod(heap, small_int_class, "microsecondClockValue", try createPrimitiveMethod(heap, 0, @intFromEnum(Primitive.microsecond_clock_value)));
+    try installClassMethod(heap, small_int_class, "millisecondClockValue", try createPrimitiveMethod(heap, 0, @intFromEnum(Primitive.millisecond_clock_value)));
+
+    // Object class method for yield (temporary - for testing until ProcessorScheduler is set up)
+    try installClassMethod(heap, object_class, "yield", try createPrimitiveMethod(heap, 0, @intFromEnum(Primitive.yield)));
 }
 
 /// Ensure critical primitive methods are present (used after loading snapshots)

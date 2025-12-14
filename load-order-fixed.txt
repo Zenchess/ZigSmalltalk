@@ -212,5 +212,8 @@ ansi-tests/AnsiInit.st
 # Include TranscriptShell
 src/image/transcript-shell.st
 
+# Process scheduling support
+src/smalltalk/process-scheduling.st
+
 # Test runner
 run-all-tests.st

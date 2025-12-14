@@ -3,10 +3,11 @@ const object = @import("object.zig");
 const memory = @import("memory.zig");
 const bytecodes = @import("bytecodes.zig");
 const interpreter_mod = @import("interpreter.zig");
-const ffi = @import("ffi.zig");
-const ffi_autogen = @import("ffi_autogen.zig");
-const ffi_runtime = @import("ffi_runtime.zig");
-const ffi_generated = @import("ffi_generated.zig");
+const build_options = @import("build_options");
+const ffi = if (build_options.ffi_enabled) @import("ffi.zig") else undefined;
+const ffi_autogen = if (build_options.ffi_enabled) @import("ffi_autogen.zig") else undefined;
+const ffi_runtime = if (build_options.ffi_enabled) @import("ffi_runtime.zig") else undefined;
+const ffi_generated = if (build_options.ffi_enabled) @import("ffi_generated.zig") else undefined;
 const filein = @import("../image/filein.zig");
 const obj_loader = @import("obj_loader.zig");
 
@@ -79,6 +80,23 @@ pub fn executePrimitive(interp: *Interpreter, prim_index: u16) InterpreterError!
         .block_value_2 => primBlockValue2(interp),
         .block_value_3 => primBlockValue3(interp),
         .block_value_4 => primBlockValue4(interp),
+
+        // ====================================================================
+        // Process/Semaphore primitives (Dolphin: 85-100, 156, 189)
+        // ====================================================================
+        .semaphore_signal => primSemaphoreSignal(interp),
+        .semaphore_wait => primSemaphoreWait(interp),
+        .process_resume => primProcessResume(interp),
+        .process_suspend => primProcessSuspend(interp),
+        .process_terminate => primProcessTerminate(interp),
+        .process_set_priority => primProcessSetPriority(interp),
+        .enable_async_events => primEnableAsyncEvents(interp),
+        .process_queue_interrupt => primProcessQueueInterrupt(interp),
+        .semaphore_set_signals => primSemaphoreSetSignals(interp),
+        .signal_timer_after => primSignalTimerAfter(interp),
+        .yield => primYield(interp),
+        .microsecond_clock_value => primMicrosecondClockValue(interp),
+        .millisecond_clock_value => primMillisecondClockValue(interp),
 
         // ====================================================================
         // Object system (Dolphin: 109-114)
@@ -353,8 +371,8 @@ pub fn executePrimitive(interp: *Interpreter, prim_index: u16) InterpreterError!
         .ffi_struct_info => primFFIStructInfo(interp),
         .ffi_call_with_struct => primFFICallWithStruct(interp),
         .ffi_runtime_call => primFFIRuntimeCall(interp),
-        .ffi_glew_function => primFFIGlewFunction(interp),
-        .ffi_glew_experimental => primFFIGlewExperimental(interp),
+        .ffi_generate_method => primFFIGenerateMethod(interp),
+        .ffi_function_info => primFFIFunctionInfo(interp),
 
         // Dynamic class and method creation
         .subclass_create => primSubclassCreate(interp),
@@ -1915,15 +1933,16 @@ pub fn primBlockValue(interp: *Interpreter) InterpreterError!Value {
         return InterpreterError.PrimitiveFailed;
     }
 
-    // Get block data: [outerTempBase, startPC, numArgs, method, receiver, homeTempBase]
-    const outer_temp_base_val = block_obj.getField(0, 6);
-    const start_pc = block_obj.getField(1, 6);
-    const num_args_val = block_obj.getField(2, 6);
-    const method_val = block_obj.getField(3, 6);
-    const block_receiver = block_obj.getField(4, 6);
-    const home_temp_base_val = block_obj.getField(5, 6);
+    // Get block data: [outerContext, startPC, numArgs, method, receiver, homeContext]
+    // Field 0/5 can be either heap context (Object) or stack index (SmallInt) for backwards compatibility
+    const outer_context_val = block_obj.getField(Heap.BLOCK_FIELD_OUTER_CONTEXT, 6);
+    const start_pc = block_obj.getField(Heap.BLOCK_FIELD_START_PC, 6);
+    const num_args_val = block_obj.getField(Heap.BLOCK_FIELD_NUM_ARGS, 6);
+    const method_val = block_obj.getField(Heap.BLOCK_FIELD_METHOD, 6);
+    const block_receiver = block_obj.getField(Heap.BLOCK_FIELD_RECEIVER, 6);
+    const home_context_val = block_obj.getField(Heap.BLOCK_FIELD_HOME_CONTEXT, 6);
 
-    if (!outer_temp_base_val.isSmallInt() or !start_pc.isSmallInt() or !num_args_val.isSmallInt() or !method_val.isObject()) {
+    if (!start_pc.isSmallInt() or !num_args_val.isSmallInt() or !method_val.isObject()) {
         try interp.push(block);
         return InterpreterError.PrimitiveFailed;
     }
@@ -1944,14 +1963,37 @@ pub fn primBlockValue(interp: *Interpreter) InterpreterError!Value {
     const saved_home_temp_base = interp.home_temp_base;
     const saved_receiver = interp.receiver;
     const saved_context_ptr = interp.context_ptr;
+    const saved_heap_context = interp.heap_context;
+    const saved_home_heap_context = interp.home_heap_context;
 
     interp.method = @ptrCast(@alignCast(method_val.asObject()));
     interp.ip = @intCast(start_pc.asSmallInt());
     interp.receiver = block_receiver; // Restore the receiver from when the block was created
-    interp.outer_temp_base = @intCast(outer_temp_base_val.asSmallInt()); // Set outer temp base for closure access
-    // Set home_temp_base from block's stored value - critical for nested block variable access
-    interp.home_temp_base = if (home_temp_base_val.isSmallInt()) @intCast(home_temp_base_val.asSmallInt()) else interp.temp_base;
     interp.temp_base = interp.sp; // Block gets its own stack frame starting at current sp
+
+    // Restore heap contexts from block for cross-process variable access
+    // Check if block has heap contexts (new format) or stack indices (old format)
+    if (outer_context_val.isObject() and outer_context_val.asObject().header.class_index == Heap.CLASS_METHOD_CONTEXT) {
+        // New format: heap contexts
+        interp.heap_context = outer_context_val;
+        interp.home_heap_context = home_context_val;
+        // Stack indices aren't valid for heap context blocks - use current frame
+        interp.outer_temp_base = interp.temp_base;
+        interp.home_temp_base = interp.temp_base;
+    } else if (outer_context_val.isSmallInt()) {
+        // Old format: stack indices (for backwards compatibility)
+        interp.outer_temp_base = @intCast(outer_context_val.asSmallInt());
+        interp.home_temp_base = if (home_context_val.isSmallInt()) @intCast(home_context_val.asSmallInt()) else interp.temp_base;
+        interp.heap_context = Value.nil;
+        interp.home_heap_context = Value.nil;
+    } else {
+        // Neither format - use defaults
+        interp.outer_temp_base = interp.temp_base;
+        interp.home_temp_base = interp.temp_base;
+        interp.heap_context = Value.nil;
+        interp.home_heap_context = Value.nil;
+    }
+
     interp.primitive_block_bases[interp.primitive_block_depth] = interp.context_ptr;
     interp.primitive_block_depth += 1;
 
@@ -1970,6 +2012,8 @@ pub fn primBlockValue(interp: *Interpreter) InterpreterError!Value {
         interp.home_temp_base = saved_home_temp_base;
         interp.receiver = saved_receiver;
         interp.context_ptr = saved_context_ptr;
+        interp.heap_context = saved_heap_context;
+        interp.home_heap_context = saved_home_heap_context;
         return err;
     };
 
@@ -1982,6 +2026,8 @@ pub fn primBlockValue(interp: *Interpreter) InterpreterError!Value {
     interp.home_temp_base = saved_home_temp_base;
     interp.receiver = saved_receiver;
     interp.context_ptr = saved_context_ptr;
+    interp.heap_context = saved_heap_context;
+    interp.home_heap_context = saved_home_heap_context;
 
     return result;
 }
@@ -2529,6 +2575,8 @@ fn primPerform(interp: *Interpreter) InterpreterError!Value {
             .num_temps = 0,
             .outer_context = null,
             .closure = null,
+            .heap_context = interp.heap_context,
+            .home_heap_context = interp.home_heap_context,
         };
         interp.context_ptr += 1;
 
@@ -2652,6 +2700,8 @@ fn primPerformWithArgs(interp: *Interpreter) InterpreterError!Value {
             .num_temps = 0,
             .outer_context = null,
             .closure = null,
+            .heap_context = interp.heap_context,
+            .home_heap_context = interp.home_heap_context,
         };
         interp.context_ptr += 1;
 
@@ -3843,12 +3893,407 @@ fn primArrayInjectInto(interp: *Interpreter) InterpreterError!Value {
     return accumulator;
 }
 
+// ============================================================================
+// Process/Semaphore Primitives (Dolphin compatible: 85-100, 156, 189)
+// ============================================================================
+
+const scheduler = @import("scheduler.zig");
+const Scheduler = scheduler.Scheduler;
+const Process = scheduler.Process;
+const ProcessState = scheduler.ProcessState;
+const SemaphoreFields = scheduler.SemaphoreFields;
+const ProcessFields = scheduler.ProcessFields;
+
+/// Primitive 85: Semaphore >> signal
+/// Signal the semaphore - wake one waiting process or increment excess signals
+fn primSemaphoreSignal(interp: *Interpreter) InterpreterError!Value {
+    const sem = try interp.pop();
+
+    if (!sem.isObject()) {
+        try interp.push(sem);
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    const sem_obj = sem.asObject();
+
+    // Get current excess signals count
+    const signals_val = sem_obj.getField(SemaphoreFields.signals, 3);
+    if (!signals_val.isSmallInt()) {
+        try interp.push(sem);
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    const current_signals = signals_val.asSmallInt();
+
+    // Check if there are waiting processes (first link of LinkedList)
+    const first_link = sem_obj.getField(SemaphoreFields.firstLink, 3);
+
+    if (first_link.isNil()) {
+        // No waiters - increment excess signals
+        sem_obj.setField(SemaphoreFields.signals, Value.fromSmallInt(current_signals + 1), 3);
+    } else {
+        // Wake up the first waiter
+        // For now, we just decrement signals and let the process continue
+        // Full implementation would need to remove from wait queue and add to ready queue
+        // This is a simplified version - the Smalltalk code handles most of the logic
+        if (current_signals > 0) {
+            sem_obj.setField(SemaphoreFields.signals, Value.fromSmallInt(current_signals - 1), 3);
+        }
+    }
+
+    return sem; // Answer the receiver
+}
+
+/// Primitive 86: Semaphore >> wait:ret:
+/// Wait on semaphore with timeout. Answer WAIT_OBJECT_0 (0) on success, WAIT_TIMEOUT (258) on timeout
+fn primSemaphoreWait(interp: *Interpreter) InterpreterError!Value {
+    // Arguments: semaphore (receiver), timeout, returnValueHolder
+    const ret_holder = try interp.pop();
+    const timeout = try interp.pop();
+    const sem = try interp.pop();
+
+    if (!sem.isObject()) {
+        try interp.push(sem);
+        try interp.push(timeout);
+        try interp.push(ret_holder);
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    const sem_obj = sem.asObject();
+
+    // Get current excess signals count
+    const signals_val = sem_obj.getField(SemaphoreFields.signals, 3);
+    if (!signals_val.isSmallInt()) {
+        try interp.push(sem);
+        try interp.push(timeout);
+        try interp.push(ret_holder);
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    const current_signals = signals_val.asSmallInt();
+
+    // WAIT_OBJECT_0 = 0, WAIT_TIMEOUT = 258
+    const WAIT_OBJECT_0: i61 = 0;
+    const WAIT_TIMEOUT: i61 = 258;
+
+    if (current_signals > 0) {
+        // Semaphore has excess signals - consume one and return immediately
+        sem_obj.setField(SemaphoreFields.signals, Value.fromSmallInt(current_signals - 1), 3);
+
+        // Store result in return value holder
+        if (ret_holder.isObject()) {
+            const holder_obj = ret_holder.asObject();
+            holder_obj.setField(0, Value.fromSmallInt(WAIT_OBJECT_0), holder_obj.header.size);
+        }
+
+        return ret_holder;
+    }
+
+    // No excess signals - check timeout
+    if (timeout.isSmallInt()) {
+        const timeout_ms = timeout.asSmallInt();
+        if (timeout_ms == 0) {
+            // Zero timeout means "don't wait, poll"
+            if (ret_holder.isObject()) {
+                const holder_obj = ret_holder.asObject();
+                holder_obj.setField(0, Value.fromSmallInt(WAIT_TIMEOUT), holder_obj.header.size);
+            }
+            return ret_holder;
+        }
+        // For INFINITE (-1) or positive timeout, we would block
+        // For now, simplified: just return success after consuming signal (if any)
+    }
+
+    // Full blocking wait would require process switching
+    // For now, return timeout for no signals case
+    if (ret_holder.isObject()) {
+        const holder_obj = ret_holder.asObject();
+        holder_obj.setField(0, Value.fromSmallInt(WAIT_TIMEOUT), holder_obj.header.size);
+    }
+
+    return ret_holder;
+}
+
+/// Primitive 87: Process >> resume
+/// Move a suspended process to the ready queue and potentially switch to it
+fn primProcessResume(interp: *Interpreter) InterpreterError!Value {
+    const process_val = try interp.pop();
+
+    if (!process_val.isObject()) {
+        try interp.push(process_val);
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    // Find or create the VM-side Process
+    var vm_process = interp.process_scheduler.findProcess(process_val);
+    if (vm_process == null) {
+        // Create a new VM process for this Smalltalk Process object
+        const process_obj = process_val.asObject();
+        const priority_val = process_obj.getField(ProcessFields.priority, 6);
+        const priority: u8 = if (priority_val.isSmallInt())
+            @intCast(@max(1, @min(10, priority_val.asSmallInt())))
+        else
+            5;
+        vm_process = interp.process_scheduler.createProcess(process_val, priority) catch {
+            try interp.push(process_val);
+            return InterpreterError.PrimitiveFailed;
+        };
+    }
+
+    const proc = vm_process.?;
+
+    // If process is already running or terminated, just return it
+    if (proc.state == .running or proc.state == .terminated) {
+        return process_val;
+    }
+
+    // Add to ready queue
+    interp.process_scheduler.makeReady(proc);
+
+    // Just add to ready queue - don't switch immediately
+    // The process will run when the current process yields, blocks, or terminates
+    // This is the simpler and more predictable behavior
+    // (Immediate preemption can be added later if needed)
+
+    return process_val;
+}
+
+/// Primitive 88: Process >> suspend
+/// Remove the process from ready queue and suspend it
+fn primProcessSuspend(interp: *Interpreter) InterpreterError!Value {
+    const process_val = try interp.pop();
+
+    if (!process_val.isObject()) {
+        try interp.push(process_val);
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    // Find the VM-side Process
+    const vm_process = interp.process_scheduler.findProcess(process_val);
+    if (vm_process == null) {
+        // Process not known to scheduler, just return it
+        return process_val;
+    }
+
+    const proc = vm_process.?;
+
+    // If this is the active process, we need to switch to another
+    if (proc.state == .running) {
+        proc.state = .suspended;
+
+        // Save current state
+        interp.saveContextToProcess(proc);
+
+        // Find next process to run
+        const next = interp.process_scheduler.findHighestPriorityReady();
+        if (next) |next_proc| {
+            interp.process_scheduler.removeFromReadyQueue(next_proc);
+            interp.restoreContextFromProcess(next_proc);
+            next_proc.state = .running;
+            interp.process_scheduler.active_process = next_proc;
+        } else {
+            // No other process to run - this is a problem in real system
+            // For now, just keep running
+            proc.state = .running;
+        }
+    } else if (proc.state == .ready) {
+        // Remove from ready queue
+        interp.process_scheduler.removeFromReadyQueue(proc);
+        proc.state = .suspended;
+    }
+
+    return process_val;
+}
+
+/// Primitive 91: Process >> primTerminate
+/// Terminate a process
+fn primProcessTerminate(interp: *Interpreter) InterpreterError!Value {
+    const process_val = try interp.pop();
+
+    if (!process_val.isObject()) {
+        try interp.push(process_val);
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    // Mark Smalltalk process as terminated
+    const process_obj = process_val.asObject();
+    process_obj.setField(ProcessFields.suspendedFrame, Value.nil, 6);
+
+    // Find the VM-side Process
+    const vm_process = interp.process_scheduler.findProcess(process_val);
+    if (vm_process) |proc| {
+        // If this is the active process, switch to another
+        if (proc.state == .running) {
+            proc.state = .terminated;
+
+            const next = interp.process_scheduler.findHighestPriorityReady();
+            if (next) |next_proc| {
+                interp.process_scheduler.removeFromReadyQueue(next_proc);
+                interp.restoreContextFromProcess(next_proc);
+                next_proc.state = .running;
+                interp.process_scheduler.active_process = next_proc;
+            } else {
+                interp.process_scheduler.active_process = null;
+            }
+        } else if (proc.state == .ready) {
+            interp.process_scheduler.removeFromReadyQueue(proc);
+            proc.state = .terminated;
+        } else {
+            proc.state = .terminated;
+        }
+    }
+
+    return Value.@"true";
+}
+
+/// Primitive 92: Process >> priority:
+/// Set process priority, answer previous priority
+fn primProcessSetPriority(interp: *Interpreter) InterpreterError!Value {
+    const new_priority = try interp.pop();
+    const process = try interp.pop();
+
+    if (!process.isObject() or !new_priority.isSmallInt()) {
+        try interp.push(process);
+        try interp.push(new_priority);
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    const priority = new_priority.asSmallInt();
+    if (priority < 1 or priority > 10) {
+        try interp.push(process);
+        try interp.push(new_priority);
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    const process_obj = process.asObject();
+
+    // Get old priority
+    const old_priority = process_obj.getField(ProcessFields.priority, 16);
+
+    // Set new priority
+    process_obj.setField(ProcessFields.priority, new_priority, 16);
+
+    return old_priority;
+}
+
+/// Primitive 95: Processor >> enableAsyncEvents:
+/// Enable or disable async events (process switching)
+fn primEnableAsyncEvents(interp: *Interpreter) InterpreterError!Value {
+    const enable = try interp.pop();
+    _ = try interp.pop(); // processor (receiver)
+
+    const was_enabled = interp.process_scheduler.async_events_enabled;
+    interp.process_scheduler.async_events_enabled = enable.isTrue();
+
+    return Value.fromBool(was_enabled);
+}
+
+/// Primitive 98: Process >> queueInterrupt:with:
+/// Queue an interrupt for a process
+fn primProcessQueueInterrupt(interp: *Interpreter) InterpreterError!Value {
+    const arg = try interp.pop();
+    const interrupt_num = try interp.pop();
+    const process = try interp.pop();
+
+    // For now, just return the process
+    // Full implementation would queue the interrupt for later delivery
+    _ = arg;
+    _ = interrupt_num;
+
+    return process;
+}
+
+/// Primitive 99: Semaphore >> primSetSignals:
+/// Set excess signal count (for pulse/set operations)
+fn primSemaphoreSetSignals(interp: *Interpreter) InterpreterError!Value {
+    const pulse = try interp.pop();
+    const sem = try interp.pop();
+
+    if (!sem.isObject() or !pulse.isSmallInt()) {
+        try interp.push(sem);
+        try interp.push(pulse);
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    const sem_obj = sem.asObject();
+    sem_obj.setField(SemaphoreFields.signals, pulse, 3);
+
+    return sem;
+}
+
+/// Primitive 100: Delay class >> signalTimerAfter:
+/// Request that the timing semaphore be signaled after N milliseconds
+fn primSignalTimerAfter(interp: *Interpreter) InterpreterError!Value {
+    const milliseconds = try interp.pop();
+    const receiver = try interp.pop(); // Delay class or timing semaphore
+
+    if (!milliseconds.isSmallInt()) {
+        try interp.push(receiver);
+        try interp.push(milliseconds);
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    const ms = milliseconds.asSmallInt();
+
+    // Get the timing semaphore from the scheduler
+    const timing_sem = interp.process_scheduler.timing_semaphore;
+
+    if (ms < 0) {
+        // Cancel timer
+        interp.process_scheduler.setTimer(-1, Value.nil);
+    } else {
+        // Set timer
+        interp.process_scheduler.setTimer(@intCast(ms), timing_sem);
+    }
+
+    return receiver;
+}
+
+/// Primitive 156: Processor >> yield
+/// Yield to other processes at same or higher priority
+fn primYield(interp: *Interpreter) InterpreterError!Value {
+    const processor = try interp.pop();
+
+    // Check for timer expiration
+    if (interp.process_scheduler.checkTimer()) |sem| {
+        interp.signalSemaphore(sem);
+    }
+
+    // Try to yield to another process
+    _ = interp.yieldToNextProcess();
+
+    return processor;
+}
+
+/// Primitive 189: Delay class >> microsecondClockValue
+/// Get high-resolution microsecond clock value
+fn primMicrosecondClockValue(interp: *Interpreter) InterpreterError!Value {
+    _ = try interp.pop(); // receiver
+
+    const us = interp.process_scheduler.microsecondClockValue();
+
+    // Return as SmallInteger (will overflow after ~292 years from VM start)
+    return Value.fromSmallInt(@intCast(us));
+}
+
+/// Primitive 174: Delay class >> millisecondClockValue
+/// Get millisecond clock value
+fn primMillisecondClockValue(interp: *Interpreter) InterpreterError!Value {
+    _ = try interp.pop(); // receiver
+
+    const us = interp.process_scheduler.microsecondClockValue();
+    const ms = @divFloor(us, 1000);
+
+    return Value.fromSmallInt(@intCast(ms));
+}
+
 test "Primitives - arithmetic" {
     const allocator = std.testing.allocator;
-    const heap = try memory.Heap.init(allocator, 1024 * 1024);
+    var heap = try memory.Heap.init(allocator, 1024 * 1024);
     defer heap.deinit();
 
-    var interp = Interpreter.init(heap);
+    var interp = Interpreter.init(&heap, allocator);
+    defer interp.deinit();
 
     // Test addition
     try interp.push(Value.fromSmallInt(3));
@@ -4135,10 +4580,11 @@ fn primSmallAsFloat(interp: *Interpreter) InterpreterError!Value {
 
 test "Primitives - comparison" {
     const allocator = std.testing.allocator;
-    const heap = try memory.Heap.init(allocator, 1024 * 1024);
+    var heap = try memory.Heap.init(allocator, 1024 * 1024);
     defer heap.deinit();
 
-    var interp = Interpreter.init(heap);
+    var interp = Interpreter.init(&heap, allocator);
+    defer interp.deinit();
 
     // Test less than
     try interp.push(Value.fromSmallInt(3));
@@ -4703,6 +5149,16 @@ fn primDictAtPut(interp: *Interpreter) InterpreterError!Value {
         try interp.push(key);
         try interp.push(val);
         return InterpreterError.PrimitiveFailed;
+    }
+
+    // If the key is a symbol, also update heap globals so compiled code can find it
+    // This makes Smalltalk at: #SomeGlobal put: value accessible to push_literal_variable
+    if (key.isObject()) {
+        const key_obj = key.asObject();
+        if (key_obj.header.class_index == Heap.CLASS_SYMBOL) {
+            const key_name = key_obj.bytes(key_obj.header.size);
+            interp.heap.setGlobal(key_name, val) catch {};
+        }
     }
 
     const dict_obj = dict.asObject();
@@ -6688,7 +7144,8 @@ fn primStdoutWrite(interp: *Interpreter) InterpreterError!Value {
 
     const str_bytes = str_obj.bytes(str_obj.header.size);
 
-    const written = std.posix.write(std.posix.STDOUT_FILENO, str_bytes) catch {
+    const stdout = std.fs.File.stdout();
+    const written = stdout.write(str_bytes) catch {
         try interp.push(str);
         return InterpreterError.PrimitiveFailed;
     };
@@ -6712,7 +7169,8 @@ fn primStdinRead(interp: *Interpreter) InterpreterError!Value {
     };
     defer interp.heap.allocator.free(buffer);
 
-    const bytes_read = std.posix.read(std.posix.STDIN_FILENO, buffer) catch {
+    const stdin = std.fs.File.stdin();
+    const bytes_read = stdin.read(buffer) catch {
         try interp.push(count);
         return InterpreterError.PrimitiveFailed;
     };
@@ -6736,7 +7194,8 @@ fn primStderrWrite(interp: *Interpreter) InterpreterError!Value {
 
     const str_bytes = str_obj.bytes(str_obj.header.size);
 
-    const written = std.posix.write(std.posix.STDERR_FILENO, str_bytes) catch {
+    const stderr = std.fs.File.stderr();
+    const written = stderr.write(str_bytes) catch {
         try interp.push(str);
         return InterpreterError.PrimitiveFailed;
     };
@@ -7436,9 +7895,17 @@ fn primGlobalAtIfAbsent(interp: *Interpreter) InterpreterError!Value {
 // FFI Primitives
 // ============================================================================
 
+// Helper constant for FFI availability
+const ffi_enabled = build_options.ffi_enabled;
+
 fn primFFIMalloc(interp: *Interpreter) InterpreterError!Value {
     const size = try interp.pop();
     _ = try interp.pop(); // receiver (LibC class)
+
+    if (!ffi_enabled) {
+        try interp.push(size);
+        return InterpreterError.PrimitiveFailed;
+    }
 
     var args = [_]Value{size};
     const result = ffi.libc_malloc(interp.heap, &args) catch {
@@ -7452,6 +7919,11 @@ fn primFFIFree(interp: *Interpreter) InterpreterError!Value {
     const ptr = try interp.pop();
     _ = try interp.pop(); // receiver
 
+    if (!ffi_enabled) {
+        try interp.push(ptr);
+        return InterpreterError.PrimitiveFailed;
+    }
+
     var args = [_]Value{ptr};
     _ = ffi.libc_free(interp.heap, &args) catch {
         try interp.push(ptr);
@@ -7463,6 +7935,11 @@ fn primFFIFree(interp: *Interpreter) InterpreterError!Value {
 fn primFFIStrlen(interp: *Interpreter) InterpreterError!Value {
     const str = try interp.pop();
     _ = try interp.pop(); // receiver
+
+    if (!ffi_enabled) {
+        try interp.push(str);
+        return InterpreterError.PrimitiveFailed;
+    }
 
     var args = [_]Value{str};
     const result = ffi.libc_strlen(interp.heap, &args) catch {
@@ -7476,6 +7953,11 @@ fn primFFIPuts(interp: *Interpreter) InterpreterError!Value {
     const str = try interp.pop();
     _ = try interp.pop(); // receiver
 
+    if (!ffi_enabled) {
+        try interp.push(str);
+        return InterpreterError.PrimitiveFailed;
+    }
+
     var args = [_]Value{str};
     const result = ffi.libc_puts(interp.heap, &args, interp.heap.allocator) catch {
         try interp.push(str);
@@ -7487,6 +7969,11 @@ fn primFFIPuts(interp: *Interpreter) InterpreterError!Value {
 fn primFFISin(interp: *Interpreter) InterpreterError!Value {
     const x = try interp.pop();
     _ = try interp.pop(); // receiver
+
+    if (!ffi_enabled) {
+        try interp.push(x);
+        return InterpreterError.PrimitiveFailed;
+    }
 
     var args = [_]Value{x};
     const result = ffi.libc_sin(interp.heap, &args) catch {
@@ -7500,6 +7987,11 @@ fn primFFICos(interp: *Interpreter) InterpreterError!Value {
     const x = try interp.pop();
     _ = try interp.pop(); // receiver
 
+    if (!ffi_enabled) {
+        try interp.push(x);
+        return InterpreterError.PrimitiveFailed;
+    }
+
     var args = [_]Value{x};
     const result = ffi.libc_cos(interp.heap, &args) catch {
         try interp.push(x);
@@ -7511,6 +8003,11 @@ fn primFFICos(interp: *Interpreter) InterpreterError!Value {
 fn primFFISqrt(interp: *Interpreter) InterpreterError!Value {
     const x = try interp.pop();
     _ = try interp.pop(); // receiver
+
+    if (!ffi_enabled) {
+        try interp.push(x);
+        return InterpreterError.PrimitiveFailed;
+    }
 
     var args = [_]Value{x};
     const result = ffi.libc_sqrt(interp.heap, &args) catch {
@@ -7525,6 +8022,12 @@ fn primFFIPow(interp: *Interpreter) InterpreterError!Value {
     const x = try interp.pop();
     _ = try interp.pop(); // receiver
 
+    if (!ffi_enabled) {
+        try interp.push(y);
+        try interp.push(x);
+        return InterpreterError.PrimitiveFailed;
+    }
+
     var args = [_]Value{ x, y };
     const result = ffi.libc_pow(interp.heap, &args) catch {
         try interp.push(y);
@@ -7538,6 +8041,11 @@ fn primFFIExp(interp: *Interpreter) InterpreterError!Value {
     const x = try interp.pop();
     _ = try interp.pop(); // receiver
 
+    if (!ffi_enabled) {
+        try interp.push(x);
+        return InterpreterError.PrimitiveFailed;
+    }
+
     var args = [_]Value{x};
     const result = ffi.libc_exp(interp.heap, &args) catch {
         try interp.push(x);
@@ -7549,6 +8057,11 @@ fn primFFIExp(interp: *Interpreter) InterpreterError!Value {
 fn primFFILog(interp: *Interpreter) InterpreterError!Value {
     const x = try interp.pop();
     _ = try interp.pop(); // receiver
+
+    if (!ffi_enabled) {
+        try interp.push(x);
+        return InterpreterError.PrimitiveFailed;
+    }
 
     var args = [_]Value{x};
     const result = ffi.libc_log(interp.heap, &args) catch {
@@ -7562,6 +8075,11 @@ fn primFFIFloor(interp: *Interpreter) InterpreterError!Value {
     const x = try interp.pop();
     _ = try interp.pop(); // receiver
 
+    if (!ffi_enabled) {
+        try interp.push(x);
+        return InterpreterError.PrimitiveFailed;
+    }
+
     var args = [_]Value{x};
     const result = ffi.libc_floor(interp.heap, &args) catch {
         try interp.push(x);
@@ -7574,6 +8092,11 @@ fn primFFICeil(interp: *Interpreter) InterpreterError!Value {
     const x = try interp.pop();
     _ = try interp.pop(); // receiver
 
+    if (!ffi_enabled) {
+        try interp.push(x);
+        return InterpreterError.PrimitiveFailed;
+    }
+
     var args = [_]Value{x};
     const result = ffi.libc_ceil(interp.heap, &args) catch {
         try interp.push(x);
@@ -7585,6 +8108,11 @@ fn primFFICeil(interp: *Interpreter) InterpreterError!Value {
 fn primFFIFabs(interp: *Interpreter) InterpreterError!Value {
     const x = try interp.pop();
     _ = try interp.pop(); // receiver
+
+    if (!ffi_enabled) {
+        try interp.push(x);
+        return InterpreterError.PrimitiveFailed;
+    }
 
     var args = [_]Value{x};
     const result = ffi.libc_abs_float(interp.heap, &args) catch {
@@ -7599,6 +8127,12 @@ fn primFFIAtan2(interp: *Interpreter) InterpreterError!Value {
     const y = try interp.pop();
     _ = try interp.pop(); // receiver
 
+    if (!ffi_enabled) {
+        try interp.push(x);
+        try interp.push(y);
+        return InterpreterError.PrimitiveFailed;
+    }
+
     var args = [_]Value{ y, x };
     const result = ffi.libc_atan2(interp.heap, &args) catch {
         try interp.push(x);
@@ -7612,6 +8146,11 @@ fn primFFITan(interp: *Interpreter) InterpreterError!Value {
     const x = try interp.pop();
     _ = try interp.pop(); // receiver
 
+    if (!ffi_enabled) {
+        try interp.push(x);
+        return InterpreterError.PrimitiveFailed;
+    }
+
     var args = [_]Value{x};
     const result = ffi.libc_tan(interp.heap, &args) catch {
         try interp.push(x);
@@ -7623,6 +8162,11 @@ fn primFFITan(interp: *Interpreter) InterpreterError!Value {
 fn primFFIAsin(interp: *Interpreter) InterpreterError!Value {
     const x = try interp.pop();
     _ = try interp.pop(); // receiver
+
+    if (!ffi_enabled) {
+        try interp.push(x);
+        return InterpreterError.PrimitiveFailed;
+    }
 
     var args = [_]Value{x};
     const result = ffi.libc_asin(interp.heap, &args) catch {
@@ -7636,6 +8180,11 @@ fn primFFIAcos(interp: *Interpreter) InterpreterError!Value {
     const x = try interp.pop();
     _ = try interp.pop(); // receiver
 
+    if (!ffi_enabled) {
+        try interp.push(x);
+        return InterpreterError.PrimitiveFailed;
+    }
+
     var args = [_]Value{x};
     const result = ffi.libc_acos(interp.heap, &args) catch {
         try interp.push(x);
@@ -7647,6 +8196,11 @@ fn primFFIAcos(interp: *Interpreter) InterpreterError!Value {
 fn primFFIAtan(interp: *Interpreter) InterpreterError!Value {
     const x = try interp.pop();
     _ = try interp.pop(); // receiver
+
+    if (!ffi_enabled) {
+        try interp.push(x);
+        return InterpreterError.PrimitiveFailed;
+    }
 
     var args = [_]Value{x};
     const result = ffi.libc_atan(interp.heap, &args) catch {
@@ -7661,6 +8215,13 @@ fn primFFIMemset(interp: *Interpreter) InterpreterError!Value {
     const val = try interp.pop();
     const ptr = try interp.pop();
     _ = try interp.pop(); // receiver
+
+    if (!ffi_enabled) {
+        try interp.push(size);
+        try interp.push(val);
+        try interp.push(ptr);
+        return InterpreterError.PrimitiveFailed;
+    }
 
     var args = [_]Value{ ptr, val, size };
     const result = ffi.libc_memset(interp.heap, &args) catch {
@@ -7678,6 +8239,13 @@ fn primFFIMemcpy(interp: *Interpreter) InterpreterError!Value {
     const dest = try interp.pop();
     _ = try interp.pop(); // receiver
 
+    if (!ffi_enabled) {
+        try interp.push(size);
+        try interp.push(src);
+        try interp.push(dest);
+        return InterpreterError.PrimitiveFailed;
+    }
+
     var args = [_]Value{ dest, src, size };
     const result = ffi.libc_memcpy(interp.heap, &args) catch {
         try interp.push(size);
@@ -7692,6 +8260,11 @@ fn primFFIReadInt8(interp: *Interpreter) InterpreterError!Value {
     const ptr = try interp.pop();
     _ = try interp.pop(); // receiver
 
+    if (!ffi_enabled) {
+        try interp.push(ptr);
+        return InterpreterError.PrimitiveFailed;
+    }
+
     var args = [_]Value{ptr};
     const result = ffi.readInt8(interp.heap, &args) catch {
         try interp.push(ptr);
@@ -7703,6 +8276,11 @@ fn primFFIReadInt8(interp: *Interpreter) InterpreterError!Value {
 fn primFFIReadInt16(interp: *Interpreter) InterpreterError!Value {
     const ptr = try interp.pop();
     _ = try interp.pop(); // receiver
+
+    if (!ffi_enabled) {
+        try interp.push(ptr);
+        return InterpreterError.PrimitiveFailed;
+    }
 
     var args = [_]Value{ptr};
     const result = ffi.readInt16(interp.heap, &args) catch {
@@ -7716,6 +8294,11 @@ fn primFFIReadInt32(interp: *Interpreter) InterpreterError!Value {
     const ptr = try interp.pop();
     _ = try interp.pop(); // receiver
 
+    if (!ffi_enabled) {
+        try interp.push(ptr);
+        return InterpreterError.PrimitiveFailed;
+    }
+
     var args = [_]Value{ptr};
     const result = ffi.readInt32(interp.heap, &args) catch {
         try interp.push(ptr);
@@ -7727,6 +8310,11 @@ fn primFFIReadInt32(interp: *Interpreter) InterpreterError!Value {
 fn primFFIReadInt64(interp: *Interpreter) InterpreterError!Value {
     const ptr = try interp.pop();
     _ = try interp.pop(); // receiver
+
+    if (!ffi_enabled) {
+        try interp.push(ptr);
+        return InterpreterError.PrimitiveFailed;
+    }
 
     var args = [_]Value{ptr};
     const result = ffi.readInt64(interp.heap, &args) catch {
@@ -7740,6 +8328,11 @@ fn primFFIReadFloat64(interp: *Interpreter) InterpreterError!Value {
     const ptr = try interp.pop();
     _ = try interp.pop(); // receiver
 
+    if (!ffi_enabled) {
+        try interp.push(ptr);
+        return InterpreterError.PrimitiveFailed;
+    }
+
     var args = [_]Value{ptr};
     const result = ffi.readFloat64(interp.heap, &args) catch {
         try interp.push(ptr);
@@ -7752,6 +8345,12 @@ fn primFFIWriteInt8(interp: *Interpreter) InterpreterError!Value {
     const val = try interp.pop();
     const ptr = try interp.pop();
     _ = try interp.pop(); // receiver
+
+    if (!ffi_enabled) {
+        try interp.push(val);
+        try interp.push(ptr);
+        return InterpreterError.PrimitiveFailed;
+    }
 
     var args = [_]Value{ ptr, val };
     _ = ffi.writeInt8(interp.heap, &args) catch {
@@ -7767,6 +8366,12 @@ fn primFFIWriteInt32(interp: *Interpreter) InterpreterError!Value {
     const ptr = try interp.pop();
     _ = try interp.pop(); // receiver
 
+    if (!ffi_enabled) {
+        try interp.push(val);
+        try interp.push(ptr);
+        return InterpreterError.PrimitiveFailed;
+    }
+
     var args = [_]Value{ ptr, val };
     _ = ffi.writeInt32(interp.heap, &args) catch {
         try interp.push(val);
@@ -7780,6 +8385,12 @@ fn primFFIWriteFloat64(interp: *Interpreter) InterpreterError!Value {
     const val = try interp.pop();
     const ptr = try interp.pop();
     _ = try interp.pop(); // receiver
+
+    if (!ffi_enabled) {
+        try interp.push(val);
+        try interp.push(ptr);
+        return InterpreterError.PrimitiveFailed;
+    }
 
     var args = [_]Value{ ptr, val };
     _ = ffi.writeFloat64(interp.heap, &args) catch {
@@ -7803,6 +8414,26 @@ fn primFFIGenericCall(interp: *Interpreter) InterpreterError!Value {
     const args_val = try interp.pop();      // { 1.0 } - second keyword arg
     const func_name_val = try interp.pop(); // #sin - first keyword arg
     const receiver = try interp.pop();      // 'LibMath' - receiver
+
+    // Debug output
+    std.debug.print("DEBUG primFFIGenericCall: receiver.bits=0x{x} func.bits=0x{x} args.bits=0x{x}\n", .{ receiver.bits, func_name_val.bits, args_val.bits });
+    if (getStringFromValue(interp.heap, receiver)) |lib| {
+        std.debug.print("  lib_name='{s}'\n", .{lib});
+    } else {
+        std.debug.print("  lib_name=<not a string>\n", .{});
+    }
+    if (getStringFromValue(interp.heap, func_name_val)) |func| {
+        std.debug.print("  func_name='{s}'\n", .{func});
+    } else {
+        std.debug.print("  func_name=<not a string>\n", .{});
+    }
+
+    if (!ffi_enabled) {
+        try interp.push(receiver);
+        try interp.push(func_name_val);
+        try interp.push(args_val);
+        return InterpreterError.PrimitiveFailed;
+    }
 
     // Get library name from receiver (should be a class name like 'LibMath')
     const lib_name = getStringFromValue(interp.heap, receiver) orelse {
@@ -7883,6 +8514,14 @@ fn getStringFromValue(_: *Heap, val: Value) ?[]const u8 {
 fn primFFILibraries(interp: *Interpreter) InterpreterError!Value {
     _ = try interp.pop(); // receiver
 
+    if (!ffi_enabled) {
+        // Return empty array when FFI is disabled
+        const empty = interp.heap.allocateObject(Heap.CLASS_ARRAY, 0, .variable) catch {
+            return InterpreterError.OutOfMemory;
+        };
+        return Value.fromObject(empty);
+    }
+
     const lib_names = ffi_autogen.available_libraries;
 
     // Allocate result array
@@ -7905,6 +8544,11 @@ fn primFFILibraries(interp: *Interpreter) InterpreterError!Value {
 /// Receiver is library name as String, returns Array of function name Strings
 fn primFFIFunctions(interp: *Interpreter) InterpreterError!Value {
     const receiver = try interp.pop();
+
+    if (!ffi_enabled) {
+        try interp.push(receiver);
+        return InterpreterError.PrimitiveFailed;
+    }
 
     // Get library name from receiver
     const lib_name = getStringFromValue(interp.heap, receiver) orelse {
@@ -8537,6 +9181,14 @@ fn primFFIStructNames(interp: *Interpreter) InterpreterError!Value {
     const lib_name_val = try interp.pop();  // libraryName (arg1)
     _ = try interp.pop();                    // receiver (FFILibrary class)
 
+    if (!ffi_enabled) {
+        // Return empty array when FFI is disabled
+        const empty_arr = interp.heap.allocateObject(Heap.CLASS_ARRAY, 0, .variable) catch {
+            return InterpreterError.OutOfMemory;
+        };
+        return Value.fromObject(empty_arr);
+    }
+
     const lib_name = getStringFromValue(interp.heap, lib_name_val) orelse {
         return InterpreterError.PrimitiveFailed;
     };
@@ -8573,6 +9225,10 @@ fn primFFIStructInfo(interp: *Interpreter) InterpreterError!Value {
     const lib_name_val = try interp.pop();      // libraryName (arg2)
     const struct_name_val = try interp.pop();   // structName (arg1)
     _ = try interp.pop();                        // receiver (FFILibrary class)
+
+    if (!ffi_enabled) {
+        return Value.nil;
+    }
 
     const lib_name = getStringFromValue(interp.heap, lib_name_val) orelse {
         return InterpreterError.PrimitiveFailed;
@@ -8648,6 +9304,13 @@ fn primFFIRuntimeCall(interp: *Interpreter) InterpreterError!Value {
     const sig_val = try interp.pop(); // signature string
     const receiver = try interp.pop(); // function pointer
 
+    if (!ffi_enabled) {
+        try interp.push(receiver);
+        try interp.push(sig_val);
+        try interp.push(args_val);
+        return InterpreterError.PrimitiveFailed;
+    }
+
     // Get function pointer from receiver (should be SmallInt with address)
     const fn_ptr: *const anyopaque = blk: {
         if (receiver.isSmallInt()) {
@@ -8702,45 +9365,203 @@ fn primFFIRuntimeCall(interp: *Interpreter) InterpreterError!Value {
     return result;
 }
 
-/// Primitive 794: Get GLEW function pointer by name
-/// Stack: receiver (function name as String)
-/// Returns: Integer (function pointer address) or nil if not found
-fn primFFIGlewFunction(interp: *Interpreter) InterpreterError!Value {
-    const receiver = try interp.pop();
+/// Primitive 794: Generate Smalltalk method source for an FFI function
+/// Stack: receiver (library name String), funcName (Symbol)
+/// Returns: String with method source code, or nil if function not found
+fn primFFIGenerateMethod(interp: *Interpreter) InterpreterError!Value {
+    const func_name_val = try interp.pop();
+    const lib_name_val = try interp.pop();
 
-    // Get function name
-    const func_name = getStringFromValue(interp.heap, receiver) orelse {
-        try interp.push(receiver);
-        return InterpreterError.PrimitiveFailed;
-    };
-
-    // Look up function pointer using glXGetProcAddress
-    if (ffi_generated.getGLEWFunctionPointer(func_name)) |ptr| {
-        const as_i61: i61 = @intCast(ptr);
-        return Value.fromSmallInt(as_i61);
+    if (!ffi_enabled) {
+        return Value.nil;
     }
 
-    return Value.nil;
-}
-
-/// Primitive 795: Set glewExperimental flag
-/// Stack: receiver (Boolean - true or false)
-/// Returns: receiver
-fn primFFIGlewExperimental(interp: *Interpreter) InterpreterError!Value {
-    const receiver = try interp.pop();
-
-    // Check if true or false
-    const value = if (receiver.eql(Value.@"true"))
-        true
-    else if (receiver.eql(Value.@"false"))
-        false
-    else {
-        try interp.push(receiver);
-        return InterpreterError.PrimitiveFailed;
+    const lib_name = getStringFromValue(interp.heap, lib_name_val) orelse {
+        return Value.nil;
     };
 
-    ffi_generated.setGlewExperimental(value);
-    return receiver;
+    const func_name = getStringFromValue(interp.heap, func_name_val) orelse {
+        return Value.nil;
+    };
+
+    // Get the FFI function info
+    const functions = ffi_generated.getLibraryFunctions(lib_name) orelse {
+        return Value.nil;
+    };
+
+    // Find the function
+    var func_info: ?ffi_autogen.FFIFunction = null;
+    for (functions) |f| {
+        if (std.mem.eql(u8, f.name, func_name)) {
+            func_info = f;
+            break;
+        }
+    }
+
+    const func = func_info orelse return Value.nil;
+
+    // Generate Smalltalk method source
+    var source_buf: [4096]u8 = undefined;
+    var fbs = std.io.fixedBufferStream(&source_buf);
+    const writer = fbs.writer();
+
+    // Build method selector with arg names
+    // e.g., for sin(double) -> sin: x
+    // for pow(double, double) -> pow: x y: y
+    if (func.arg_count == 0) {
+        // No args: just the function name
+        writer.print("{s}\n", .{func.name}) catch return Value.nil;
+    } else if (func.arg_count == 1) {
+        // One arg: funcName: arg1
+        writer.print("{s}: arg1\n", .{func.name}) catch return Value.nil;
+    } else {
+        // Multiple args: funcName: arg1 with: arg2 ...
+        writer.print("{s}: arg1", .{func.name}) catch return Value.nil;
+        var i: usize = 1;
+        while (i < func.arg_count) : (i += 1) {
+            const keyword = switch (i) {
+                1 => "with",
+                2 => "and",
+                else => "arg",
+            };
+            writer.print(" {s}: arg{d}", .{ keyword, i + 1 }) catch return Value.nil;
+        }
+        writer.writeAll("\n") catch return Value.nil;
+    }
+
+    // Add comment with type information
+    writer.writeAll("    \"FFI: ") catch return Value.nil;
+    writer.print("{s}(", .{func.name}) catch return Value.nil;
+    var i: usize = 0;
+    while (i < func.arg_count) : (i += 1) {
+        if (i > 0) writer.writeAll(", ") catch return Value.nil;
+        writer.print("{s}", .{simplifyTypeName(func.arg_types[i])}) catch return Value.nil;
+    }
+    writer.print(") -> {s}\"\n", .{simplifyTypeName(func.return_type)}) catch return Value.nil;
+
+    // Add primitive call
+    writer.writeAll("    ^'") catch return Value.nil;
+    writer.print("{s}", .{lib_name}) catch return Value.nil;
+    writer.print("' ffiCall: #{s} with: {{", .{func.name}) catch return Value.nil;
+
+    // Add arguments to array
+    i = 0;
+    while (i < func.arg_count) : (i += 1) {
+        if (i > 0) writer.writeAll(". ") catch return Value.nil;
+        writer.print(" arg{d}", .{i + 1}) catch return Value.nil;
+    }
+    writer.writeAll(" }") catch return Value.nil;
+
+    // Allocate and return the string
+    const source = fbs.getWritten();
+    const str_val = interp.heap.allocateString(source) catch {
+        return InterpreterError.OutOfMemory;
+    };
+    return str_val;
+}
+
+/// Primitive 795: Get FFI function info
+/// Stack: receiver (library name String), funcName (Symbol)
+/// Returns: Array #(argCount returnType arg1Type arg2Type ...) or nil
+fn primFFIFunctionInfo(interp: *Interpreter) InterpreterError!Value {
+    const func_name_val = try interp.pop();
+    const lib_name_val = try interp.pop();
+
+    if (!ffi_enabled) {
+        return Value.nil;
+    }
+
+    const lib_name = getStringFromValue(interp.heap, lib_name_val) orelse {
+        return Value.nil;
+    };
+
+    const func_name = getStringFromValue(interp.heap, func_name_val) orelse {
+        return Value.nil;
+    };
+
+    // Get the FFI function info
+    const functions = ffi_generated.getLibraryFunctions(lib_name) orelse {
+        return Value.nil;
+    };
+
+    // Find the function
+    var func_info: ?ffi_autogen.FFIFunction = null;
+    for (functions) |f| {
+        if (std.mem.eql(u8, f.name, func_name)) {
+            func_info = f;
+            break;
+        }
+    }
+
+    const func = func_info orelse return Value.nil;
+
+    // Create result array: #(argCount returnType arg1Type arg2Type ...)
+    const array_size = 2 + func.arg_count;
+    const result_obj = interp.heap.allocateObject(Heap.CLASS_ARRAY, array_size, .variable) catch {
+        return InterpreterError.OutOfMemory;
+    };
+    const slots = result_obj.fields(array_size);
+
+    // Slot 0: arg count
+    slots[0] = Value.fromSmallInt(@intCast(func.arg_count));
+
+    // Slot 1: return type as string
+    const ret_type_val = interp.heap.allocateString(simplifyTypeName(func.return_type)) catch {
+        return InterpreterError.OutOfMemory;
+    };
+    slots[1] = ret_type_val;
+
+    // Remaining slots: argument types
+    var i: usize = 0;
+    while (i < func.arg_count) : (i += 1) {
+        const arg_type_val = interp.heap.allocateString(simplifyTypeName(func.arg_types[i])) catch {
+            return InterpreterError.OutOfMemory;
+        };
+        slots[2 + i] = arg_type_val;
+    }
+
+    return Value.fromObject(result_obj);
+}
+
+/// Simplify C type names for display
+fn simplifyTypeName(full_name: []const u8) []const u8 {
+    // Handle common patterns
+    if (std.mem.eql(u8, full_name, "f64")) return "Float";
+    if (std.mem.eql(u8, full_name, "f32")) return "Float";
+    if (std.mem.eql(u8, full_name, "i32")) return "Integer";
+    if (std.mem.eql(u8, full_name, "i64")) return "Integer";
+    if (std.mem.eql(u8, full_name, "u32")) return "Integer";
+    if (std.mem.eql(u8, full_name, "u64")) return "Integer";
+    if (std.mem.eql(u8, full_name, "u8")) return "Integer";
+    if (std.mem.eql(u8, full_name, "i8")) return "Integer";
+    if (std.mem.eql(u8, full_name, "c_int")) return "Integer";
+    if (std.mem.eql(u8, full_name, "c_uint")) return "Integer";
+    if (std.mem.eql(u8, full_name, "c_long")) return "Integer";
+    if (std.mem.eql(u8, full_name, "c_ulong")) return "Integer";
+    if (std.mem.eql(u8, full_name, "c_float")) return "Float";
+    if (std.mem.eql(u8, full_name, "c_double")) return "Float";
+    if (std.mem.eql(u8, full_name, "void")) return "nil";
+    if (std.mem.eql(u8, full_name, "bool")) return "Boolean";
+
+    // Handle pointers - look for "[*c]" or "*"
+    const is_pointer = std.mem.indexOf(u8, full_name, "*") != null or
+        std.mem.indexOf(u8, full_name, "[*c]") != null;
+
+    if (is_pointer) {
+        // Check for string types (char* or u8*)
+        if (std.mem.indexOf(u8, full_name, "u8") != null) return "String";
+        if (std.mem.indexOf(u8, full_name, "char") != null) return "String";
+        // Other pointers - could be structs or raw pointers
+        return "Pointer/ByteArray";
+    }
+
+    // Check for struct types (often start with uppercase in C)
+    if (full_name.len > 0 and full_name[0] >= 'A' and full_name[0] <= 'Z') {
+        return "Struct (ByteArray)";
+    }
+
+    // Return as-is for unknown types
+    return full_name;
 }
 
 // ============================================================================

@@ -21,8 +21,11 @@ pub const snapshot = @import("image/snapshot.zig");
 // TUI module
 pub const tui = @import("tui/app.zig");
 
-// FFI module
-pub const ffi_gen = @import("vm/ffi_generated.zig");
+// Build options
+const build_options = @import("build_options");
+
+// FFI module (conditional)
+pub const ffi_gen = if (build_options.ffi_enabled) @import("vm/ffi_generated.zig") else undefined;
 
 const Value = object.Value;
 const Heap = memory.Heap;
@@ -55,9 +58,27 @@ pub fn main() !void {
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
 
+    // Handle --help / -h early
+    for (args) |arg| {
+        if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
+            try printCommandLineHelp(stdout);
+            return;
+        }
+        if (std.mem.eql(u8, arg, "--version") or std.mem.eql(u8, arg, "-v")) {
+            _ = try stdout.write("Zig Smalltalk v0.1\n");
+            return;
+        }
+    }
+
     // Handle --gen-structs early (doesn't need heap)
+    // Only available when FFI is enabled
     for (args, 0..) |arg, i| {
         if (std.mem.eql(u8, arg, "--gen-structs") and i + 1 < args.len) {
+            if (!build_options.ffi_enabled) {
+                std.debug.print("Error: --gen-structs requires FFI support, which is not available in this build.\n", .{});
+                std.debug.print("Install libffi and rebuild to enable FFI support.\n", .{});
+                return;
+            }
             const lib_name = args[i + 1];
 
             // Write the base ExternalStructure class first
@@ -305,10 +326,13 @@ pub fn main() !void {
         try bootstrap.bootstrap(heap);
     }
     try bootstrap.ensureCorePrimitives(heap);
+    // Bootstrap FFI library classes with auto-generated methods
+    try bootstrap.bootstrapFFILibraries(heap);
     defer heap.deinit();
 
     // Create interpreter
-    var interp = Interpreter.init(heap);
+    var interp = Interpreter.init(heap, allocator);
+    defer interp.deinit();
     // Register interpreter with heap for GC stack tracing
     heap.interpreter = &interp;
 
@@ -687,6 +711,105 @@ fn printHelp(file: std.fs.File) !void {
         \\
         \\
     );
+}
+
+fn printCommandLineHelp(file: std.fs.File) !void {
+    const builtin = @import("builtin");
+    const is_windows = builtin.os.tag == .windows;
+
+    _ = try file.write(
+        \\Zig Smalltalk - A Smalltalk implementation in Zig
+        \\
+        \\USAGE:
+        \\    zig-smalltalk [OPTIONS] [FILES...]
+        \\
+        \\OPTIONS:
+        \\    -h, --help          Show this help message
+        \\    -v, --version       Show version information
+        \\    --tui               Start the TUI (Terminal User Interface)
+        \\    --no-repl           Exit after loading files (no interactive mode)
+        \\    --image <path>      Load a saved image snapshot
+        \\    --load-order <path> Load files listed in order file (one per line)
+        \\    --gen-structs <lib> Generate Smalltalk struct wrappers for FFI library
+        \\
+        \\EXAMPLES:
+        \\    zig-smalltalk                    Start the REPL
+        \\    zig-smalltalk --tui              Start the TUI browser/workspace
+        \\    zig-smalltalk myfile.st          Load file and start REPL
+        \\    zig-smalltalk --no-repl test.st  Run file and exit
+        \\    zig-smalltalk --gen-structs Raylib > raylib-structs.st
+        \\
+        \\TUI MODE:
+        \\    The TUI provides a graphical interface with:
+        \\      - F1: Transcript   - View output and messages
+        \\      - F2: Workspace    - Write and evaluate Smalltalk code
+        \\      - F3: Browser      - Browse classes and methods
+        \\      - F4: FFI Config   - Configure FFI libraries
+        \\
+    );
+
+    if (is_windows) {
+        _ = try file.write(
+            \\    Start with: tui.bat
+            \\
+        );
+    } else {
+        _ = try file.write(
+            \\    Start with: ./tui.sh
+            \\
+        );
+    }
+
+    if (is_windows) {
+        _ = try file.write(
+            \\
+            \\FFI (Foreign Function Interface):
+            \\    FFI bindings are configured in ffi-config.json and regenerated at build time.
+            \\
+            \\    To add a new C library:
+            \\      1. Run the TUI and go to F4 (FFI Config)
+            \\      2. Press 'A' to add a library
+            \\      3. Enter the library name
+            \\      4. Enter full path to header file (e.g. C:\libs\raylib\include\raylib.h)
+            \\      5. Enter full path to import library (e.g. C:\libs\raylib\lib\libraylib.dll.a)
+            \\      6. Press Ctrl+S to save
+            \\      7. Regenerate bindings: zig build gen-ffi
+            \\      8. Rebuild: zig build
+            \\      9. Ensure the DLL is in PATH at runtime
+            \\
+            \\    Or edit ffi-config.json directly and run: zig build gen-ffi && zig build
+            \\
+            \\    To generate struct wrappers for a library:
+            \\      zig-smalltalk --gen-structs Raylib > raylib-structs.st
+            \\
+            \\For more information, see the README.
+            \\
+        );
+    } else {
+        _ = try file.write(
+            \\
+            \\FFI (Foreign Function Interface):
+            \\    FFI bindings are configured in ffi-config.json and regenerated at build time.
+            \\
+            \\    To add a new C library:
+            \\      1. Run the TUI and go to F4 (FFI Config)
+            \\      2. Press 'A' to add a library
+            \\      3. Enter the library name
+            \\      4. Enter full path to header file (e.g. /usr/include/raylib.h)
+            \\      5. Enter full path to library file (e.g. /usr/lib/libraylib.so)
+            \\      6. Press Ctrl+S to save
+            \\      7. Regenerate bindings: zig build gen-ffi
+            \\      8. Rebuild: zig build
+            \\
+            \\    Or edit ffi-config.json directly and run: zig build gen-ffi && zig build
+            \\
+            \\    To generate struct wrappers for a library:
+            \\      zig-smalltalk --gen-structs Raylib > raylib-structs.st
+            \\
+            \\For more information, see the README.
+            \\
+        );
+    }
 }
 
 // Include all tests from submodules

@@ -4,12 +4,17 @@ const memory = @import("memory.zig");
 const bytecodes = @import("bytecodes.zig");
 const primitives = @import("primitives.zig");
 const debugger = @import("debugger.zig");
+const scheduler = @import("scheduler.zig");
+const overlapped = @import("overlapped.zig");
 
 const Value = object.Value;
 const Object = object.Object;
 const CompiledMethod = object.CompiledMethod;
 const Heap = memory.Heap;
 const Opcode = bytecodes.Opcode;
+const Scheduler = scheduler.Scheduler;
+const Process = scheduler.Process;
+const OverlappedPool = overlapped.OverlappedPool;
 
 var debug_receiver_idx2_count: usize = 0;
 var debug_send_special_count: usize = 0;
@@ -61,6 +66,10 @@ pub const Context = struct {
     // For block closures
     outer_context: ?*Context,
     closure: ?Value, // The BlockClosure object if this is a block
+    // Heap-allocated context for closure variable capture
+    heap_context: Value,
+    // Home method's heap context (for nested blocks)
+    home_heap_context: Value,
 };
 
 /// The main Smalltalk interpreter
@@ -83,6 +92,10 @@ pub const Interpreter = struct {
     temp_base: usize,
     outer_temp_base: usize, // For closures: temp_base of enclosing context (level 1)
     home_temp_base: usize, // For closures: temp_base of home method context (level >= 2)
+    // Heap-allocated context for closure variable capture (current activation's heap context)
+    heap_context: Value,
+    // Home method's heap context (for level >= 2 variable access in nested blocks)
+    home_heap_context: Value,
     last_mnu_selector: []const u8,
     last_send_selector: []const u8,
     last_mnu_receiver: Value,
@@ -106,7 +119,19 @@ pub const Interpreter = struct {
     // Transcript output callback - if set, transcript primitives call this instead of stdout
     transcript_callback: ?*const fn ([]const u8) void,
 
-    pub fn init(heap: *Heap) Interpreter {
+    // Process scheduler for green thread support
+    process_scheduler: Scheduler,
+
+    // Overlapped FFI call pool for non-blocking native calls
+    overlapped_pool: OverlappedPool,
+
+    // Allocator for dynamic allocations
+    allocator: std.mem.Allocator,
+
+    // Instruction counter for preemption timing
+    instruction_count: u64,
+
+    pub fn init(heap: *Heap, allocator: std.mem.Allocator) Interpreter {
         return .{
             .heap = heap,
             .stack = undefined,
@@ -120,6 +145,8 @@ pub const Interpreter = struct {
             .temp_base = 0,
             .outer_temp_base = 0,
             .home_temp_base = 0,
+            .heap_context = Value.nil,
+            .home_heap_context = Value.nil,
             .last_mnu_selector = "<?>",
             .last_send_selector = "<?>",
             .last_mnu_receiver = Value.nil,
@@ -131,7 +158,394 @@ pub const Interpreter = struct {
             .primitive_block_bases = [_]usize{0} ** 64,
             .non_local_return_target = 0,
             .transcript_callback = null,
+            .process_scheduler = Scheduler.init(allocator),
+            .overlapped_pool = OverlappedPool.init(allocator),
+            .allocator = allocator,
+            .instruction_count = 0,
         };
+    }
+
+    pub fn deinit(self: *Interpreter) void {
+        self.overlapped_pool.deinit();
+        self.process_scheduler.deinit();
+    }
+
+    // ========================================================================
+    // Heap-allocated Context Support
+    // ========================================================================
+
+    /// Create a heap-allocated MethodContext for closure variable capture.
+    /// Copies temps from the current stack frame into the heap context.
+    pub fn createHeapContext(self: *Interpreter, num_temps: usize) !*Object {
+        const total_fields = Heap.CONTEXT_NUM_FIXED_FIELDS + num_temps;
+        const ctx = try self.heap.allocateObject(Heap.CLASS_METHOD_CONTEXT, total_fields, .normal);
+
+        // Set fixed fields
+        ctx.setField(Heap.CONTEXT_FIELD_SENDER, Value.nil, total_fields); // sender - not used for now
+        ctx.setField(Heap.CONTEXT_FIELD_PC, Value.fromSmallInt(@intCast(self.ip)), total_fields);
+        ctx.setField(Heap.CONTEXT_FIELD_STACKP, Value.fromSmallInt(0), total_fields);
+        ctx.setField(Heap.CONTEXT_FIELD_METHOD, Value.fromObject(@ptrCast(@alignCast(self.method))), total_fields);
+        ctx.setField(Heap.CONTEXT_FIELD_CLOSURE_OR_RECEIVER, self.receiver, total_fields);
+
+        // Copy temps from current stack frame to heap context
+        var i: usize = 0;
+        while (i < num_temps) : (i += 1) {
+            const stack_idx = self.temp_base + 1 + i; // +1 to skip receiver
+            const val = if (stack_idx < self.sp) self.stack[stack_idx] else Value.nil;
+            ctx.setField(Heap.CONTEXT_NUM_FIXED_FIELDS + i, val, total_fields);
+        }
+
+        return ctx;
+    }
+
+    /// Get a temp variable from a heap context
+    pub fn getHeapContextTemp(ctx: *Object, index: usize) Value {
+        const total_fields = ctx.header.size;
+        const field_index = Heap.CONTEXT_NUM_FIXED_FIELDS + index;
+        if (field_index < total_fields) {
+            return ctx.getField(field_index, total_fields);
+        }
+        return Value.nil;
+    }
+
+    /// Set a temp variable in a heap context
+    pub fn setHeapContextTemp(ctx: *Object, index: usize, val: Value) void {
+        const total_fields = ctx.header.size;
+        const field_index = Heap.CONTEXT_NUM_FIXED_FIELDS + index;
+        if (field_index < total_fields) {
+            ctx.setField(field_index, val, total_fields);
+        }
+    }
+
+    // ========================================================================
+    // Process Context Switching
+    // ========================================================================
+
+    /// Save the current interpreter state to a Process
+    pub fn saveContextToProcess(self: *Interpreter, process: *Process) void {
+        const saved = &process.saved_context;
+
+        // Save current execution state
+        saved.method = self.method;
+        saved.method_class = self.method_class;
+        saved.ip = self.ip;
+        saved.receiver = self.receiver;
+        saved.temp_base = self.temp_base;
+        saved.outer_temp_base = self.outer_temp_base;
+        saved.home_temp_base = self.home_temp_base;
+        saved.heap_context = self.heap_context;
+        saved.home_heap_context = self.home_heap_context;
+
+        // Save stack
+        saved.sp = self.sp;
+        @memcpy(saved.stack[0..self.sp], self.stack[0..self.sp]);
+
+        // Save context stack
+        saved.context_ptr = self.context_ptr;
+        for (0..self.context_ptr) |i| {
+            const ctx = &self.contexts[i];
+            process.saved_contexts[i] = .{
+                .method = ctx.method,
+                .method_class = ctx.method_class,
+                .ip = ctx.ip,
+                .receiver = ctx.receiver,
+                .temp_base = ctx.temp_base,
+                .outer_temp_base = ctx.outer_temp_base,
+                .home_temp_base = ctx.home_temp_base,
+                .num_args = ctx.num_args,
+                .num_temps = ctx.num_temps,
+                .closure = ctx.closure,
+                .heap_context = ctx.heap_context,
+                .home_heap_context = ctx.home_heap_context,
+            };
+        }
+
+        // Save exception handlers
+        saved.handler_ptr = self.handler_ptr;
+        for (0..self.handler_ptr) |i| {
+            const handler = &self.exception_handlers[i];
+            process.saved_exception_handlers[i] = .{
+                .exception_class = handler.exception_class,
+                .handler_block = handler.handler_block,
+                .context_ptr = handler.context_ptr,
+                .sp = handler.sp,
+                .temp_base = handler.temp_base,
+                .method = handler.method,
+                .ip = handler.ip,
+                .receiver = handler.receiver,
+            };
+        }
+
+        // Save other state
+        saved.current_exception = self.current_exception;
+        saved.primitive_block_depth = self.primitive_block_depth;
+        saved.non_local_return_target = self.non_local_return_target;
+    }
+
+    /// Restore interpreter state from a Process
+    pub fn restoreContextFromProcess(self: *Interpreter, process: *Process) void {
+        const saved = &process.saved_context;
+
+        // Restore current execution state
+        if (saved.method) |m| {
+            self.method = m;
+        }
+        self.method_class = saved.method_class;
+        self.ip = saved.ip;
+        self.receiver = saved.receiver;
+        self.temp_base = saved.temp_base;
+        self.outer_temp_base = saved.outer_temp_base;
+        self.home_temp_base = saved.home_temp_base;
+        self.heap_context = saved.heap_context;
+        self.home_heap_context = saved.home_heap_context;
+
+        // Restore stack
+        self.sp = saved.sp;
+        @memcpy(self.stack[0..saved.sp], saved.stack[0..saved.sp]);
+
+        // Restore context stack
+        self.context_ptr = saved.context_ptr;
+        for (0..saved.context_ptr) |i| {
+            const saved_ctx = &process.saved_contexts[i];
+            self.contexts[i] = .{
+                .method = saved_ctx.method.?,
+                .method_class = saved_ctx.method_class,
+                .ip = saved_ctx.ip,
+                .receiver = saved_ctx.receiver,
+                .temp_base = saved_ctx.temp_base,
+                .outer_temp_base = saved_ctx.outer_temp_base,
+                .home_temp_base = saved_ctx.home_temp_base,
+                .num_args = saved_ctx.num_args,
+                .num_temps = saved_ctx.num_temps,
+                .outer_context = null, // Will be rebuilt if needed
+                .closure = saved_ctx.closure,
+                .heap_context = saved_ctx.heap_context,
+                .home_heap_context = saved_ctx.home_heap_context,
+            };
+        }
+
+        // Restore exception handlers
+        self.handler_ptr = saved.handler_ptr;
+        for (0..saved.handler_ptr) |i| {
+            const saved_handler = &process.saved_exception_handlers[i];
+            self.exception_handlers[i] = .{
+                .exception_class = saved_handler.exception_class,
+                .handler_block = saved_handler.handler_block,
+                .context_ptr = saved_handler.context_ptr,
+                .sp = saved_handler.sp,
+                .temp_base = saved_handler.temp_base,
+                .method = saved_handler.method.?,
+                .ip = saved_handler.ip,
+                .receiver = saved_handler.receiver,
+            };
+        }
+
+        // Restore other state
+        self.current_exception = saved.current_exception;
+        self.primitive_block_depth = saved.primitive_block_depth;
+        self.non_local_return_target = saved.non_local_return_target;
+    }
+
+    /// Switch from current process to a new process
+    /// Returns the process that was running (now suspended)
+    pub fn switchToProcess(self: *Interpreter, new_process: *Process) ?*Process {
+        const old_process = self.process_scheduler.active_process;
+
+        // Save current state if there's an active process
+        if (old_process) |old| {
+            self.saveContextToProcess(old);
+            old.state = .ready;
+        }
+
+        // Check if this is a fresh process that needs to start executing a block
+        if (new_process.saved_context.method == null) {
+            // This is a fresh process - check if it has a block to execute
+            if (self.setupFreshProcess(new_process)) {
+                new_process.state = .running;
+                self.process_scheduler.active_process = new_process;
+                return old_process;
+            }
+            // No block to execute - can't switch to this process
+            // Put it in terminated state
+            new_process.state = .terminated;
+            return old_process;
+        }
+
+        // Restore new process state
+        self.restoreContextFromProcess(new_process);
+        new_process.state = .running;
+        self.process_scheduler.active_process = new_process;
+
+        return old_process;
+    }
+
+    /// Set up a fresh process to execute its block
+    /// Returns true if successful, false if no block found
+    fn setupFreshProcess(self: *Interpreter, process: *Process) bool {
+        // Get the Smalltalk Process object
+        if (!process.object.isObject()) return false;
+        const process_obj = process.object.asObject();
+
+        // Get suspendedFrame (index 1) which should contain the block
+        const suspended_frame = process_obj.getField(scheduler.ProcessFields.suspendedFrame, process_obj.header.size);
+        if (!suspended_frame.isObject()) return false;
+
+        const block_obj = suspended_frame.asObject();
+        if (block_obj.header.class_index != Heap.CLASS_BLOCK_CLOSURE) return false;
+
+        // Get block data: [outerContext, startPC, numArgs, method, receiver, homeContext]
+        const outer_context_val = block_obj.getField(Heap.BLOCK_FIELD_OUTER_CONTEXT, 6);
+        const start_pc = block_obj.getField(Heap.BLOCK_FIELD_START_PC, 6);
+        const num_args_val = block_obj.getField(Heap.BLOCK_FIELD_NUM_ARGS, 6);
+        const method_val = block_obj.getField(Heap.BLOCK_FIELD_METHOD, 6);
+        const block_receiver = block_obj.getField(Heap.BLOCK_FIELD_RECEIVER, 6);
+        const home_context_val = block_obj.getField(Heap.BLOCK_FIELD_HOME_CONTEXT, 6);
+
+        if (!start_pc.isSmallInt() or !method_val.isObject()) return false;
+
+        // Check for no-arg block
+        if (num_args_val.isSmallInt() and num_args_val.asSmallInt() != 0) return false;
+
+        // Reset interpreter state for this fresh process
+        self.sp = 0;
+        self.context_ptr = 0;
+        self.handler_ptr = 0;
+        self.current_exception = Value.nil;
+        self.primitive_block_depth = 0;
+        self.non_local_return_target = 0;
+
+        // Set up execution to directly run the block's bytecodes (like primBlockValue does)
+        self.method = @ptrCast(@alignCast(method_val.asObject()));
+        self.ip = @intCast(start_pc.asSmallInt());
+        self.receiver = block_receiver;
+        self.temp_base = self.sp;
+
+        // Restore heap contexts from block for cross-process variable access
+        // This is the key to allowing captured variables to work across processes
+        if (outer_context_val.isObject() and outer_context_val.asObject().header.class_index == Heap.CLASS_METHOD_CONTEXT) {
+            // New format: heap contexts - this enables cross-process variable sharing
+            self.heap_context = outer_context_val;
+            self.home_heap_context = home_context_val;
+            // Stack indices aren't valid in a different process
+            self.outer_temp_base = self.temp_base;
+            self.home_temp_base = self.temp_base;
+        } else {
+            // Old format or nil - no heap context support
+            self.outer_temp_base = 0;
+            self.home_temp_base = 0;
+            self.heap_context = Value.nil;
+            self.home_heap_context = Value.nil;
+        }
+
+        return true;
+    }
+
+    /// Create and start the initial/main process
+    pub fn createMainProcess(self: *Interpreter) !*Process {
+        // Create a Process Smalltalk object
+        // Process has 7 fields: nextLink (from Link), suspendedFrame, priority, myList, exceptionEnvironment, name, processId
+        const process_class = self.heap.globals.get("Process") orelse self.heap.getClass(Heap.CLASS_OBJECT);
+        const process_obj = try self.heap.allocateObject(
+            if (process_class.isObject()) process_class.asObject().header.class_index else Heap.CLASS_OBJECT,
+            7, // nextLink, suspendedFrame, priority, myList, exceptionEnvironment, name, processId
+            .normal
+        );
+
+        // Set priority to user scheduling priority (5) - priority is at index 2
+        process_obj.setField(scheduler.ProcessFields.priority, Value.fromSmallInt(5), 7);
+
+        // Create the VM-side Process
+        const process = try self.process_scheduler.createProcess(Value.fromObject(process_obj), 5);
+        process.state = .running;
+        self.process_scheduler.active_process = process;
+
+        return process;
+    }
+
+    /// Yield to the next ready process (if any)
+    /// Returns true if a switch occurred
+    pub fn yieldToNextProcess(self: *Interpreter) bool {
+        // Check for timer expiration first
+        if (self.process_scheduler.checkTimer()) |sem| {
+            // Signal the timing semaphore
+            self.signalSemaphore(sem);
+        }
+
+        // Find highest priority ready process
+        const next = self.process_scheduler.findHighestPriorityReady() orelse return false;
+
+        // Get current process
+        const current = self.process_scheduler.active_process orelse return false;
+
+        // Only switch if next process has higher or equal priority
+        if (next.priority >= current.priority) {
+            // Remove from ready queue
+            self.process_scheduler.removeFromReadyQueue(next);
+
+            // Put current process back in ready queue
+            self.process_scheduler.makeReady(current);
+
+            // Switch to new process
+            _ = self.switchToProcess(next);
+            return true;
+        }
+
+        return false;
+    }
+
+    /// Signal a semaphore (wake up waiting process or increment excess signals)
+    pub fn signalSemaphore(self: *Interpreter, sem: Value) void {
+        _ = self; // Used for future process wakeup logic
+        if (!sem.isObject()) return;
+
+        const sem_obj = sem.asObject();
+
+        // Check for waiting processes in the semaphore's wait queue
+        // For now, just increment excess signals
+        // Full implementation would check the linked list
+        const signals_val = sem_obj.getField(scheduler.SemaphoreFields.signals, 3);
+        if (signals_val.isSmallInt()) {
+            const current = signals_val.asSmallInt();
+            sem_obj.setField(scheduler.SemaphoreFields.signals, Value.fromSmallInt(current + 1), 3);
+        }
+    }
+
+    /// Process any completed overlapped FFI calls
+    /// This signals the completion semaphores, waking up waiting processes
+    pub fn processCompletedOverlappedCalls(self: *Interpreter) void {
+        const semaphores = self.overlapped_pool.processCompletedCalls() catch return;
+        defer self.allocator.free(semaphores);
+
+        // Signal each completion semaphore
+        for (semaphores) |sem| {
+            self.signalSemaphore(sem);
+        }
+    }
+
+    /// Submit an overlapped FFI call that runs on a native thread
+    /// The calling Smalltalk process will be suspended until completion
+    pub fn submitOverlappedCall(
+        self: *Interpreter,
+        func_ptr: *const anyopaque,
+        args: []const Value,
+        completion_semaphore: Value,
+    ) !*overlapped.OverlappedCall {
+        // Get the current process (may be null if no process scheduler active)
+        const calling_process = self.process_scheduler.active_process;
+
+        // If we have an active process, suspend it
+        if (calling_process) |proc| {
+            self.saveContextToProcess(proc);
+            proc.state = .suspended;
+        }
+
+        // Submit the call to the overlapped pool
+        return try self.overlapped_pool.submitCall(
+            func_ptr,
+            args,
+            completion_semaphore,
+            calling_process,
+        );
     }
 
     /// Set transcript output callback (for TUI mode)
@@ -218,6 +632,35 @@ pub const Interpreter = struct {
 
     /// Execute a compiled method and return the result
     pub fn execute(self: *Interpreter, method: *CompiledMethod, recv: Value, args: []const Value) InterpreterError!Value {
+        // Ensure we have a main process if none exists
+        // This represents the "main thread" (REPL, file-in, etc.)
+        if (self.process_scheduler.active_process == null) {
+            // Create a dummy Process object for the main thread
+            const process_obj = self.heap.allocateObject(Heap.CLASS_OBJECT, 7, .normal) catch {
+                // If allocation fails, continue without a main process
+                return self.executeWithoutMainProcess(method, recv, args);
+            };
+            // Initialize fields to nil/defaults
+            var field_idx: usize = 0;
+            while (field_idx < 7) : (field_idx += 1) {
+                process_obj.setField(field_idx, Value.nil, 7);
+            }
+            // Set priority to 5 (user scheduling priority)
+            process_obj.setField(scheduler.ProcessFields.priority, Value.fromSmallInt(5), 7);
+
+            // Create the VM-side process
+            const main_process = self.process_scheduler.createProcess(Value.fromObject(process_obj), 5) catch {
+                return self.executeWithoutMainProcess(method, recv, args);
+            };
+            main_process.state = .running;
+            self.process_scheduler.active_process = main_process;
+        }
+
+        return self.executeWithoutMainProcess(method, recv, args);
+    }
+
+    /// Internal execute without main process setup (called after main process is ensured)
+    fn executeWithoutMainProcess(self: *Interpreter, method: *CompiledMethod, recv: Value, args: []const Value) InterpreterError!Value {
         // Set up initial context
         self.method = method;
         self.ip = 0;
@@ -294,6 +737,19 @@ pub const Interpreter = struct {
             // Check debugger before each bytecode
             if (debugger.debugEnabled and debugger.shouldBreak()) {
                 debugger.enterDebugger();
+            }
+
+            // Periodic preemption check (every 1000 instructions)
+            self.instruction_count +%= 1;
+            if (self.instruction_count % 1000 == 0) {
+                // Process completed overlapped FFI calls
+                self.processCompletedOverlappedCalls();
+
+                // Check if time slice expired and yield if needed
+                if (self.yieldToNextProcess()) {
+                    // Process switch occurred - continue with new context
+                    continue;
+                }
             }
 
             const byte = self.fetchByte();
@@ -493,6 +949,8 @@ pub const Interpreter = struct {
                                     self.temp_base = ctx.temp_base;
                                     self.outer_temp_base = ctx.outer_temp_base;
                                     self.home_temp_base = ctx.home_temp_base;
+                                    self.heap_context = ctx.heap_context;
+                                    self.home_heap_context = ctx.home_heap_context;
                                 }
                                 try self.push(nlr_result);
                                 return err;
@@ -666,8 +1124,15 @@ pub const Interpreter = struct {
                     const prim_hi: u16 = self.fetchByte();
                     const prim_lo: u16 = self.fetchByte();
                     const prim_index = (prim_hi << 8) | prim_lo;
-                    const result = try primitives.executePrimitive(self, prim_index);
-                    try self.push(result);
+                    if (primitives.executePrimitive(self, prim_index)) |result| {
+                        try self.push(result);
+                    } else |err| {
+                        // ContinueExecution means a process switch happened - just continue with new context
+                        if (err != InterpreterError.ContinueExecution) {
+                            return err;
+                        }
+                        // Don't push anything, just continue the loop with the new process's context
+                    }
                 },
 
                 .nop => {},
@@ -681,7 +1146,7 @@ pub const Interpreter = struct {
                 .push_closure => {
                     // Create a BlockClosure object
                     // Format: push_closure <num_args> <size_hi> <size_lo> <bytecodes...>
-                    const num_args = self.fetchByte();
+                    const block_num_args = self.fetchByte();
                     const size_hi: u16 = self.fetchByte();
                     const size_lo: u16 = self.fetchByte();
                     const bytecode_size: usize = @intCast((size_hi << 8) | size_lo);
@@ -691,26 +1156,41 @@ pub const Interpreter = struct {
                         std.debug.print("DEBUG push_closure: temp_base={} home_temp_base={} ctx_ptr={} prim_ctx_base={} prim_depth={}\n", .{ self.temp_base, self.home_temp_base, self.context_ptr, prim_ctx_base, self.primitive_block_depth });
                     }
 
+                    // Lazily create heap context for closure variable capture
+                    // This allows captured variables to be shared across processes
+                    if (self.heap_context.isNil()) {
+                        // Calculate number of temps to capture from current frame
+                        const method_num_temps = self.method.header.num_temps;
+                        const method_num_args = self.method.header.num_args;
+                        const num_to_capture = method_num_args + method_num_temps;
+
+                        // Create heap context and copy temps from stack
+                        const heap_ctx = self.createHeapContext(num_to_capture) catch {
+                            return InterpreterError.OutOfMemory;
+                        };
+                        self.heap_context = Value.fromObject(heap_ctx);
+
+                        // At method level, home_heap_context == heap_context
+                        if (self.home_heap_context.isNil()) {
+                            self.home_heap_context = self.heap_context;
+                        }
+                    }
+
                     // Create BlockClosure object
-                    // Fields: outerTempBase, startPC, numArgs, method, receiver, homeTempBase
+                    // Fields: outerContext, startPC, numArgs, method, receiver, homeContext
                     const closure = self.heap.allocateObject(Heap.CLASS_BLOCK_CLOSURE, 6, .normal) catch {
                         return InterpreterError.OutOfMemory;
                     };
 
-                    // Store: outer temp base (for level 1 access), start PC, num args, enclosing method, receiver, home temp base (for level >= 2)
-                    // outer_temp_base = immediate enclosing block's frame (for block args/temps)
-                    // home_temp_base = method's frame (for non-local returns and level >= 2 variable access)
-                    const captured_base = self.temp_base; // immediate enclosing context
-                    // home_base should always be the method's frame (home_temp_base),
-                    // even when creating nested blocks. If we're at the method level,
-                    // home_temp_base == temp_base, so this is correct in all cases.
-                    const home_base = self.home_temp_base;
-                    closure.setField(0, Value.fromSmallInt(@intCast(captured_base)), 6); // outer temp base (level 1)
-                    closure.setField(1, Value.fromSmallInt(@intCast(self.ip)), 6); // start PC (current position in bytecodes)
-                    closure.setField(2, Value.fromSmallInt(num_args), 6); // num args
-                    closure.setField(3, Value.fromObject(@ptrCast(@alignCast(self.method))), 6); // enclosing method
-                    closure.setField(4, self.receiver, 6); // receiver (self in block)
-                    closure.setField(5, Value.fromSmallInt(@intCast(home_base)), 6); // home temp base (level >= 2)
+                    // Store heap context references for cross-process variable access
+                    // OUTER_CONTEXT: immediate enclosing context (for level 1 access)
+                    // HOME_CONTEXT: home method's context (for level >= 2 access and non-local returns)
+                    closure.setField(Heap.BLOCK_FIELD_OUTER_CONTEXT, self.heap_context, 6);
+                    closure.setField(Heap.BLOCK_FIELD_START_PC, Value.fromSmallInt(@intCast(self.ip)), 6);
+                    closure.setField(Heap.BLOCK_FIELD_NUM_ARGS, Value.fromSmallInt(block_num_args), 6);
+                    closure.setField(Heap.BLOCK_FIELD_METHOD, Value.fromObject(@ptrCast(@alignCast(self.method))), 6);
+                    closure.setField(Heap.BLOCK_FIELD_RECEIVER, self.receiver, 6);
+                    closure.setField(Heap.BLOCK_FIELD_HOME_CONTEXT, self.home_heap_context, 6);
 
                     try self.push(Value.fromObject(closure));
 
@@ -724,11 +1204,20 @@ pub const Interpreter = struct {
                     const level = self.fetchByte();
                     const index = self.fetchByte();
 
-                    // Access temp relative to appropriate context based on level
-                    const base = if (level >= 2) self.home_temp_base else self.outer_temp_base;
-                    const slot = base + 1 + index;
-                    const outer_val = self.stack[slot];
-                    try self.push(outer_val);
+                    // Try heap context first (for cross-process variable access)
+                    const heap_ctx = if (level >= 2) self.home_heap_context else self.heap_context;
+                    if (!heap_ctx.isNil()) {
+                        // Read from heap-allocated context
+                        const ctx_obj = heap_ctx.asObject();
+                        const outer_val = getHeapContextTemp(ctx_obj, index);
+                        try self.push(outer_val);
+                    } else {
+                        // Fall back to stack-based access
+                        const base = if (level >= 2) self.home_temp_base else self.outer_temp_base;
+                        const slot = base + 1 + index;
+                        const outer_val = self.stack[slot];
+                        try self.push(outer_val);
+                    }
                 },
 
                 .store_outer_temp => {
@@ -740,10 +1229,18 @@ pub const Interpreter = struct {
                     // Get value but leave on stack (store doesn't pop in Smalltalk)
                     const val = self.peek();
 
-                    // Store to appropriate context based on level
-                    const base = if (level >= 2) self.home_temp_base else self.outer_temp_base;
-                    const slot = base + 1 + index;
-                    self.stack[slot] = val;
+                    // Try heap context first (for cross-process variable access)
+                    const heap_ctx = if (level >= 2) self.home_heap_context else self.heap_context;
+                    if (!heap_ctx.isNil()) {
+                        // Write to heap-allocated context
+                        const ctx_obj = heap_ctx.asObject();
+                        setHeapContextTemp(ctx_obj, index, val);
+                    } else {
+                        // Fall back to stack-based access
+                        const base = if (level >= 2) self.home_temp_base else self.outer_temp_base;
+                        const slot = base + 1 + index;
+                        self.stack[slot] = val;
+                    }
                 },
 
                 .make_array => {
@@ -1245,6 +1742,8 @@ pub const Interpreter = struct {
                     .num_temps = 0,
                     .outer_context = null,
                     .closure = null,
+                    .heap_context = self.heap_context,
+                    .home_heap_context = self.home_heap_context,
                 };
             self.context_ptr += 1;
 
@@ -1353,6 +1852,8 @@ pub const Interpreter = struct {
                     .num_temps = 0,
                     .outer_context = null,
                     .closure = null,
+                    .heap_context = self.heap_context,
+                    .home_heap_context = self.home_heap_context,
                 };
                 self.context_ptr += 1;
 
@@ -1428,9 +1929,24 @@ pub const Interpreter = struct {
         const is_nil = result.bits == Value.nil.bits;
         if (DEBUG_VERBOSE) std.debug.print("DEBUG returnFromMethod ctx_ptr={} result: is_obj={} is_true={} is_false={} is_nil={}\n", .{ self.context_ptr, result.isObject(), is_true, is_false, is_nil });
         if (self.context_ptr == 0) {
-            // No more contexts - this is the final return
-            // Don't reset sp here - let the caller handle cleanup
-            // This is important for block returns where the primitive will restore state
+            // No more contexts - this process is finished
+            // Check if we can switch to another process
+            const current = self.process_scheduler.active_process;
+            if (current) |proc| {
+                proc.state = .terminated;
+                self.process_scheduler.active_process = null;
+
+                // Find next ready process
+                if (self.process_scheduler.findHighestPriorityReady()) |next| {
+                    self.process_scheduler.removeFromReadyQueue(next);
+                    self.restoreContextFromProcess(next);
+                    next.state = .running;
+                    self.process_scheduler.active_process = next;
+                    // Continue execution with the restored process - don't push anything
+                    return null;
+                }
+            }
+            // No more processes - this is the final return
             if (DEBUG_VERBOSE) std.debug.print("DEBUG returnFromMethod final return is_true={} is_false={}\n", .{ is_true, is_false });
             return result;
         }
@@ -1449,6 +1965,8 @@ pub const Interpreter = struct {
         self.temp_base = ctx.temp_base;
         self.outer_temp_base = ctx.outer_temp_base;
         self.home_temp_base = ctx.home_temp_base;
+        self.heap_context = ctx.heap_context;
+        self.home_heap_context = ctx.home_heap_context;
 
         // Push the return value onto the caller's stack
         try self.push(result);
@@ -1763,6 +2281,8 @@ pub const Interpreter = struct {
                     .num_temps = 0,
                     .outer_context = null,
                     .closure = null,
+                    .heap_context = self.heap_context,
+                    .home_heap_context = self.home_heap_context,
                 };
                 self.context_ptr += 1;
 
@@ -1897,6 +2417,8 @@ pub const Interpreter = struct {
                 .num_temps = 0,
                 .outer_context = null,
                 .closure = null,
+                .heap_context = self.heap_context,
+                .home_heap_context = self.home_heap_context,
             };
             self.context_ptr += 1;
 
@@ -1938,10 +2460,11 @@ pub const Interpreter = struct {
 
 test "Interpreter - push and pop" {
     const allocator = std.testing.allocator;
-    const heap = try Heap.init(allocator, 1024 * 1024);
+    var heap = try Heap.init(allocator, 1024 * 1024);
     defer heap.deinit();
 
-    var interp = Interpreter.init(heap);
+    var interp = Interpreter.init(&heap, allocator);
+    defer interp.deinit();
 
     try interp.push(Value.fromSmallInt(42));
     try interp.push(Value.fromSmallInt(100));

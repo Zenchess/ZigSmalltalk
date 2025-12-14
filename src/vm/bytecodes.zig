@@ -323,18 +323,32 @@ pub const Primitive = enum(u16) {
     basic_new_pinned_size = 77, // Behavior >> basicNewPinned:
 
     // ========================================================================
-    // Block/Control flow (Dolphin: 79-100)
+    // Block/Control flow (Dolphin: 79-84)
     // ========================================================================
     perform_with_args_at = 79, // perform:withArgumentsAt:descriptor:
     block_value = 81, // BlockClosure >> value (all variants)
     block_value_with_args = 82, // BlockClosure >> valueWithArguments:
     perform = 83, // Object >> perform:
     perform_with_args = 84, // Object >> perform:withArguments:
-    become = 85, // Object >> become:
-    snapshot = 86, // System snapshot
-    perform_method = 87, // perform method
-    one_way_become = 88, // Object >> oneWayBecome:
+
+    // ========================================================================
+    // Process/Semaphore primitives (Dolphin: 85-100)
+    // ========================================================================
+    semaphore_signal = 85, // Semaphore >> signal
+    semaphore_wait = 86, // Semaphore >> wait:ret:
+    process_resume = 87, // Process >> resume
+    process_suspend = 88, // Process >> suspend
     compile = 89, // Compiler >> compile:
+    process_terminate = 91, // Process >> primTerminate
+    process_set_priority = 92, // Process >> priority:
+    enable_async_events = 95, // Processor >> enableAsyncEvents:
+    process_queue_interrupt = 98, // Process >> queueInterrupt:with:
+    semaphore_set_signals = 99, // Semaphore >> primSetSignals:
+    signal_timer_after = 100, // Delay class >> signalTimerAfter:
+
+    // Object swapping (moved to avoid conflict with process primitives)
+    become = 180, // Object >> become:
+    one_way_become = 181, // Object >> oneWayBecome:
 
     // Extended block value primitives (our extension, to handle different arg counts)
     block_value_1 = 490, // BlockClosure >> value: (1 arg)
@@ -446,9 +460,10 @@ pub const Primitive = enum(u16) {
     low_bit = 152, // Integer >> lowBit
     all_references = 153, // Object >> allReferences
     shallow_copy = 155, // Object >> basicShallowCopy
-    species = 156, // Object >> species
+    yield = 156, // Processor >> yield (Dolphin process primitive)
     object_with_at_put = 157, // with:at:put:
     byte_at = 158, // Integer >> byteAt:
+    species = 182, // Object >> species (moved to avoid conflict)
 
     // Float operations (Dolphin: 160-168, 205, 214)
     float_add = 160, // Float >> +
@@ -478,8 +493,8 @@ pub const Primitive = enum(u16) {
     // ========================================================================
     quit = 113, // System >> quit (Dolphin uses 113 for exit)
     dolphin_stream_next_put_all = 173, // Stream >> nextPutAll: (Dolphin primitive)
-    delay_milliseconds = 174, // Delay >> milliseconds
-    time_milliseconds = 189, // Time >> millisecondClockValue
+    millisecond_clock_value = 174, // Delay class >> millisecondClockValue
+    microsecond_clock_value = 189, // Delay class >> microsecondClockValue
 
     // Character/String (our extensions, high numbers)
     char_code = 520, // Character >> asciiValue
@@ -626,8 +641,8 @@ pub const Primitive = enum(u16) {
     ffi_struct_info = 791, // 'Raylib' ffiStructInfo: #Color - returns struct metadata
     ffi_call_with_struct = 792, // FFI call that handles struct args/returns
     ffi_runtime_call = 793, // Runtime FFI call via libffi - for function pointers
-    ffi_glew_function = 794, // Get GLEW function pointer by name
-    ffi_glew_experimental = 795, // Set glewExperimental flag
+    ffi_generate_method = 794, // Generate Smalltalk method source for FFI function
+    ffi_function_info = 795, // Get FFI function info (arg count, arg types, return type)
     subclass_create = 796, // Class >> subclass: #Name - create a new subclass dynamically
     compile_method = 797, // Class >> compile: 'source' - compile and install method
     load_obj_file = 798, // OBJLoader >> load: 'path' - load OBJ file, returns {vertexData. indexData. vertexCount. indexCount}

@@ -62,6 +62,8 @@ pub const Heap = struct {
     pub const CLASS_READ_STREAM: u32 = 24;
     pub const CLASS_WRITE_STREAM: u32 = 25;
     pub const CLASS_FILE_STREAM: u32 = 26;
+    pub const CLASS_METHOD_CONTEXT: u32 = 27; // Heap-allocated activation record
+
     pub const CLASS_DEAF_OBJECT: u32 = 36;
     pub const CLASS_TRANSCRIPT_SHELL: u32 = 37;
     pub const CLASS_ASSOCIATION: u32 = 38;
@@ -89,6 +91,25 @@ pub const Heap = struct {
     // Metaclass has an extra field: thisClass (the class it's a metaclass of)
     pub const METACLASS_FIELD_THIS_CLASS: usize = 9;
     pub const METACLASS_NUM_FIELDS: usize = 10;
+
+    // MethodContext field indices (heap-allocated activation record)
+    // MethodContext is variable-sized: fixed fields + stack slots for temps/args
+    pub const CONTEXT_FIELD_SENDER: usize = 0; // Calling context or nil
+    pub const CONTEXT_FIELD_PC: usize = 1; // Instruction pointer (SmallInteger)
+    pub const CONTEXT_FIELD_STACKP: usize = 2; // Stack pointer within context (SmallInteger)
+    pub const CONTEXT_FIELD_METHOD: usize = 3; // CompiledMethod being executed
+    pub const CONTEXT_FIELD_CLOSURE_OR_RECEIVER: usize = 4; // For blocks: closure, for methods: receiver
+    pub const CONTEXT_NUM_FIXED_FIELDS: usize = 5;
+    // After fixed fields: stack slots (temps, args, operand stack)
+
+    // BlockClosure field indices (updated to use context references)
+    pub const BLOCK_FIELD_OUTER_CONTEXT: usize = 0; // MethodContext where block was created
+    pub const BLOCK_FIELD_START_PC: usize = 1; // SmallInteger - bytecode offset
+    pub const BLOCK_FIELD_NUM_ARGS: usize = 2; // SmallInteger - number of arguments
+    pub const BLOCK_FIELD_METHOD: usize = 3; // CompiledMethod containing block's bytecodes
+    pub const BLOCK_FIELD_RECEIVER: usize = 4; // Receiver when block was created
+    pub const BLOCK_FIELD_HOME_CONTEXT: usize = 5; // Home context for non-local returns
+    pub const BLOCK_NUM_FIELDS: usize = 6;
 
     // Dolphin Behavior instanceSpec masks (kept here so VM can synthesize instanceSpec values)
     pub const INSTSPEC_SIZE_MASK: i61 = 0xFF;
