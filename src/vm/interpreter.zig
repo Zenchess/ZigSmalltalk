@@ -95,6 +95,7 @@ pub const Interpreter = struct {
         cached_method: ?*CompiledMethod, // Method found for this class
         cached_holder: Value, // Class containing the method
         cached_version: u32, // Cache version when entry was created
+        cached_jit_code: ?*jit.CompiledCode, // JIT compiled code (if available)
     };
 
     heap: *Heap,
@@ -229,7 +230,7 @@ pub const Interpreter = struct {
             .method_cache_hits = 0,
             .method_cache_misses = 0,
             // Initialize inline cache to empty
-            .inline_cache = [_]InlineCacheEntry{.{ .method_ptr = 0, .bytecode_offset = 0, .cached_class = Value.nil, .cached_method = null, .cached_holder = Value.nil, .cached_version = 0 }} ** INLINE_CACHE_SIZE,
+            .inline_cache = [_]InlineCacheEntry{.{ .method_ptr = 0, .bytecode_offset = 0, .cached_class = Value.nil, .cached_method = null, .cached_holder = Value.nil, .cached_version = 0, .cached_jit_code = null }} ** INLINE_CACHE_SIZE,
             .inline_cache_hits = 0,
             .inline_cache_misses = 0,
             .cache_version = 1, // Start at 1 so version 0 means "uninitialized"
@@ -338,6 +339,7 @@ pub const Interpreter = struct {
             entry.cached_method = null;
             entry.cached_holder = Value.nil;
             entry.cached_version = 0;
+            entry.cached_jit_code = null;
         }
     }
 
@@ -2096,16 +2098,27 @@ pub const Interpreter = struct {
             if (ic_entry.cached_method) |found_method| {
                 const method_holder = ic_entry.cached_holder;
 
-                // JIT path - check if method is JIT-compiled
+                // Fast JIT path - use cached JIT code if available (no HashMap lookup!)
+                if (ic_entry.cached_jit_code) |code| {
+                    self.receiver = recv;
+                    const result = code.entry(self);
+                    self.sp = recv_pos;
+                    try self.push(result);
+                    self.jit_compiled_calls += 1;
+                    return;
+                }
+
+                // Slow JIT path - lookup and cache for next time
                 if (self.jit_enabled) {
                     if (self.jit_compiler) |jit_ptr| {
-                        // Check if already compiled, or try to compile
                         var compiled = jit_ptr.getCompiled(found_method);
                         if (compiled == null and JIT.isJitEligible(found_method)) {
                             _ = jit_ptr.compile(found_method) catch null;
                             compiled = jit_ptr.getCompiled(found_method);
                         }
                         if (compiled) |code| {
+                            // Cache JIT code in inline cache for next hit
+                            ic_entry.cached_jit_code = code;
                             self.receiver = recv;
                             const result = code.entry(self);
                             self.sp = recv_pos;
@@ -2186,6 +2199,17 @@ pub const Interpreter = struct {
         if (self.lookupMethodWithHolder(start_class, selector)) |method_lookup| {
             // Update inline cache for non-super sends
             if (!is_super) {
+                // Try to get/compile JIT code for the cache entry
+                var jit_code: ?*jit.CompiledCode = null;
+                if (self.jit_enabled) {
+                    if (self.jit_compiler) |jit_ptr| {
+                        jit_code = jit_ptr.getCompiled(method_lookup.method);
+                        if (jit_code == null and JIT.isJitEligible(method_lookup.method)) {
+                            _ = jit_ptr.compile(method_lookup.method) catch null;
+                            jit_code = jit_ptr.getCompiled(method_lookup.method);
+                        }
+                    }
+                }
                 ic_entry.* = .{
                     .method_ptr = method_ptr,
                     .bytecode_offset = @intCast(bytecode_offset),
@@ -2193,6 +2217,7 @@ pub const Interpreter = struct {
                     .cached_method = method_lookup.method,
                     .cached_holder = method_lookup.holder,
                     .cached_version = self.cache_version,
+                    .cached_jit_code = jit_code,
                 };
             }
             const found_method = method_lookup.method;
