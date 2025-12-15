@@ -400,15 +400,15 @@ pub fn load(allocator: std.mem.Allocator, reader: anytype) SnapshotError!*Heap {
         defer allocator.free(bytecodes);
         readExact(reader, bytecodes) catch return SnapshotError.IoError;
 
-        // Allocate compiled method
+        // Allocate compiled method with proper alignment (CompiledMethod needs 16-byte alignment)
         const header_size = @sizeOf(CompiledMethod.MethodHeader);
         const literals_size = @as(usize, mh.num_literals) * @sizeOf(Value);
         const total_size = header_size + literals_size + bc_len;
-        const mem = allocator.alignedAlloc(u8, .@"8", total_size) catch return SnapshotError.OutOfMemory;
-        const method: *CompiledMethod = @ptrCast(@alignCast(mem.ptr));
+        const mem = allocator.alignedAlloc(u8, .@"16", total_size) catch return SnapshotError.OutOfMemory;
+        const method: *CompiledMethod = @ptrCast(mem.ptr);
         method.header = mh;
 
-        const lit_ptr: [*]Value = @ptrCast(@alignCast(mem.ptr + header_size));
+        const lit_ptr: [*]Value = @ptrCast(mem.ptr + header_size);
         for (literals, 0..) |enc, i| {
             lit_ptr[i] = try decodeValue(enc, base_ptr, methods);
         }
