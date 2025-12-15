@@ -630,7 +630,8 @@ pub const FileIn = struct {
             if (self.heap.getGlobal("ProtocolSpec")) |pval| {
                 if (pval.isObject()) {
                     const obj = pval.asObject();
-                    const meta_val = obj.getField(Heap.CLASS_FIELD_METACLASS, Heap.CLASS_NUM_FIELDS);
+                    const obj_num_fields = obj.header.size;
+                    const meta_val = obj.getField(Heap.CLASS_FIELD_METACLASS, obj_num_fields);
                     if (DEBUG_VERBOSE) std.debug.print("DEBUG ProtocolSpec global class_idx={} meta?{}\n", .{ obj.header.class_index, meta_val.isObject() });
                 } else {
                     if (DEBUG_VERBOSE) std.debug.print("DEBUG ProtocolSpec global not object\n", .{});
@@ -808,6 +809,7 @@ pub const FileIn = struct {
             class_inst_var_names,
             class_format,
             existing_class,
+            "Unpackaged", // Default category, can be updated later
         );
 
         // Register the class as a global
@@ -846,12 +848,32 @@ pub const FileIn = struct {
             return FileInError.ClassNotFound;
         }
 
+        // Get heap address range for validation
+        const heap_base = @intFromPtr(self.heap.from_space.ptr);
+        const heap_end = heap_base + self.heap.space_size;
+
+        // Validate the class pointer is within heap range
+        const class_ptr = @intFromPtr(class_value.asObject());
+        if (class_ptr < heap_base or class_ptr >= heap_end) {
+            std.debug.print("ERROR: Class pointer 0x{x} outside heap [0x{x}-0x{x}] for class '{s}'\n", .{ class_ptr, heap_base, heap_end, class_name });
+            return FileInError.ClassNotFound;
+        }
+
+        const class_obj_for_meta = class_value.asObject();
+        const class_num_fields = class_obj_for_meta.header.size;
         const target_class_val = if (self.current_is_class_side)
-            class_value.asObject().getField(Heap.CLASS_FIELD_METACLASS, Heap.CLASS_NUM_FIELDS)
+            class_obj_for_meta.getField(Heap.CLASS_FIELD_METACLASS, class_num_fields)
         else
             class_value;
 
         if (!target_class_val.isObject()) return FileInError.ClassNotFound;
+
+        // Validate the target pointer is within heap range
+        const target_ptr = @intFromPtr(target_class_val.asObject());
+        if (target_ptr < heap_base or target_ptr >= heap_end) {
+            std.debug.print("ERROR: Target class pointer 0x{x} outside heap [0x{x}-0x{x}] for class '{s}' (class_side={})\n", .{ target_ptr, heap_base, heap_end, class_name, self.current_is_class_side });
+            return FileInError.ClassNotFound;
+        }
 
         // Parse the method source to extract selector and body
         // First line is the method signature
@@ -900,7 +922,8 @@ pub const FileIn = struct {
         var walk_class = target_class_val;
         while (walk_class.isObject()) {
             const walk_obj = walk_class.asObject();
-            const inst_vars = walk_obj.getField(Heap.CLASS_FIELD_INST_VARS, Heap.CLASS_NUM_FIELDS);
+            const walk_num_fields = walk_obj.header.size;
+            const inst_vars = walk_obj.getField(Heap.CLASS_FIELD_INST_VARS, walk_num_fields);
             if (inst_vars.isObject()) {
                 const vars_array = inst_vars.asObject();
                 const vars_size = vars_array.header.size;
@@ -918,7 +941,7 @@ pub const FileIn = struct {
                     }
                 }
             }
-            walk_class = walk_obj.getField(Heap.CLASS_FIELD_SUPERCLASS, Heap.CLASS_NUM_FIELDS);
+            walk_class = walk_obj.getField(Heap.CLASS_FIELD_SUPERCLASS, walk_num_fields);
         }
         gen.instance_variables = inst_var_list.items;
 
@@ -1006,7 +1029,8 @@ pub const FileIn = struct {
                 std.mem.startsWith(u8, selector, "protocolDescription:") or
                 std.mem.startsWith(u8, selector, "protocolNamed:"))
             {
-                const meta_val = class_obj.getField(Heap.CLASS_FIELD_METACLASS, Heap.CLASS_NUM_FIELDS);
+                const class_obj_size = class_obj.header.size;
+                const meta_val = class_obj.getField(Heap.CLASS_FIELD_METACLASS, class_obj_size);
                 if (meta_val.isObject()) {
                     const meta = meta_val.asObject();
                     try installMethodInClass(self.heap, meta, selector, method, true);
@@ -1348,8 +1372,11 @@ fn isIdentStartChar(c: u8) bool {
 pub fn installMethodInClass(heap: *Heap, class_obj: *object.Object, selector: []const u8, method: *object.CompiledMethod, is_class_side: bool) !void {
     _ = is_class_side; // class_obj is already resolved to metaclass when needed
 
+    // Use actual object size for field access (old classes may have fewer fields)
+    const num_fields = class_obj.header.size;
+
     // Debug: get class name
-    const debug_name_val = class_obj.getField(Heap.CLASS_FIELD_NAME, Heap.CLASS_NUM_FIELDS);
+    const debug_name_val = class_obj.getField(Heap.CLASS_FIELD_NAME, num_fields);
     var class_name: []const u8 = "???";
     if (debug_name_val.isObject()) {
         const debug_name_obj = debug_name_val.asObject();
@@ -1358,126 +1385,161 @@ pub fn installMethodInClass(heap: *Heap, class_obj: *object.Object, selector: []
         }
     }
 
-    // Get or create method dictionary
-    const method_dict_val = class_obj.getField(Heap.CLASS_FIELD_METHOD_DICT, Heap.CLASS_NUM_FIELDS);
+    // Get or create method dictionary - use hash-based storage
+    const method_dict_val = class_obj.getField(Heap.CLASS_FIELD_METHOD_DICT, num_fields);
+    const sym = heap.internSymbol(selector) catch return error.OutOfMemory;
+    const method_val = Value.fromObject(@ptrCast(@alignCast(method)));
 
     if (method_dict_val.isNil()) {
-        // Create new method dictionary
+        // Create new method dictionary with good initial size for hashing
         if (DEBUG_VERBOSE) std.debug.print("DEBUG installMethodInClass: '{s}' >> {s} - creating new method dict at {*}\n", .{ class_name, selector, class_obj });
-        const new_dict = try heap.allocateObject(Heap.CLASS_ARRAY, 2, .variable);
-        const sym = heap.internSymbol(selector) catch return error.OutOfMemory;
-        new_dict.setField(0, sym, 2);
-        new_dict.setField(1, Value.fromObject(@ptrCast(@alignCast(method))), 2);
-        class_obj.setField(Heap.CLASS_FIELD_METHOD_DICT, Value.fromObject(new_dict), Heap.CLASS_NUM_FIELDS);
+        const new_dict = try heap.allocateObject(Heap.CLASS_ARRAY, 64, .variable); // 32 slots
+        _ = hashInsertMethod(new_dict, sym, method_val, selector);
+        class_obj.setField(Heap.CLASS_FIELD_METHOD_DICT, Value.fromObject(new_dict), num_fields);
     } else if (method_dict_val.isObject()) {
-        // Extend existing method dictionary
         const dict = method_dict_val.asObject();
-        const old_size = dict.header.size;
 
-        // Check if selector already exists, and also find first empty slot
-        var first_empty_slot: ?usize = null;
+        // Check if method should be protected
+        if (hashLookupMethod(dict, sym, selector)) |existing| {
+            if (existing.header.primitive_index != 0) {
+                if (std.mem.eql(u8, selector, "basicNew") or
+                    std.mem.eql(u8, selector, "basicNew:") or
+                    std.mem.eql(u8, selector, "perform:") or
+                    std.mem.eql(u8, selector, "perform:withArguments:") or
+                    std.mem.eql(u8, selector, "instSize"))
+                {
+                    return; // Protected primitive
+                }
+            }
+        }
+
+        // Try to insert/update
+        if (hashInsertMethod(dict, sym, method_val, selector)) {
+            // Success
+            return;
+        }
+
+        // Dictionary full - need to grow and rehash
+        const old_size = dict.header.size;
+        const new_size = if (old_size < 64) 128 else old_size * 2;
+        const new_dict = try heap.allocateObject(Heap.CLASS_ARRAY, new_size, .variable);
+
+        // Rehash all existing entries
         var i: usize = 0;
         while (i < old_size) : (i += 2) {
-            const sel_val = dict.getField(i, old_size);
-            if (sel_val.isNil()) {
-                // Found an empty slot, remember it for potential use
-                if (first_empty_slot == null) first_empty_slot = i;
-            } else if (sel_val.isObject()) {
-                const sel_obj = sel_val.asObject();
-                if (sel_obj.header.class_index == Heap.CLASS_SYMBOL) {
-                    const sel_bytes = sel_obj.bytes(sel_obj.header.size);
-                    if (std.mem.eql(u8, sel_bytes, selector)) {
-                        // Check if existing method is an essential primitive - only protect basicNew/basicNew:
-                        const existing_method_val = dict.getField(i + 1, old_size);
-                        if (existing_method_val.isObject()) {
-                            const existing_method: *object.CompiledMethod = @ptrCast(@alignCast(existing_method_val.asObject()));
-                            if (existing_method.header.primitive_index != 0) {
-                                // Protect essential primitives that must not be overwritten
-                                  if (std.mem.eql(u8, selector, "basicNew") or
-                                      std.mem.eql(u8, selector, "basicNew:") or
-                                      std.mem.eql(u8, selector, "perform:") or
-                                      std.mem.eql(u8, selector, "perform:withArguments:") or
-                                      std.mem.eql(u8, selector, "instSize")) {
-                                    return;
-                                }
-                                // Allow overriding other primitive methods (like new, new:)
-                            }
-                        }
-                        // Update existing method
-                        dict.setField(i + 1, Value.fromObject(@ptrCast(@alignCast(method))), old_size);
-                        if (std.mem.eql(u8, selector, "run")) {
-                            const name_val = class_obj.getField(Heap.CLASS_FIELD_NAME, Heap.CLASS_NUM_FIELDS);
-                            if (name_val.isObject()) {
-                                const name_obj = name_val.asObject();
-                                if (name_obj.header.class_index == Heap.CLASS_SYMBOL) {
-                                    const name_bytes = name_obj.bytes(name_obj.header.size);
-                                    if (DEBUG_VERBOSE) std.debug.print("DEBUG install update {s}>>{s} dict_size={}\n", .{ name_bytes, selector, dict.header.size });
-                                }
-                            }
-                        }
-                        return;
-                    }
-                }
+            const old_key = dict.getField(i, old_size);
+            if (!old_key.isNil()) {
+                const old_val = dict.getField(i + 1, old_size);
+                _ = hashInsertMethod(new_dict, old_key, old_val, "");
             }
         }
 
-        // Method not found - add it
-        const sym = heap.internSymbol(selector) catch return error.OutOfMemory;
-
-        if (first_empty_slot) |slot| {
-            // Use existing empty slot in the dictionary
-            dict.setField(slot, sym, old_size);
-            dict.setField(slot + 1, Value.fromObject(@ptrCast(@alignCast(method))), old_size);
-            if (std.mem.eql(u8, selector, "run")) {
-                const name_val = class_obj.getField(Heap.CLASS_FIELD_NAME, Heap.CLASS_NUM_FIELDS);
-                if (name_val.isObject()) {
-                    const name_obj = name_val.asObject();
-                    if (name_obj.header.class_index == Heap.CLASS_SYMBOL) {
-                        const name_bytes = name_obj.bytes(name_obj.header.size);
-                        if (DEBUG_VERBOSE) std.debug.print("DEBUG install append {s}>>{s} slot={} dict_size={}\n", .{ name_bytes, selector, slot, dict.header.size });
-                    }
-                }
-            }
-        } else {
-            // Need to resize dictionary
-            const new_size = old_size + 2;
-            const new_dict = try heap.allocateObject(Heap.CLASS_ARRAY, new_size, .variable);
-
-            // Copy old entries
-            i = 0;
-            while (i < old_size) : (i += 1) {
-                new_dict.setField(i, dict.getField(i, old_size), new_size);
-            }
-
-            // Add new entry at the end
-            new_dict.setField(old_size, sym, new_size);
-            new_dict.setField(old_size + 1, Value.fromObject(@ptrCast(@alignCast(method))), new_size);
-
-            if (std.mem.eql(u8, selector, "run")) {
-                const name_val = class_obj.getField(Heap.CLASS_FIELD_NAME, Heap.CLASS_NUM_FIELDS);
-                if (name_val.isObject()) {
-                    const name_obj = name_val.asObject();
-                    if (name_obj.header.class_index == Heap.CLASS_SYMBOL) {
-                        const name_bytes = name_obj.bytes(name_obj.header.size);
-                        if (DEBUG_VERBOSE) std.debug.print("DEBUG install grow {s}>>{s} old_size={} new_size={}\n", .{ name_bytes, selector, old_size, new_size });
-                    }
-                }
-            }
-
-            class_obj.setField(Heap.CLASS_FIELD_METHOD_DICT, Value.fromObject(new_dict), Heap.CLASS_NUM_FIELDS);
-        }
+        // Insert the new method
+        _ = hashInsertMethod(new_dict, sym, method_val, selector);
+        class_obj.setField(Heap.CLASS_FIELD_METHOD_DICT, Value.fromObject(new_dict), num_fields);
     }
 }
 
+/// Hash-based method lookup in dictionary
+fn hashLookupMethod(dict: *object.Object, selector_sym: Value, selector_str: []const u8) ?*object.CompiledMethod {
+    const dict_size = dict.header.size;
+    if (dict_size < 2) return null;
+
+    const num_slots = dict_size / 2;
+    const hash = selector_sym.bits *% 2654435761;
+    var index = @as(usize, @intCast(hash)) % num_slots;
+
+    var probes: usize = 0;
+    while (probes < num_slots) : (probes += 1) {
+        const slot_base = index * 2;
+        const key = dict.getField(slot_base, dict_size);
+
+        if (key.isNil()) return null;
+
+        // Pointer equality first
+        if (key.bits == selector_sym.bits) {
+            const val = dict.getField(slot_base + 1, dict_size);
+            if (val.isObject()) {
+                return @ptrCast(@alignCast(val.asObject()));
+            }
+            return null;
+        }
+
+        // String comparison fallback
+        if (selector_str.len > 0 and key.isObject()) {
+            const key_obj = key.asObject();
+            if (key_obj.header.class_index == Heap.CLASS_SYMBOL) {
+                const k_bytes = key_obj.bytes(key_obj.header.size);
+                if (std.mem.eql(u8, k_bytes, selector_str)) {
+                    const val = dict.getField(slot_base + 1, dict_size);
+                    if (val.isObject()) {
+                        return @ptrCast(@alignCast(val.asObject()));
+                    }
+                    return null;
+                }
+            }
+        }
+
+        index = (index + 1) % num_slots;
+    }
+    return null;
+}
+
+/// Hash-based method insertion - returns true on success, false if full
+fn hashInsertMethod(dict: *object.Object, selector_sym: Value, method_val: Value, selector_str: []const u8) bool {
+    const dict_size = dict.header.size;
+    if (dict_size < 2) return false;
+
+    const num_slots = dict_size / 2;
+    const fields = dict.fields(dict_size);
+
+    const hash = selector_sym.bits *% 2654435761;
+    var index = @as(usize, @intCast(hash)) % num_slots;
+
+    var probes: usize = 0;
+    while (probes < num_slots) : (probes += 1) {
+        const slot_base = index * 2;
+
+        // Empty slot - insert
+        if (fields[slot_base].isNil()) {
+            fields[slot_base] = selector_sym;
+            fields[slot_base + 1] = method_val;
+            return true;
+        }
+
+        // Existing key - update
+        if (fields[slot_base].bits == selector_sym.bits) {
+            fields[slot_base + 1] = method_val;
+            return true;
+        }
+
+        // String comparison for update
+        if (selector_str.len > 0 and fields[slot_base].isObject()) {
+            const key_obj = fields[slot_base].asObject();
+            if (key_obj.header.class_index == Heap.CLASS_SYMBOL) {
+                const k_bytes = key_obj.bytes(key_obj.header.size);
+                if (std.mem.eql(u8, k_bytes, selector_str)) {
+                    fields[slot_base + 1] = method_val;
+                    return true;
+                }
+            }
+        }
+
+        index = (index + 1) % num_slots;
+    }
+    return false; // Full
+}
+
 fn ensureClassVarPresent(heap: *Heap, class_obj: *object.Object, name: []const u8) !void {
-    var dict_val = class_obj.getField(Heap.CLASS_FIELD_CLASS_VARS, Heap.CLASS_NUM_FIELDS);
+    const num_fields = class_obj.header.size;
+    var dict_val = class_obj.getField(Heap.CLASS_FIELD_CLASS_VARS, num_fields);
 
     if (dict_val.isNil()) {
         const dict = try heap.allocateObject(Heap.CLASS_ARRAY, 2, .variable);
         const sym = try heap.internSymbol(name);
         dict.setField(0, sym, 2);
         dict.setField(1, Value.nil, 2);
-        class_obj.setField(Heap.CLASS_FIELD_CLASS_VARS, Value.fromObject(dict), Heap.CLASS_NUM_FIELDS);
+        class_obj.setField(Heap.CLASS_FIELD_CLASS_VARS, Value.fromObject(dict), num_fields);
         return;
     }
 
@@ -1512,12 +1574,13 @@ fn ensureClassVarPresent(heap: *Heap, class_obj: *object.Object, name: []const u
     new_dict.setField(size, sym, new_size);
     new_dict.setField(size + 1, Value.nil, new_size);
 
-    class_obj.setField(Heap.CLASS_FIELD_CLASS_VARS, Value.fromObject(new_dict), Heap.CLASS_NUM_FIELDS);
+    class_obj.setField(Heap.CLASS_FIELD_CLASS_VARS, Value.fromObject(new_dict), num_fields);
 }
 
 fn setClassVarValue(heap: *Heap, class_obj: *object.Object, name: []const u8, value: Value) !void {
     try ensureClassVarPresent(heap, class_obj, name);
-    const dict_val = class_obj.getField(Heap.CLASS_FIELD_CLASS_VARS, Heap.CLASS_NUM_FIELDS);
+    const num_fields = class_obj.header.size;
+    const dict_val = class_obj.getField(Heap.CLASS_FIELD_CLASS_VARS, num_fields);
     if (!dict_val.isObject()) return;
     const dict = dict_val.asObject();
     const size = dict.header.size;
@@ -1535,20 +1598,30 @@ fn setClassVarValue(heap: *Heap, class_obj: *object.Object, name: []const u8, va
 }
 
 /// Create a new class dynamically at runtime
-pub fn createDynamicClass(heap: *Heap, name: []const u8, superclass: ?*object.Object, inst_var_names: []const u8, class_var_names: []const u8, pool_dict_names: []const u8, class_inst_var_names: []const u8, class_format: object.ClassFormat, existing_class: ?*object.Object) !*object.Object {
+pub fn createDynamicClass(heap: *Heap, name: []const u8, superclass: ?*object.Object, inst_var_names: []const u8, class_var_names: []const u8, pool_dict_names: []const u8, class_inst_var_names: []const u8, class_format: object.ClassFormat, existing_class: ?*object.Object, category: []const u8) !*object.Object {
     // Allocate or reuse a class object
     const class = existing_class orelse try heap.allocateObject(Heap.CLASS_CLASS, Heap.CLASS_NUM_FIELDS, .normal);
 
+    // Use actual object size for field access (old classes may have fewer fields)
+    const num_fields = class.header.size;
+
     // Set superclass
     if (superclass) |super_obj| {
-        class.setField(Heap.CLASS_FIELD_SUPERCLASS, Value.fromObject(super_obj), Heap.CLASS_NUM_FIELDS);
+        class.setField(Heap.CLASS_FIELD_SUPERCLASS, Value.fromObject(super_obj), num_fields);
     } else {
-        class.setField(Heap.CLASS_FIELD_SUPERCLASS, Value.nil, Heap.CLASS_NUM_FIELDS);
+        class.setField(Heap.CLASS_FIELD_SUPERCLASS, Value.nil, num_fields);
     }
 
     // Set class name
     const name_sym = heap.internSymbol(name) catch return error.OutOfMemory;
-    class.setField(Heap.CLASS_FIELD_NAME, name_sym, Heap.CLASS_NUM_FIELDS);
+    class.setField(Heap.CLASS_FIELD_NAME, name_sym, num_fields);
+
+    // Set category (package) - only if class has enough fields (new classes)
+    // Old classes from images may have fewer fields
+    if (num_fields >= Heap.CLASS_NUM_FIELDS) {
+        const category_sym = heap.internSymbol(if (category.len > 0) category else "Unpackaged") catch return error.OutOfMemory;
+        class.setField(Heap.CLASS_FIELD_CATEGORY, category_sym, num_fields);
+    }
 
     // Parse instance variable names and count them
     var inst_var_count: u32 = 0;
@@ -1562,7 +1635,8 @@ pub fn createDynamicClass(heap: *Heap, name: []const u8, superclass: ?*object.Ob
     // Get superclass instance variable count (only for non-indexed parts)
     var super_inst_vars: u32 = 0;
     if (superclass) |super_obj| {
-        const super_format = super_obj.getField(Heap.CLASS_FIELD_FORMAT, Heap.CLASS_NUM_FIELDS);
+        const super_num_fields = super_obj.header.size;
+        const super_format = super_obj.getField(Heap.CLASS_FIELD_FORMAT, super_num_fields);
         if (super_format.isSmallInt()) {
             const format_int = super_format.asSmallInt();
             if (format_int >= 0) {
@@ -1575,11 +1649,11 @@ pub fn createDynamicClass(heap: *Heap, name: []const u8, superclass: ?*object.Ob
     // Set instanceSpec using Dolphin-compatible encoding
     const total_inst_vars = super_inst_vars + inst_var_count;
     const format_value: i61 = Heap.encodeInstanceSpec(total_inst_vars, class_format);
-    class.setField(Heap.CLASS_FIELD_FORMAT, Value.fromSmallInt(format_value), Heap.CLASS_NUM_FIELDS);
+    class.setField(Heap.CLASS_FIELD_FORMAT, Value.fromSmallInt(format_value), num_fields);
 
     // Initialize method dictionary to nil if unset (will be created when first method is added)
-    if (class.getField(Heap.CLASS_FIELD_METHOD_DICT, Heap.CLASS_NUM_FIELDS).isNil()) {
-        class.setField(Heap.CLASS_FIELD_METHOD_DICT, Value.nil, Heap.CLASS_NUM_FIELDS);
+    if (class.getField(Heap.CLASS_FIELD_METHOD_DICT, num_fields).isNil()) {
+        class.setField(Heap.CLASS_FIELD_METHOD_DICT, Value.nil, num_fields);
     }
 
     // Register in globals so the class is discoverable by name
@@ -1596,9 +1670,9 @@ pub fn createDynamicClass(heap: *Heap, name: []const u8, superclass: ?*object.Ob
             names_array.setField(idx, var_sym, inst_var_count);
             idx += 1;
         }
-        class.setField(Heap.CLASS_FIELD_INST_VARS, Value.fromObject(names_array), Heap.CLASS_NUM_FIELDS);
+        class.setField(Heap.CLASS_FIELD_INST_VARS, Value.fromObject(names_array), num_fields);
     } else {
-        class.setField(Heap.CLASS_FIELD_INST_VARS, Value.nil, Heap.CLASS_NUM_FIELDS);
+        class.setField(Heap.CLASS_FIELD_INST_VARS, Value.nil, num_fields);
     }
 
     // Parse and store class variable names as a dictionary
@@ -1623,10 +1697,10 @@ pub fn createDynamicClass(heap: *Heap, name: []const u8, superclass: ?*object.Ob
             class_vars_dict.setField(idx + 1, Value.nil, class_var_count * 2); // Initialize to nil
             idx += 2;
         }
-        class.setField(Heap.CLASS_FIELD_CLASS_VARS, Value.fromObject(class_vars_dict), Heap.CLASS_NUM_FIELDS);
+        class.setField(Heap.CLASS_FIELD_CLASS_VARS, Value.fromObject(class_vars_dict), num_fields);
         std.debug.print("  Class variables: {s}\n", .{class_var_names});
     } else {
-        class.setField(Heap.CLASS_FIELD_CLASS_VARS, Value.nil, Heap.CLASS_NUM_FIELDS);
+        class.setField(Heap.CLASS_FIELD_CLASS_VARS, Value.nil, num_fields);
     }
 
     // Parse and store pool dictionaries
@@ -1655,24 +1729,24 @@ pub fn createDynamicClass(heap: *Heap, name: []const u8, superclass: ?*object.Ob
             }
             idx += 1;
         }
-        class.setField(Heap.CLASS_FIELD_POOL_DICTS, Value.fromObject(pool_dicts_array), Heap.CLASS_NUM_FIELDS);
+        class.setField(Heap.CLASS_FIELD_POOL_DICTS, Value.fromObject(pool_dicts_array), num_fields);
         std.debug.print("  Pool dictionaries: {s}\n", .{pool_dict_names});
     } else {
-        class.setField(Heap.CLASS_FIELD_POOL_DICTS, Value.nil, Heap.CLASS_NUM_FIELDS);
+        class.setField(Heap.CLASS_FIELD_POOL_DICTS, Value.nil, num_fields);
     }
 
     // Create a metaclass for this class and set up class-side new/basicNew methods
-    const existing_meta_val = class.getField(Heap.CLASS_FIELD_METACLASS, Heap.CLASS_NUM_FIELDS);
+    const existing_meta_val = class.getField(Heap.CLASS_FIELD_METACLASS, num_fields);
     const metaclass = if (existing_meta_val.isObject())
         existing_meta_val.asObject()
     else
         try createDynamicMetaclass(heap, class, name, class_inst_var_names, class_format);
-    class.setField(Heap.CLASS_FIELD_METACLASS, Value.fromObject(metaclass), Heap.CLASS_NUM_FIELDS);
+    class.setField(Heap.CLASS_FIELD_METACLASS, Value.fromObject(metaclass), num_fields);
 
     // Update metaclass's superclass to match the class hierarchy
     // Metaclass's superclass should be the superclass's metaclass
     if (superclass) |super_obj| {
-        const super_meta_val = super_obj.getField(Heap.CLASS_FIELD_METACLASS, Heap.CLASS_NUM_FIELDS);
+        const super_meta_val = super_obj.getField(Heap.CLASS_FIELD_METACLASS, super_obj.header.size);
         if (super_meta_val.isObject()) {
             metaclass.setField(Heap.CLASS_FIELD_SUPERCLASS, super_meta_val, Heap.METACLASS_NUM_FIELDS);
         }
@@ -1694,6 +1768,9 @@ pub fn createDynamicClass(heap: *Heap, name: []const u8, superclass: ?*object.Ob
 /// Create a metaclass for a dynamically created class
 fn createDynamicMetaclass(heap: *Heap, class: *object.Object, name: []const u8, class_inst_var_names: []const u8, class_format: object.ClassFormat) !*object.Object {
     const bootstrap = @import("bootstrap.zig");
+
+    // Use actual object size for field access (old classes may have fewer fields)
+    const num_fields = class.header.size;
 
     // Allocate metaclass object (same as Class but with extra thisClass field)
     const metaclass = try heap.allocateObject(Heap.CLASS_METACLASS, Heap.METACLASS_NUM_FIELDS, .normal);
@@ -1726,10 +1803,10 @@ fn createDynamicMetaclass(heap: *Heap, class: *object.Object, name: []const u8, 
             names_array.setField(idx, var_sym, class_inst_var_count);
             idx += 1;
         }
-        class.setField(Heap.CLASS_FIELD_CLASS_INST_VARS, Value.fromObject(names_array), Heap.CLASS_NUM_FIELDS);
+        class.setField(Heap.CLASS_FIELD_CLASS_INST_VARS, Value.fromObject(names_array), num_fields);
         std.debug.print("  Class instance variables: {s}\n", .{class_inst_var_names});
     } else {
-        class.setField(Heap.CLASS_FIELD_CLASS_INST_VARS, Value.nil, Heap.CLASS_NUM_FIELDS);
+        class.setField(Heap.CLASS_FIELD_CLASS_INST_VARS, Value.nil, num_fields);
     }
 
     // Metaclass name is "ClassName class"
@@ -1739,9 +1816,11 @@ fn createDynamicMetaclass(heap: *Heap, class: *object.Object, name: []const u8, 
     metaclass.setField(Heap.CLASS_FIELD_NAME, meta_name_sym, Heap.METACLASS_NUM_FIELDS);
 
     // Get superclass's metaclass to set as metaclass superclass
-    const superclass = class.getField(Heap.CLASS_FIELD_SUPERCLASS, Heap.CLASS_NUM_FIELDS);
-    if (superclass.isObject()) {
-        const super_metaclass = superclass.asObject().getField(Heap.CLASS_FIELD_METACLASS, Heap.CLASS_NUM_FIELDS);
+    const superclass_val = class.getField(Heap.CLASS_FIELD_SUPERCLASS, num_fields);
+    if (superclass_val.isObject()) {
+        const super_obj = superclass_val.asObject();
+        const super_num_fields = super_obj.header.size;
+        const super_metaclass = super_obj.getField(Heap.CLASS_FIELD_METACLASS, super_num_fields);
         metaclass.setField(Heap.CLASS_FIELD_SUPERCLASS, super_metaclass, Heap.METACLASS_NUM_FIELDS);
     } else {
         // Root class - superclass of metaclass is Class
@@ -1806,7 +1885,8 @@ pub fn compileAndInstallMethod(heap: *Heap, class_obj: *object.Object, source: [
     var walk_class = Value.fromObject(class_obj);
     while (walk_class.isObject()) {
         const walk_obj = walk_class.asObject();
-        const inst_vars = walk_obj.getField(Heap.CLASS_FIELD_INST_VARS, Heap.CLASS_NUM_FIELDS);
+        const walk_num_fields = walk_obj.header.size;
+        const inst_vars = walk_obj.getField(Heap.CLASS_FIELD_INST_VARS, walk_num_fields);
         if (inst_vars.isObject()) {
             const vars_array = inst_vars.asObject();
             const vars_size = vars_array.header.size;
@@ -1823,7 +1903,7 @@ pub fn compileAndInstallMethod(heap: *Heap, class_obj: *object.Object, source: [
                 }
             }
         }
-        walk_class = walk_obj.getField(Heap.CLASS_FIELD_SUPERCLASS, Heap.CLASS_NUM_FIELDS);
+        walk_class = walk_obj.getField(Heap.CLASS_FIELD_SUPERCLASS, walk_num_fields);
     }
     gen.instance_variables = inst_var_list.items;
 

@@ -34,6 +34,9 @@ pub const Heap = struct {
     // Interpreter reference for GC stack tracing
     interpreter: ?*Interpreter = null,
 
+    // Current image path (for SessionManager >> imagePath)
+    image_path: ?[]const u8 = null,
+
     // Well-known class indices
     pub const CLASS_OBJECT: u32 = 0;
     pub const CLASS_CLASS: u32 = 1;
@@ -86,11 +89,12 @@ pub const Heap = struct {
     pub const CLASS_FIELD_METACLASS: usize = 6; // Points to metaclass object (for class-side methods)
     pub const CLASS_FIELD_POOL_DICTS: usize = 7; // Array of pool dictionaries
     pub const CLASS_FIELD_CLASS_INST_VARS: usize = 8; // Class instance variables (stored on metaclass)
-    pub const CLASS_NUM_FIELDS: usize = 9;
+    pub const CLASS_FIELD_CATEGORY: usize = 9; // Package/category name (Symbol)
+    pub const CLASS_NUM_FIELDS: usize = 10;
 
     // Metaclass has an extra field: thisClass (the class it's a metaclass of)
-    pub const METACLASS_FIELD_THIS_CLASS: usize = 9;
-    pub const METACLASS_NUM_FIELDS: usize = 10;
+    pub const METACLASS_FIELD_THIS_CLASS: usize = 10;
+    pub const METACLASS_NUM_FIELDS: usize = 11;
 
     // MethodContext field indices (heap-allocated activation record)
     // MethodContext is variable-sized: fixed fields + stack slots for temps/args
@@ -346,7 +350,8 @@ pub const Heap = struct {
             // Check if this is a class object - if so, return its metaclass
             if (obj.header.class_index == CLASS_CLASS or obj.header.class_index == CLASS_METACLASS) {
                 // This is a class or metaclass object - get its metaclass from the METACLASS field
-                const metaclass = obj.getField(CLASS_FIELD_METACLASS, CLASS_NUM_FIELDS);
+                const obj_size = obj.header.size;
+                const metaclass = obj.getField(CLASS_FIELD_METACLASS, obj_size);
                 if (!metaclass.isNil() and metaclass.isObject()) {
                     return metaclass;
                 }
@@ -355,7 +360,7 @@ pub const Heap = struct {
                     return meta_val;
                 }
                 // Debug: metaclass lookup failed
-                const class_name = obj.getField(CLASS_FIELD_NAME, CLASS_NUM_FIELDS);
+                const class_name = obj.getField(CLASS_FIELD_NAME, obj_size);
                 if (class_name.isObject()) {
                     const name_obj = class_name.asObject();
                     if (name_obj.header.class_index == CLASS_SYMBOL) {
@@ -373,9 +378,10 @@ pub const Heap = struct {
     fn createMetaclassIfMissing(self: *Heap, class_obj: *Object) ?Value {
         // Attempt to synthesize a metaclass when one is absent.
         const new_meta = self.allocateObject(CLASS_METACLASS, METACLASS_NUM_FIELDS, .normal) catch return null;
+        const class_size = class_obj.header.size;
 
         // Set name if available
-        const name_val = class_obj.getField(CLASS_FIELD_NAME, CLASS_NUM_FIELDS);
+        const name_val = class_obj.getField(CLASS_FIELD_NAME, class_size);
         if (name_val.isObject() and name_val.asObject().header.class_index == CLASS_SYMBOL) {
             const name_obj = name_val.asObject();
             const name_bytes = name_obj.bytes(name_obj.header.size);
@@ -394,9 +400,10 @@ pub const Heap = struct {
         new_meta.setField(CLASS_FIELD_FORMAT, Value.fromSmallInt(fmt), METACLASS_NUM_FIELDS);
 
         // Inherit metaclass chain from superclass if possible
-        const super_val = class_obj.getField(CLASS_FIELD_SUPERCLASS, CLASS_NUM_FIELDS);
+        const super_val = class_obj.getField(CLASS_FIELD_SUPERCLASS, class_size);
         if (super_val.isObject()) {
-            const super_meta = super_val.asObject().getField(CLASS_FIELD_METACLASS, CLASS_NUM_FIELDS);
+            const super_obj = super_val.asObject();
+            const super_meta = super_obj.getField(CLASS_FIELD_METACLASS, super_obj.header.size);
             if (super_meta.isObject()) {
                 new_meta.setField(CLASS_FIELD_SUPERCLASS, super_meta, METACLASS_NUM_FIELDS);
             }
@@ -405,7 +412,7 @@ pub const Heap = struct {
             new_meta.setField(CLASS_FIELD_SUPERCLASS, self.getClass(CLASS_CLASS), METACLASS_NUM_FIELDS);
         }
 
-        class_obj.setField(CLASS_FIELD_METACLASS, Value.fromObject(new_meta), CLASS_NUM_FIELDS);
+        class_obj.setField(CLASS_FIELD_METACLASS, Value.fromObject(new_meta), class_size);
         return Value.fromObject(new_meta);
     }
 
@@ -643,7 +650,7 @@ pub const Heap = struct {
         const class = self.getClass(obj.header.class_index);
         if (class.isObject()) {
             const class_obj = class.asObject();
-            const format_val = class_obj.getField(CLASS_FIELD_FORMAT, CLASS_NUM_FIELDS);
+            const format_val = class_obj.getField(CLASS_FIELD_FORMAT, class_obj.header.size);
             if (format_val.isSmallInt()) {
                 const info = decodeInstanceSpec(format_val.asSmallInt());
                 return info.inst_size;
@@ -657,7 +664,7 @@ pub const Heap = struct {
         const class = self.getClass(obj.header.class_index);
         if (class.isObject()) {
             const class_obj = class.asObject();
-            const format_val = class_obj.getField(CLASS_FIELD_FORMAT, CLASS_NUM_FIELDS);
+            const format_val = class_obj.getField(CLASS_FIELD_FORMAT, class_obj.header.size);
             if (format_val.isSmallInt()) {
                 const info = decodeInstanceSpec(format_val.asSmallInt());
                 return info.inst_size;

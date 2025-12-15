@@ -384,6 +384,12 @@ pub fn executePrimitive(interp: *Interpreter, prim_index: u16) InterpreterError!
         .ui_process_iteration => primUIProcessIteration(interp),
         .ui_is_running => primUIIsRunning(interp),
 
+        // Image/Session primitives (930-933)
+        .image_path => primImagePath(interp),
+        .image_file_name => primImageFileName(interp),
+        .image_directory => primImageDirectory(interp),
+        .image_path_set => primImagePathSet(interp),
+
         else => InterpreterError.PrimitiveFailed,
     };
 }
@@ -1225,7 +1231,7 @@ fn primBasicNew(interp: *Interpreter) InterpreterError!Value {
     }
 
     const class_obj = class.asObject();
-    const format_val = class_obj.getField(Heap.CLASS_FIELD_FORMAT, Heap.CLASS_NUM_FIELDS);
+    const format_val = class_obj.getField(Heap.CLASS_FIELD_FORMAT, class_obj.header.size);
 
     // Extract instance variables count and format from the encoded instanceSpec
     var num_fields: usize = 0;
@@ -1281,7 +1287,7 @@ fn primBasicNewSize(interp: *Interpreter) InterpreterError!Value {
     };
 
     // Get the format from the class (instanceSpec)
-    const format_val = class_obj.getField(Heap.CLASS_FIELD_FORMAT, Heap.CLASS_NUM_FIELDS);
+    const format_val = class_obj.getField(Heap.CLASS_FIELD_FORMAT, class_obj.header.size);
     var format: object.ClassFormat = .variable;
     var num_fixed: usize = 0;
     if (format_val.isSmallInt()) {
@@ -1340,7 +1346,7 @@ fn primBasicResize(interp: *Interpreter) InterpreterError!Value {
         const class_val = interp.heap.getClass(obj.header.class_index);
         if (class_val.isObject()) {
             const class_obj = class_val.asObject();
-            const format_val = class_obj.getField(Heap.CLASS_FIELD_FORMAT, Heap.CLASS_NUM_FIELDS);
+            const format_val = class_obj.getField(Heap.CLASS_FIELD_FORMAT, class_obj.header.size);
             if (format_val.isSmallInt()) {
                 const info = Heap.decodeInstanceSpec(format_val.asSmallInt());
                 inst_size = info.inst_size;
@@ -1702,7 +1708,7 @@ fn primAt(interp: *Interpreter) InterpreterError!Value {
             const class_val = interp.heap.getClass(obj.header.class_index);
             if (class_val.isObject()) {
                 const class_obj = class_val.asObject();
-                const format_val = class_obj.getField(Heap.CLASS_FIELD_FORMAT, Heap.CLASS_NUM_FIELDS);
+                const format_val = class_obj.getField(Heap.CLASS_FIELD_FORMAT, class_obj.header.size);
                 if (format_val.isSmallInt()) {
                     const info = Heap.decodeInstanceSpec(format_val.asSmallInt());
                     idx = base_idx + info.inst_size; // Skip past named inst vars
@@ -1773,7 +1779,7 @@ fn primAtPut(interp: *Interpreter) InterpreterError!Value {
         const class_val = interp.heap.getClass(obj.header.class_index);
         if (class_val.isObject()) {
             const class_obj = class_val.asObject();
-            const format_val = class_obj.getField(Heap.CLASS_FIELD_FORMAT, Heap.CLASS_NUM_FIELDS);
+            const format_val = class_obj.getField(Heap.CLASS_FIELD_FORMAT, class_obj.header.size);
             if (format_val.isSmallInt()) {
                 const info = Heap.decodeInstanceSpec(format_val.asSmallInt());
                 idx = base_idx + info.inst_size; // Skip past named inst vars
@@ -1809,7 +1815,7 @@ fn primSize(interp: *Interpreter) InterpreterError!Value {
         const class_val = interp.heap.getClass(obj.header.class_index);
         if (class_val.isObject()) {
             const class_obj = class_val.asObject();
-            const format_val = class_obj.getField(Heap.CLASS_FIELD_FORMAT, Heap.CLASS_NUM_FIELDS);
+            const format_val = class_obj.getField(Heap.CLASS_FIELD_FORMAT, class_obj.header.size);
             if (format_val.isSmallInt()) {
                 const info = Heap.decodeInstanceSpec(format_val.asSmallInt());
                 const total_size = obj.header.size;
@@ -1837,7 +1843,7 @@ fn primPrintString(interp: *Interpreter) InterpreterError!Value {
             const class = interp.heap.getClass(obj.header.class_index);
             if (class.isObject()) {
                 const class_obj = class.asObject();
-                const format_val = class_obj.getField(Heap.CLASS_FIELD_FORMAT, Heap.CLASS_NUM_FIELDS);
+                const format_val = class_obj.getField(Heap.CLASS_FIELD_FORMAT, class_obj.header.size);
                 if (format_val.isSmallInt()) {
                     const size: usize = @intCast(format_val.asSmallInt());
                     const bytes_slice = obj.bytes(size);
@@ -3738,7 +3744,8 @@ fn evaluateBlockWith1(interp: *Interpreter, block: Value, arg: Value) Interprete
                 const name0 = blk: {
                     const cls = interp.heap.classOf(slot0);
                     if (cls.isObject()) {
-                        const name_val = cls.asObject().getField(Heap.CLASS_FIELD_NAME, Heap.CLASS_NUM_FIELDS);
+                        const cls_obj = cls.asObject();
+                        const name_val = cls_obj.getField(Heap.CLASS_FIELD_NAME, cls_obj.header.size);
                         if (name_val.isObject() and name_val.asObject().header.class_index == Heap.CLASS_SYMBOL) {
                             break :blk name_val.asObject().bytes(name_val.asObject().header.size);
                         }
@@ -3750,7 +3757,8 @@ fn evaluateBlockWith1(interp: *Interpreter, block: Value, arg: Value) Interprete
                 const name1 = blk: {
                     const cls = interp.heap.classOf(slot1);
                     if (cls.isObject()) {
-                        const name_val = cls.asObject().getField(Heap.CLASS_FIELD_NAME, Heap.CLASS_NUM_FIELDS);
+                        const cls_obj = cls.asObject();
+                        const name_val = cls_obj.getField(Heap.CLASS_FIELD_NAME, cls_obj.header.size);
                         if (name_val.isObject() and name_val.asObject().header.class_index == Heap.CLASS_SYMBOL) {
                             break :blk name_val.asObject().bytes(name_val.asObject().header.size);
                         }
@@ -3904,26 +3912,28 @@ fn primArrayDo(interp: *Interpreter) InterpreterError!Value {
                     const name0 = blk: {
                         const cls = interp.heap.classOf(slot0);
                         if (cls.isObject()) {
-                            const name_val = cls.asObject().getField(Heap.CLASS_FIELD_NAME, Heap.CLASS_NUM_FIELDS);
+                            const cls_obj = cls.asObject();
+                            const name_val = cls_obj.getField(Heap.CLASS_FIELD_NAME, cls_obj.header.size);
                             if (name_val.isObject() and name_val.asObject().header.class_index == Heap.CLASS_SYMBOL) {
                                 break :blk name_val.asObject().bytes(name_val.asObject().header.size);
                             }
                         }
                         if (slot0.isSmallInt()) break :blk "SmallInteger";
                         if (slot0.isNil()) break :blk "nil";
-                        break :blk "<?>";            
+                        break :blk "<?>";
                     };
                     const name1 = blk: {
                         const cls = interp.heap.classOf(slot1);
                         if (cls.isObject()) {
-                            const name_val = cls.asObject().getField(Heap.CLASS_FIELD_NAME, Heap.CLASS_NUM_FIELDS);
+                            const cls_obj = cls.asObject();
+                            const name_val = cls_obj.getField(Heap.CLASS_FIELD_NAME, cls_obj.header.size);
                             if (name_val.isObject() and name_val.asObject().header.class_index == Heap.CLASS_SYMBOL) {
                                 break :blk name_val.asObject().bytes(name_val.asObject().header.size);
                             }
                         }
                         if (slot1.isSmallInt()) break :blk "SmallInteger";
                         if (slot1.isNil()) break :blk "nil";
-                        break :blk "<?>";            
+                        break :blk "<?>";
                     };
                     if (DEBUG_VERBOSE) std.debug.print("DEBUG arrayDo block outer_base={} slot0={s} slot1={s}\n", .{ outer_base, name0, name1 });
                 }
@@ -3999,26 +4009,28 @@ fn primArraySelect(interp: *Interpreter) InterpreterError!Value {
                     const name0 = blk: {
                         const cls = interp.heap.classOf(slot0);
                         if (cls.isObject()) {
-                            const name_val = cls.asObject().getField(Heap.CLASS_FIELD_NAME, Heap.CLASS_NUM_FIELDS);
+                            const cls_obj = cls.asObject();
+                            const name_val = cls_obj.getField(Heap.CLASS_FIELD_NAME, cls_obj.header.size);
                             if (name_val.isObject() and name_val.asObject().header.class_index == Heap.CLASS_SYMBOL) {
                                 break :blk name_val.asObject().bytes(name_val.asObject().header.size);
                             }
                         }
                         if (slot0.isSmallInt()) break :blk "SmallInteger";
                         if (slot0.isNil()) break :blk "nil";
-                        break :blk "<?>";            
+                        break :blk "<?>";
                     };
                     const name1 = blk: {
                         const cls = interp.heap.classOf(slot1);
                         if (cls.isObject()) {
-                            const name_val = cls.asObject().getField(Heap.CLASS_FIELD_NAME, Heap.CLASS_NUM_FIELDS);
+                            const cls_obj = cls.asObject();
+                            const name_val = cls_obj.getField(Heap.CLASS_FIELD_NAME, cls_obj.header.size);
                             if (name_val.isObject() and name_val.asObject().header.class_index == Heap.CLASS_SYMBOL) {
                                 break :blk name_val.asObject().bytes(name_val.asObject().header.size);
                             }
                         }
                         if (slot1.isSmallInt()) break :blk "SmallInteger";
                         if (slot1.isNil()) break :blk "nil";
-                        break :blk "<?>";            
+                        break :blk "<?>";
                     };
                     if (DEBUG_VERBOSE) std.debug.print("DEBUG select block outer_base={} slot0={s} slot1={s}\n", .{ outer_base, name0, name1 });
                 }
@@ -5176,7 +5188,7 @@ fn primDoesNotUnderstand(interp: *Interpreter) InterpreterError!Value {
         const class = interp.heap.getClass(obj.header.class_index);
         if (class.isObject()) {
             const class_obj = class.asObject();
-            const name_val = class_obj.getField(memory.Heap.CLASS_FIELD_NAME, memory.Heap.CLASS_NUM_FIELDS);
+            const name_val = class_obj.getField(memory.Heap.CLASS_FIELD_NAME, class_obj.header.size);
             if (name_val.isObject()) {
                 const name_obj = name_val.asObject();
                 const name_bytes = name_obj.bytes(name_obj.header.size);
@@ -7527,7 +7539,7 @@ fn primClassSelectors(interp: *Interpreter) InterpreterError!Value {
     const class_obj = class.asObject();
 
     // Get method dictionary
-    const method_dict = class_obj.getField(Heap.CLASS_FIELD_METHOD_DICT, Heap.CLASS_NUM_FIELDS);
+    const method_dict = class_obj.getField(Heap.CLASS_FIELD_METHOD_DICT, class_obj.header.size);
     if (method_dict.isNil()) {
         // No methods - return empty array
         return try interp.heap.allocateArray(0);
@@ -7587,7 +7599,8 @@ fn primClassAllSelectors(interp: *Interpreter) InterpreterError!Value {
 
     while (!current.isNil() and current.isObject()) {
         const curr_obj = current.asObject();
-        const method_dict = curr_obj.getField(Heap.CLASS_FIELD_METHOD_DICT, Heap.CLASS_NUM_FIELDS);
+        const curr_size = curr_obj.header.size;
+        const method_dict = curr_obj.getField(Heap.CLASS_FIELD_METHOD_DICT, curr_size);
 
         if (method_dict.isObject()) {
             const dict = method_dict.asObject();
@@ -7602,7 +7615,7 @@ fn primClassAllSelectors(interp: *Interpreter) InterpreterError!Value {
         }
 
         // Move to superclass
-        current = curr_obj.getField(Heap.CLASS_FIELD_SUPERCLASS, Heap.CLASS_NUM_FIELDS);
+        current = curr_obj.getField(Heap.CLASS_FIELD_SUPERCLASS, curr_size);
     }
 
     // Create result array
@@ -7615,7 +7628,8 @@ fn primClassAllSelectors(interp: *Interpreter) InterpreterError!Value {
 
     while (!current.isNil() and current.isObject()) {
         const curr_obj = current.asObject();
-        const method_dict = curr_obj.getField(Heap.CLASS_FIELD_METHOD_DICT, Heap.CLASS_NUM_FIELDS);
+        const curr_size = curr_obj.header.size;
+        const method_dict = curr_obj.getField(Heap.CLASS_FIELD_METHOD_DICT, curr_size);
 
         if (method_dict.isObject()) {
             const dict = method_dict.asObject();
@@ -7631,7 +7645,7 @@ fn primClassAllSelectors(interp: *Interpreter) InterpreterError!Value {
         }
 
         // Move to superclass
-        current = curr_obj.getField(Heap.CLASS_FIELD_SUPERCLASS, Heap.CLASS_NUM_FIELDS);
+        current = curr_obj.getField(Heap.CLASS_FIELD_SUPERCLASS, curr_size);
     }
 
     return result_val;
@@ -7646,7 +7660,7 @@ fn primClassSuperclass(interp: *Interpreter) InterpreterError!Value {
     }
 
     const class_obj = class.asObject();
-    return class_obj.getField(Heap.CLASS_FIELD_SUPERCLASS, Heap.CLASS_NUM_FIELDS);
+    return class_obj.getField(Heap.CLASS_FIELD_SUPERCLASS, class_obj.header.size);
 }
 
 fn primClassName(interp: *Interpreter) InterpreterError!Value {
@@ -7658,7 +7672,7 @@ fn primClassName(interp: *Interpreter) InterpreterError!Value {
     }
 
     const class_obj = class.asObject();
-    return class_obj.getField(Heap.CLASS_FIELD_NAME, Heap.CLASS_NUM_FIELDS);
+    return class_obj.getField(Heap.CLASS_FIELD_NAME, class_obj.header.size);
 }
 
 fn primClassInstSize(interp: *Interpreter) InterpreterError!Value {
@@ -7670,7 +7684,7 @@ fn primClassInstSize(interp: *Interpreter) InterpreterError!Value {
     }
 
     const class_obj = class_val.asObject();
-    const format_val = class_obj.getField(Heap.CLASS_FIELD_FORMAT, Heap.CLASS_NUM_FIELDS);
+    const format_val = class_obj.getField(Heap.CLASS_FIELD_FORMAT, class_obj.header.size);
     if (!format_val.isSmallInt()) {
         try interp.push(class_val);
         return InterpreterError.PrimitiveFailed;
@@ -7802,7 +7816,7 @@ fn primIsKindOf(interp: *Interpreter) InterpreterError!Value {
 
         if (current_class.isObject()) {
             const class_obj = current_class.asObject();
-            current_class = class_obj.getField(Heap.CLASS_FIELD_SUPERCLASS, Heap.CLASS_NUM_FIELDS);
+            current_class = class_obj.getField(Heap.CLASS_FIELD_SUPERCLASS, class_obj.header.size);
         } else {
             break;
         }
@@ -7823,7 +7837,8 @@ fn primInheritsFrom(interp: *Interpreter) InterpreterError!Value {
     }
 
     // Start from superclass, not receiver itself
-    var current_class = receiver.asObject().getField(Heap.CLASS_FIELD_SUPERCLASS, Heap.CLASS_NUM_FIELDS);
+    const recv_obj = receiver.asObject();
+    var current_class = recv_obj.getField(Heap.CLASS_FIELD_SUPERCLASS, recv_obj.header.size);
 
     while (!current_class.isNil()) {
         if (current_class.eql(a_class)) {
@@ -7832,7 +7847,7 @@ fn primInheritsFrom(interp: *Interpreter) InterpreterError!Value {
 
         if (current_class.isObject()) {
             const class_obj = current_class.asObject();
-            current_class = class_obj.getField(Heap.CLASS_FIELD_SUPERCLASS, Heap.CLASS_NUM_FIELDS);
+            current_class = class_obj.getField(Heap.CLASS_FIELD_SUPERCLASS, class_obj.header.size);
         } else {
             break;
         }
@@ -7884,7 +7899,8 @@ fn primAsUtf8String(interp: *Interpreter) InterpreterError!Value {
     while (!current_class.isNil()) {
         if (current_class.isObject()) {
             const class_obj = current_class.asObject();
-            const name_val = class_obj.getField(Heap.CLASS_FIELD_NAME, Heap.CLASS_NUM_FIELDS);
+            const class_size = class_obj.header.size;
+            const name_val = class_obj.getField(Heap.CLASS_FIELD_NAME, class_size);
             if (name_val.isObject()) {
                 const name_obj = name_val.asObject();
                 if (name_obj.header.class_index == Heap.CLASS_SYMBOL) {
@@ -7897,7 +7913,7 @@ fn primAsUtf8String(interp: *Interpreter) InterpreterError!Value {
                     }
                 }
             }
-            current_class = class_obj.getField(Heap.CLASS_FIELD_SUPERCLASS, Heap.CLASS_NUM_FIELDS);
+            current_class = class_obj.getField(Heap.CLASS_FIELD_SUPERCLASS, class_size);
         } else {
             break;
         }
@@ -9910,6 +9926,7 @@ fn primSubclassCreate(interp: *Interpreter) InterpreterError!Value {
         "", // class_inst_var_names
         .normal, // class_format
         null, // existing_class
+        "Unpackaged", // category
     ) catch {
         try interp.push(superclass_val);
         try interp.push(name_val);
@@ -10022,4 +10039,127 @@ fn primUIIsRunning(interp: *Interpreter) InterpreterError!Value {
     } else {
         return Value.@"false";
     }
+}
+
+// ============================================================================
+// Image/Session Primitives (Dolphin compatibility)
+// ============================================================================
+
+/// Primitive 930: SessionManager >> imagePath
+/// Returns the full path to the image without extension.
+/// Like Dolphin's SessionManager >> imagePath
+fn primImagePath(interp: *Interpreter) InterpreterError!Value {
+    _ = try interp.pop(); // receiver
+
+    const heap = interp.heap;
+    if (heap.image_path) |path| {
+        // Return path without extension
+        const without_ext = removeExtension(path);
+        const str = heap.allocateString(without_ext) catch return InterpreterError.PrimitiveFailed;
+        return str;
+    } else {
+        // Default path
+        const str = heap.allocateString("smalltalk") catch return InterpreterError.PrimitiveFailed;
+        return str;
+    }
+}
+
+/// Primitive 931: SessionManager >> imageFileName
+/// Returns the full path to the image with extension.
+/// Like Dolphin's SessionManager >> imageFileName
+fn primImageFileName(interp: *Interpreter) InterpreterError!Value {
+    _ = try interp.pop(); // receiver
+
+    const heap = interp.heap;
+    if (heap.image_path) |path| {
+        const str = heap.allocateString(path) catch return InterpreterError.PrimitiveFailed;
+        return str;
+    } else {
+        // Default filename
+        const str = heap.allocateString("smalltalk.image") catch return InterpreterError.PrimitiveFailed;
+        return str;
+    }
+}
+
+/// Primitive 932: SessionManager >> imageDirectory
+/// Returns the directory containing the image.
+fn primImageDirectory(interp: *Interpreter) InterpreterError!Value {
+    _ = try interp.pop(); // receiver
+
+    const heap = interp.heap;
+    if (heap.image_path) |path| {
+        const dir = getDirectory(path);
+        const str = heap.allocateString(dir) catch return InterpreterError.PrimitiveFailed;
+        return str;
+    } else {
+        // Default to current directory
+        const str = heap.allocateString(".") catch return InterpreterError.PrimitiveFailed;
+        return str;
+    }
+}
+
+/// Primitive 933: SessionManager >> imagePath: aString
+/// Sets the image path. Used when saving to a new location.
+fn primImagePathSet(interp: *Interpreter) InterpreterError!Value {
+    const path_val = try interp.pop();
+    _ = try interp.pop(); // receiver
+
+    if (!path_val.isObject()) return InterpreterError.PrimitiveFailed;
+
+    const path_obj = path_val.asObject();
+    if (path_obj.header.class_index != Heap.CLASS_STRING and
+        path_obj.header.class_index != Heap.CLASS_SYMBOL)
+    {
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    const path_str = path_obj.bytes(path_obj.header.size);
+
+    // Duplicate the string so we own it
+    const heap = interp.heap;
+    const new_path = heap.allocator.dupe(u8, path_str) catch return InterpreterError.PrimitiveFailed;
+
+    // Free old path if we had one
+    if (heap.image_path) |old_path| {
+        heap.allocator.free(old_path);
+    }
+
+    heap.image_path = new_path;
+    return path_val; // Return the argument
+}
+
+// Helper: remove file extension from path
+fn removeExtension(path: []const u8) []const u8 {
+    // Find last dot
+    var last_dot: ?usize = null;
+    var last_sep: usize = 0;
+
+    for (path, 0..) |c, i| {
+        if (c == '.') last_dot = i;
+        if (c == '/' or c == '\\') last_sep = i + 1;
+    }
+
+    if (last_dot) |dot| {
+        // Make sure dot is after last separator (not part of directory name)
+        if (dot > last_sep) {
+            return path[0..dot];
+        }
+    }
+    return path;
+}
+
+// Helper: get directory from path
+fn getDirectory(path: []const u8) []const u8 {
+    // Find last separator
+    var last_sep: ?usize = null;
+
+    for (path, 0..) |c, i| {
+        if (c == '/' or c == '\\') last_sep = i;
+    }
+
+    if (last_sep) |sep| {
+        if (sep == 0) return "/";
+        return path[0..sep];
+    }
+    return ".";
 }

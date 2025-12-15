@@ -302,12 +302,31 @@ pub fn main() !void {
     while (arg_index < args.len) : (arg_index += 1) {
         if (std.mem.eql(u8, args[arg_index], "--image") and arg_index + 1 < args.len) {
             const img_path = args[arg_index + 1];
-            heap = snapshot.loadFromFile(allocator, img_path) catch {
-                std.debug.print("Failed to load image {s}, falling back to bootstrap\n", .{img_path});
+            std.debug.print("Loading image from: {s}\n", .{img_path});
+            // Check if file exists first
+            const cwd = std.fs.cwd();
+            std.debug.print("Current working directory: ", .{});
+            if (cwd.realpathAlloc(allocator, ".")) |real_cwd| {
+                std.debug.print("{s}\n", .{real_cwd});
+                allocator.free(real_cwd);
+            } else |_| {
+                std.debug.print("(unknown)\n", .{});
+            }
+            // Try to stat the file to see if it exists
+            if (cwd.statFile(img_path)) |stat| {
+                std.debug.print("File exists, size: {d} bytes\n", .{stat.size});
+            } else |err| {
+                std.debug.print("File stat error: {any}\n", .{err});
+            }
+            heap = snapshot.loadFromFile(allocator, img_path) catch |err| {
+                std.debug.print("Failed to load image {s}: {any}, falling back to bootstrap\n", .{ img_path, err });
                 loaded_from_image = false;
                 break;
             };
             loaded_from_image = true;
+            // Set the image path for SessionManager >> imagePath
+            heap.image_path = allocator.dupe(u8, img_path) catch null;
+            std.debug.print("Image loaded successfully, heap.image_path set to: {s}\n", .{heap.image_path orelse "null"});
             arg_index += 1; // skip path
         } else if (std.mem.eql(u8, args[arg_index], "--load-order") and arg_index + 1 < args.len) {
             load_order_path = args[arg_index + 1];

@@ -337,6 +337,47 @@ pub fn bootstrap(heap: *Heap) !void {
     try setClassName(heap, sequenceable_collection_class, "SequenceableCollection");
     try setClassName(heap, arrayed_collection_class, "ArrayedCollection");
 
+    // Phase 3b: Set class categories (packages)
+    // All built-in classes go into "Kernel" package
+    try setClassCategory(heap, object_class, "Kernel");
+    try setClassCategory(heap, class_class, "Kernel");
+    try setClassCategory(heap, metaclass_class, "Kernel");
+    try setClassCategory(heap, behavior_class, "Kernel");
+    try setClassCategory(heap, class_desc_class, "Kernel");
+    try setClassCategory(heap, small_int_class, "Kernel");
+    try setClassCategory(heap, string_class, "Kernel");
+    try setClassCategory(heap, symbol_class, "Kernel");
+    try setClassCategory(heap, array_class, "Collections");
+    try setClassCategory(heap, byte_array_class, "Collections");
+    try setClassCategory(heap, compiled_method_class, "Kernel");
+    try setClassCategory(heap, block_closure_class, "Kernel");
+    try setClassCategory(heap, undefined_object_class, "Kernel");
+    try setClassCategory(heap, true_class, "Kernel");
+    try setClassCategory(heap, false_class, "Kernel");
+    try setClassCategory(heap, character_class, "Kernel");
+    try setClassCategory(heap, interval_class, "Collections");
+    try setClassCategory(heap, float_class, "Kernel");
+    try setClassCategory(heap, exception_class, "Exceptions");
+    try setClassCategory(heap, error_class, "Exceptions");
+    try setClassCategory(heap, message_class, "Kernel");
+    try setClassCategory(heap, dictionary_class, "Collections");
+    try setClassCategory(heap, set_class, "Collections");
+    try setClassCategory(heap, ordered_collection_class, "Collections");
+    try setClassCategory(heap, read_stream_class, "Streams");
+    try setClassCategory(heap, write_stream_class, "Streams");
+    try setClassCategory(heap, file_stream_class, "Streams");
+    try setClassCategory(heap, deaf_object_class, "Kernel");
+    try setClassCategory(heap, transcript_shell_class, "Kernel");
+    try setClassCategory(heap, association_class, "Collections");
+    try setClassCategory(heap, pool_dictionary_class, "Kernel");
+    try setClassCategory(heap, magnitude_class, "Kernel");
+    try setClassCategory(heap, number_class, "Kernel");
+    try setClassCategory(heap, integer_class, "Kernel");
+    try setClassCategory(heap, boolean_class, "Kernel");
+    try setClassCategory(heap, collection_class, "Collections");
+    try setClassCategory(heap, sequenceable_collection_class, "Collections");
+    try setClassCategory(heap, arrayed_collection_class, "Collections");
+
     // Phase 4: Set class formats (number of instance variables, format type)
 
     // Object has no instance variables
@@ -663,6 +704,11 @@ fn setClassName(heap: *Heap, class: *Object, name: []const u8) !void {
     class.setField(Heap.CLASS_FIELD_NAME, sym, Heap.CLASS_NUM_FIELDS);
 }
 
+fn setClassCategory(heap: *Heap, class: *Object, category: []const u8) !void {
+    const sym = try heap.internSymbol(category);
+    class.setField(Heap.CLASS_FIELD_CATEGORY, sym, Heap.CLASS_NUM_FIELDS);
+}
+
 fn setClassFormat(class: *Object, num_inst_vars: i61, format: ClassFormat) void {
     const format_val = Heap.encodeInstanceSpec(@intCast(num_inst_vars), format);
     class.setField(Heap.CLASS_FIELD_FORMAT, Value.fromSmallInt(format_val), Heap.CLASS_NUM_FIELDS);
@@ -679,41 +725,66 @@ fn createMethodDict(heap: *Heap, capacity: usize) !*Object {
     return try heap.allocateObject(Heap.CLASS_ARRAY, capacity * 2, .variable);
 }
 
+/// Hash-based method dictionary insertion
+/// Uses linear probing with the same hash function as lookup
+fn insertIntoMethodDict(dict_obj: *Object, selector_sym: Value, method_val: Value) bool {
+    const dict_size = dict_obj.header.size;
+    if (dict_size < 2) return false;
+
+    const num_slots = dict_size / 2;
+    if (num_slots == 0) return false;
+
+    const fields = dict_obj.fields(dict_size);
+
+    // Hash from selector bits - must match lookup!
+    const hash = selector_sym.bits *% 2654435761; // Knuth's multiplicative hash
+    var index = @as(usize, @intCast(hash)) % num_slots;
+
+    // Linear probe to find empty slot or existing key
+    var probes: usize = 0;
+    while (probes < num_slots) : (probes += 1) {
+        const slot_base = index * 2;
+
+        // Empty slot - insert here
+        if (fields[slot_base].isNil()) {
+            fields[slot_base] = selector_sym;
+            fields[slot_base + 1] = method_val;
+            return true;
+        }
+
+        // Existing key - update
+        if (fields[slot_base].bits == selector_sym.bits) {
+            fields[slot_base + 1] = method_val;
+            return true;
+        }
+
+        // Linear probe
+        index = (index + 1) % num_slots;
+    }
+
+    return false; // Dictionary full
+}
+
 /// Install a method in a class's method dictionary
 pub fn installMethod(heap: *Heap, class: *Object, selector: []const u8, method: *object.CompiledMethod) !void {
     // Get or create method dictionary
     var method_dict = class.getField(Heap.CLASS_FIELD_METHOD_DICT, Heap.CLASS_NUM_FIELDS);
 
     if (method_dict.isNil()) {
-        // Create a new method dictionary
-        const dict = try createMethodDict(heap, 64); // Increased capacity
+        // Create a new method dictionary (must be larger than needed for hash efficiency)
+        const dict = try createMethodDict(heap, 128); // ~50% load factor for 64 methods
         method_dict = Value.fromObject(dict);
         class.setField(Heap.CLASS_FIELD_METHOD_DICT, method_dict, Heap.CLASS_NUM_FIELDS);
     }
 
     const dict_obj = method_dict.asObject();
     const selector_sym = try heap.internSymbol(selector);
+    const method_val = Value.fromObject(@ptrCast(@alignCast(method)));
 
-    // Find first empty slot - use actual dict size
-    const max_entries: usize = dict_obj.header.size;
-    const fields = dict_obj.fields(max_entries);
-
-    var i: usize = 0;
-    while (i < max_entries) : (i += 2) {
-        if (fields[i].isNil()) {
-            // Found empty slot
-            fields[i] = selector_sym;
-            fields[i + 1] = Value.fromObject(@ptrCast(@alignCast(method)));
-            return;
-        }
-        // Check if selector already exists (update)
-        if (fields[i].eql(selector_sym)) {
-            fields[i + 1] = Value.fromObject(@ptrCast(@alignCast(method)));
-            return;
-        }
+    if (!insertIntoMethodDict(dict_obj, selector_sym, method_val)) {
+        // Dictionary full - shouldn't happen with reasonable capacity
+        return error.MethodDictFull;
     }
-
-    // Dictionary full - shouldn't happen with reasonable capacity
 }
 
 /// Install a class-side method in a metaclass's method dictionary
@@ -730,30 +801,18 @@ pub fn installClassMethod(heap: *Heap, class: *Object, selector: []const u8, met
     var method_dict = metaclass.getField(Heap.CLASS_FIELD_METHOD_DICT, Heap.METACLASS_NUM_FIELDS);
 
     if (method_dict.isNil()) {
-        // Create a new method dictionary
-        const dict = try createMethodDict(heap, 32); // Smaller capacity for class methods
+        // Create a new method dictionary (larger for hash efficiency)
+        const dict = try createMethodDict(heap, 64); // ~50% load factor for 32 methods
         method_dict = Value.fromObject(dict);
         metaclass.setField(Heap.CLASS_FIELD_METHOD_DICT, method_dict, Heap.METACLASS_NUM_FIELDS);
     }
 
     const dict_obj = method_dict.asObject();
     const selector_sym = try heap.internSymbol(selector);
+    const method_val = Value.fromObject(@ptrCast(@alignCast(method)));
 
-    // Find first empty slot
-    const max_entries: usize = dict_obj.header.size;
-    const fields = dict_obj.fields(max_entries);
-
-    var i: usize = 0;
-    while (i < max_entries) : (i += 2) {
-        if (fields[i].isNil()) {
-            fields[i] = selector_sym;
-            fields[i + 1] = Value.fromObject(@ptrCast(@alignCast(method)));
-            return;
-        }
-        if (fields[i].eql(selector_sym)) {
-            fields[i + 1] = Value.fromObject(@ptrCast(@alignCast(method)));
-            return;
-        }
+    if (!insertIntoMethodDict(dict_obj, selector_sym, method_val)) {
+        return error.MethodDictFull;
     }
 }
 

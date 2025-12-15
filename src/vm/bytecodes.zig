@@ -664,5 +664,11 @@ pub const Primitive = enum(u16) {
     ui_process_iteration = 920, // UIProcess >> processOneIteration
     ui_is_running = 921, // UIProcess >> isRunning
 
+    // Image/Session primitives (Dolphin compatibility)
+    image_path = 930, // SessionManager >> imagePath - full path without extension
+    image_file_name = 931, // SessionManager >> imageFileName - full path with extension
+    image_directory = 932, // SessionManager >> imageDirectory - directory only
+    image_path_set = 933, // SessionManager >> imagePath: aString - set the image path
+
     _,
 };

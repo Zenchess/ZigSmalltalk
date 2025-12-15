@@ -14,6 +14,7 @@ pub const StatusItem = struct {
 pub const StatusBar = struct {
     state: widget.WidgetState,
     message: []const u8 = "",
+    message_buf: [256]u8 = undefined, // Internal buffer to copy messages
     items: []const StatusItem = &[_]StatusItem{},
 
     pub fn init(rect: Rect) StatusBar {
@@ -23,7 +24,14 @@ pub const StatusBar = struct {
     }
 
     pub fn setMessage(self: *StatusBar, msg: []const u8) void {
-        self.message = msg;
+        // Copy the message into our internal buffer so it persists
+        const len = @min(msg.len, self.message_buf.len);
+        @memcpy(self.message_buf[0..len], msg[0..len]);
+        self.message = self.message_buf[0..len];
+    }
+
+    pub fn clearMessage(self: *StatusBar) void {
+        self.message = "";
     }
 
     pub fn setItems(self: *StatusBar, items: []const StatusItem) void {

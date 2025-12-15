@@ -145,7 +145,8 @@ pub const App = struct {
         var package_registry = PackageRegistry.init(allocator);
         try package_registry.initSystemPackages();
 
-        // Add all packages to browser
+        // Add "All" option first, then all packages to browser
+        try browser.addPackage("All");
         for (package_registry.packages.items) |pkg| {
             try browser.addPackage(pkg.name);
         }
@@ -189,7 +190,7 @@ pub const App = struct {
         try app.transcript.addLine("  F1 - Transcript    F2 - Workspace    F3 - Browser    F4 - FFI Config", .normal);
         try app.transcript.addLine("", .normal);
         try app.transcript.addLine("Global Shortcuts:", .normal);
-        try app.transcript.addLine("  Ctrl+Shift+S - Save Image    F12 - Save Image As    Ctrl+Q - Quit", .normal);
+        try app.transcript.addLine("  F9 - Save Image    F12 - Save Image As    Ctrl+Q - Quit", .normal);
         try app.transcript.addLine("", .normal);
         try app.transcript.addLine("Workspace: Ctrl+D execute | Ctrl+P print | Ctrl+I inspect", .normal);
         try app.transcript.addLine("Browser:   Ctrl+S save | Ctrl+E export pkg | Ctrl+N new pkg | Ctrl+A new class", .normal);
@@ -438,8 +439,14 @@ pub const App = struct {
                 self.updateFocus();
                 return;
             },
-            .ctrl_shift_s => {
-                self.saveImage("smalltalk.image");
+            .ctrl_shift_s, .f9 => {
+                // F9 for Save Image (F11 gets captured by terminal for fullscreen)
+                // Copy path to local buffer to avoid issues with heap.image_path being modified
+                var path_buf: [256]u8 = undefined;
+                const src_path = self.heap.image_path orelse "smalltalk.image";
+                const len = @min(src_path.len, path_buf.len);
+                @memcpy(path_buf[0..len], src_path[0..len]);
+                self.saveImage(path_buf[0..len]);
                 return;
             },
             .f12 => {
@@ -743,8 +750,11 @@ pub const App = struct {
             // Verify class object is valid
             if (class_obj.header.class_index == 0) continue;
 
+            // Use actual object size for field access (old classes may have fewer fields)
+            const actual_fields = class_obj.header.size;
+
             // Get class name
-            const name_val = class_obj.getField(Heap.CLASS_FIELD_NAME, Heap.CLASS_NUM_FIELDS);
+            const name_val = class_obj.getField(Heap.CLASS_FIELD_NAME, actual_fields);
             if (name_val.isNil() or !name_val.isObject()) continue;
 
             const name_obj = name_val.asObject();
@@ -757,13 +767,14 @@ pub const App = struct {
             if (name.len == 0) continue;
 
             // Get superclass to determine hierarchy
-            const super_val = class_obj.getField(Heap.CLASS_FIELD_SUPERCLASS, Heap.CLASS_NUM_FIELDS);
+            const super_val = class_obj.getField(Heap.CLASS_FIELD_SUPERCLASS, actual_fields);
             var parent_name: ?[]const u8 = null;
 
             if (!super_val.isNil() and super_val.isObject()) {
                 const super_obj = super_val.asObject();
                 if (super_obj.header.class_index != 0) {
-                    const super_name_val = super_obj.getField(Heap.CLASS_FIELD_NAME, Heap.CLASS_NUM_FIELDS);
+                    const super_num_fields = super_obj.header.size;
+                    const super_name_val = super_obj.getField(Heap.CLASS_FIELD_NAME, super_num_fields);
                     if (!super_name_val.isNil() and super_name_val.isObject()) {
                         const super_name_obj = super_name_val.asObject();
                         if (super_name_obj.header.class_index == Heap.CLASS_SYMBOL) {
@@ -778,12 +789,51 @@ pub const App = struct {
 
             self.browser.addClass(name, parent_name) catch {};
 
-            // Auto-categorize into appropriate package
-            self.package_registry.categorizeClass(name) catch {};
+            // Get category from class object (stored in the image)
+            // Check if class has the category field (old images may have fewer fields)
+            var category_name: []const u8 = "Unpackaged";
+
+            if (actual_fields > Heap.CLASS_FIELD_CATEGORY) {
+                const category_val = class_obj.getField(Heap.CLASS_FIELD_CATEGORY, actual_fields);
+                if (!category_val.isNil() and category_val.isObject()) {
+                    const category_obj = category_val.asObject();
+                    if (category_obj.header.class_index == Heap.CLASS_SYMBOL) {
+                        const cat_size = category_obj.header.size;
+                        if (cat_size > 0 and cat_size < 256) {
+                            category_name = category_obj.bytes(cat_size);
+                        }
+                    }
+                }
+            }
+
+            // Add class to the package from its category field
+            self.package_registry.addClassToPackage(category_name, name) catch {};
         }
+
+        // Sync any new packages from class categories to the browser's package list
+        self.syncPackagesToBrowser();
 
         // Add FFI libraries to the browser
         self.loadFFILibraries();
+    }
+
+    /// Sync packages from the registry to the browser's package list
+    /// This ensures user packages created from class categories show up
+    fn syncPackagesToBrowser(self: *App) void {
+        for (self.package_registry.packages.items) |pkg| {
+            // Check if package is already in browser's package list
+            var found = false;
+            for (self.browser.package_list.items.items) |item| {
+                if (std.mem.eql(u8, item.text, pkg.name)) {
+                    found = true;
+                    break;
+                }
+            }
+            // Add if not found
+            if (!found) {
+                self.browser.addPackage(pkg.name) catch {};
+            }
+        }
     }
 
     fn loadFFILibraries(self: *App) void {
@@ -793,9 +843,14 @@ pub const App = struct {
         // Add a root node for FFI libraries
         self.browser.addClass("FFI Libraries", null) catch return;
 
+        // Add "FFI Libraries" to the FFI package
+        self.package_registry.addClassToPackage("FFI", "FFI Libraries") catch {};
+
         // Add each FFI library as a child
         for (ffi_autogen.available_libraries) |lib_name| {
             self.browser.addClass(lib_name, "FFI Libraries") catch {};
+            // Add each library to the FFI package
+            self.package_registry.addClassToPackage("FFI", lib_name) catch {};
         }
 
         // Expand the FFI Libraries node so children are visible
@@ -823,28 +878,54 @@ pub const App = struct {
 
         // Save the snapshot
         snapshot.saveToFile(self.heap, self.allocator, path) catch |err| {
-            // Show error in transcript
+            // Show error in transcript with the path for debugging
+            var err_buf: [256]u8 = undefined;
             const err_msg = switch (err) {
-                snapshot.SnapshotError.IoError => "I/O error saving image",
+                snapshot.SnapshotError.IoError => std.fmt.bufPrint(&err_buf, "I/O error saving to: {s}", .{path}) catch "I/O error saving image",
                 snapshot.SnapshotError.OutOfMemory => "Out of memory saving image",
                 else => "Error saving image",
             };
             self.transcript.addError(err_msg) catch {};
+            self.statusbar.setMessage(err_msg);
             return;
         };
 
-        // Show success message
+        // Update the heap's image_path so SessionManager >> imagePath works
+        // Only update if the path is different from the current one
+        const should_update = if (self.heap.image_path) |current|
+            !std.mem.eql(u8, current, path)
+        else
+            true;
+
+        if (should_update) {
+            const new_path = self.allocator.dupe(u8, path) catch null;
+            if (new_path) |np| {
+                if (self.heap.image_path) |old_path| {
+                    self.allocator.free(old_path);
+                }
+                self.heap.image_path = np;
+            }
+        }
+
+        // Show success message in both transcript and status bar
         var msg_buf: [256]u8 = undefined;
         const msg = std.fmt.bufPrint(&msg_buf, "Image saved to {s}", .{path}) catch "Image saved";
         self.transcript.addSuccess(msg) catch {};
+        self.statusbar.setMessage(msg);
     }
 
     fn showSaveAsDialog(self: *App) void {
         self.show_save_as_dialog = true;
-        // Pre-fill with default filename
-        const default = "smalltalk.image";
-        @memcpy(self.save_as_filename[0..default.len], default);
-        self.save_as_filename_len = default.len;
+        // Pre-fill with current image path or default
+        if (self.heap.image_path) |path| {
+            const len = @min(path.len, self.save_as_filename.len);
+            @memcpy(self.save_as_filename[0..len], path[0..len]);
+            self.save_as_filename_len = len;
+        } else {
+            const default = "smalltalk.image";
+            @memcpy(self.save_as_filename[0..default.len], default);
+            self.save_as_filename_len = default.len;
+        }
     }
 
     fn handleSaveAsDialogKey(self: *App, key: Key) void {
@@ -1027,7 +1108,8 @@ pub const App = struct {
                 var class_name: []const u8 = "Object";
                 if (class.isObject()) {
                     const class_obj = class.asObject();
-                    const name_val = class_obj.getField(Heap.CLASS_FIELD_NAME, Heap.CLASS_NUM_FIELDS);
+                    const class_num_fields = class_obj.header.size;
+                    const name_val = class_obj.getField(Heap.CLASS_FIELD_NAME, class_num_fields);
                     if (name_val.isObject()) {
                         const name_obj = name_val.asObject();
                         if (name_obj.header.class_index == Heap.CLASS_SYMBOL) {
@@ -1067,22 +1149,35 @@ pub const App = struct {
         if (!class_val.isObject()) return;
 
         const class_obj = class_val.asObject();
+        const num_fields = class_obj.header.size;
 
         // Load instance methods
         var instance_methods: std.ArrayList([]const u8) = .empty;
         defer instance_methods.deinit(self.allocator);
         self.collectMethodsFromDict(class_obj, &instance_methods);
+        // Sort alphabetically
+        std.mem.sort([]const u8, instance_methods.items, {}, struct {
+            fn lessThan(_: void, a: []const u8, b: []const u8) bool {
+                return std.mem.order(u8, a, b) == .lt;
+            }
+        }.lessThan);
         self.browser.setInstanceMethods(instance_methods.items) catch {};
 
         // Load class methods from metaclass
         var class_methods: std.ArrayList([]const u8) = .empty;
         defer class_methods.deinit(self.allocator);
 
-        const metaclass_val = class_obj.getField(Heap.CLASS_FIELD_METACLASS, Heap.CLASS_NUM_FIELDS);
+        const metaclass_val = class_obj.getField(Heap.CLASS_FIELD_METACLASS, num_fields);
         if (!metaclass_val.isNil() and metaclass_val.isObject()) {
             const metaclass_obj = metaclass_val.asObject();
             self.collectMethodsFromDict(metaclass_obj, &class_methods);
         }
+        // Sort alphabetically
+        std.mem.sort([]const u8, class_methods.items, {}, struct {
+            fn lessThan(_: void, a: []const u8, b: []const u8) bool {
+                return std.mem.order(u8, a, b) == .lt;
+            }
+        }.lessThan);
         self.browser.setClassMethods(class_methods.items) catch {};
 
         // Show class definition in source pane (editable)
@@ -1093,12 +1188,16 @@ pub const App = struct {
         // Build class definition string
         var def_buf: [1024]u8 = undefined;
 
+        // Use actual object size for field access
+        const num_fields = class_obj.header.size;
+
         // Get superclass name
-        const superclass_val = class_obj.getField(Heap.CLASS_FIELD_SUPERCLASS, Heap.CLASS_NUM_FIELDS);
+        const superclass_val = class_obj.getField(Heap.CLASS_FIELD_SUPERCLASS, num_fields);
         var super_name: []const u8 = "nil";
         if (!superclass_val.isNil() and superclass_val.isObject()) {
             const super_obj = superclass_val.asObject();
-            const name_val = super_obj.getField(Heap.CLASS_FIELD_NAME, Heap.CLASS_NUM_FIELDS);
+            const super_num_fields = super_obj.header.size;
+            const name_val = super_obj.getField(Heap.CLASS_FIELD_NAME, super_num_fields);
             if (!name_val.isNil() and name_val.isObject()) {
                 const name_obj = name_val.asObject();
                 if (name_obj.header.class_index == Heap.CLASS_SYMBOL or name_obj.header.class_index == Heap.CLASS_STRING) {
@@ -1114,7 +1213,7 @@ pub const App = struct {
         // INST_VARS can be either a String or an Array of Symbols
         var inst_var_buf: [512]u8 = undefined;
         var inst_var_names: []const u8 = "";
-        const inst_vars_val = class_obj.getField(Heap.CLASS_FIELD_INST_VARS, Heap.CLASS_NUM_FIELDS);
+        const inst_vars_val = class_obj.getField(Heap.CLASS_FIELD_INST_VARS, num_fields);
         if (!inst_vars_val.isNil() and inst_vars_val.isObject()) {
             const inst_vars_obj = inst_vars_val.asObject();
             const class_idx = inst_vars_obj.header.class_index;
@@ -1219,7 +1318,8 @@ pub const App = struct {
 
     fn collectMethodsFromDict(self: *App, class_obj: *@import("../vm/object.zig").Object, methods: *std.ArrayList([]const u8)) void {
         const CompiledMethod = @import("../vm/object.zig").CompiledMethod;
-        const method_dict_val = class_obj.getField(Heap.CLASS_FIELD_METHOD_DICT, Heap.CLASS_NUM_FIELDS);
+        const num_fields = class_obj.header.size;
+        const method_dict_val = class_obj.getField(Heap.CLASS_FIELD_METHOD_DICT, num_fields);
         if (method_dict_val.isNil()) return;
         if (!method_dict_val.isObject()) return;
 
@@ -1284,18 +1384,20 @@ pub const App = struct {
         if (!class_val.isObject()) return;
 
         var class_obj = class_val.asObject();
+        var obj_num_fields = class_obj.header.size;
 
         // If looking for class-side method, use metaclass
         if (class_side) {
-            const metaclass_val = class_obj.getField(Heap.CLASS_FIELD_METACLASS, Heap.CLASS_NUM_FIELDS);
+            const metaclass_val = class_obj.getField(Heap.CLASS_FIELD_METACLASS, obj_num_fields);
             if (metaclass_val.isNil() or !metaclass_val.isObject()) {
                 self.browser.setSource("\"No metaclass\"") catch {};
                 return;
             }
             class_obj = metaclass_val.asObject();
+            obj_num_fields = class_obj.header.size;
         }
 
-        const method_dict_val = class_obj.getField(Heap.CLASS_FIELD_METHOD_DICT, Heap.CLASS_NUM_FIELDS);
+        const method_dict_val = class_obj.getField(Heap.CLASS_FIELD_METHOD_DICT, obj_num_fields);
         if (method_dict_val.isNil() or !method_dict_val.isObject()) {
             self.browser.setSource("\"No methods\"") catch {};
             return;
@@ -1402,12 +1504,14 @@ pub const App = struct {
         if (!class_val.isObject()) return error.ClassNotFound;
 
         var target_class = class_val.asObject();
+        var target_num_fields = target_class.header.size;
 
         // If class-side, use metaclass
         if (class_side) {
-            const metaclass_val = target_class.getField(Heap.CLASS_FIELD_METACLASS, Heap.CLASS_NUM_FIELDS);
+            const metaclass_val = target_class.getField(Heap.CLASS_FIELD_METACLASS, target_num_fields);
             if (metaclass_val.isNil() or !metaclass_val.isObject()) return error.NoMetaclass;
             target_class = metaclass_val.asObject();
+            target_num_fields = target_class.header.size;
         }
 
         // Extract selector from source
@@ -1426,7 +1530,8 @@ pub const App = struct {
         var walk_class = class_val;
         while (walk_class.isObject()) {
             const walk_obj = walk_class.asObject();
-            const inst_vars = walk_obj.getField(Heap.CLASS_FIELD_INST_VARS, Heap.CLASS_NUM_FIELDS);
+            const walk_num_fields = walk_obj.header.size;
+            const inst_vars = walk_obj.getField(Heap.CLASS_FIELD_INST_VARS, walk_num_fields);
             if (inst_vars.isObject()) {
                 const vars_array = inst_vars.asObject();
                 const vars_size = vars_array.header.size;
@@ -1443,7 +1548,7 @@ pub const App = struct {
                     }
                 }
             }
-            walk_class = walk_obj.getField(Heap.CLASS_FIELD_SUPERCLASS, Heap.CLASS_NUM_FIELDS);
+            walk_class = walk_obj.getField(Heap.CLASS_FIELD_SUPERCLASS, walk_num_fields);
         }
         gen.instance_variables = inst_var_list.items;
 
@@ -1746,6 +1851,12 @@ fn browserCreateClass(browser: *BrowserTab, class_name: []const u8, superclass_n
     const Object = @import("../vm/object.zig").Object;
     const superclass_obj: ?*Object = if (superclass_value.isObject()) superclass_value.asObject() else null;
 
+    // Determine the package/category for the new class
+    const pkg_name = if (browser.selected_package_name.len > 0 and !std.mem.eql(u8, browser.selected_package_name, "All"))
+        browser.selected_package_name
+    else
+        "Unpackaged";
+
     // Create the class using filein's createDynamicClass
     const new_class = filein.createDynamicClass(
         app.heap,
@@ -1757,6 +1868,7 @@ fn browserCreateClass(browser: *BrowserTab, class_name: []const u8, superclass_n
         "", // class_inst_var_names
         .normal, // class_format
         null, // existing_class
+        pkg_name, // category (package name)
     ) catch |err| {
         var buf: [128]u8 = undefined;
         const msg = std.fmt.bufPrint(&buf, "Error creating class: {s}", .{@errorName(err)}) catch "Error creating class";
@@ -1775,8 +1887,16 @@ fn browserCreateClass(browser: *BrowserTab, class_name: []const u8, superclass_n
     // Update browser class tree
     app.browser.addClass(class_name, if (superclass_name.len > 0) superclass_name else null) catch {};
 
+    // Add to TUI package registry (for UI display)
+    app.package_registry.addClassToPackage(pkg_name, class_name) catch {};
+
+    // Refresh the class filter to show the new class
+    if (app.package_registry.getPackage(pkg_name)) |package| {
+        browser.filterClassesByNames(package.classes.items);
+    }
+
     var buf: [128]u8 = undefined;
-    const msg = std.fmt.bufPrint(&buf, "Created class: {s}", .{class_name}) catch "Class created";
+    const msg = std.fmt.bufPrint(&buf, "Created class: {s} in {s}", .{ class_name, pkg_name }) catch "Class created";
     browser.setStatus(msg, false);
 
     // Add to transcript
@@ -1809,13 +1929,14 @@ fn browserSaveClassDefinition(browser: *BrowserTab, class_name: []const u8, defi
     }
 
     const class_obj = class_val.asObject();
+    const num_fields = class_obj.header.size;
 
     // Update instance variable names
     const inst_vars_val = app.heap.allocateString(inst_vars) catch {
         browser.setStatus("Error: Could not create inst vars string", true);
         return;
     };
-    class_obj.setField(Heap.CLASS_FIELD_INST_VARS, inst_vars_val, Heap.CLASS_NUM_FIELDS);
+    class_obj.setField(Heap.CLASS_FIELD_INST_VARS, inst_vars_val, num_fields);
 
     // Note: We don't update the format field here as it encodes both instance size
     // and class format. Changing instance variables at runtime is complex and
@@ -1848,13 +1969,31 @@ fn browserNewMethod(browser: *BrowserTab, class_side: bool) void {
 // Callback for browser - package selected
 fn browserSelectPackage(browser: *BrowserTab, package_name: []const u8) void {
     const app = g_app orelse return;
-    _ = app;
 
-    // For now, just show package info in status
-    // In the future, this could filter classes shown in the class tree
-    var msg_buf: [64]u8 = undefined;
-    const msg = std.fmt.bufPrint(&msg_buf, "Package: {s}", .{package_name}) catch "Package selected";
-    browser.setStatus(msg, false);
+    // "All" shows all classes without filtering
+    if (std.mem.eql(u8, package_name, "All")) {
+        browser.showAllClasses();
+        var msg_buf: [64]u8 = undefined;
+        const msg = std.fmt.bufPrint(&msg_buf, "All classes ({d} total)", .{browser.all_class_roots.items.len}) catch "All classes";
+        browser.setStatus(msg, false);
+        return;
+    }
+
+    // Get the package and filter classes
+    if (app.package_registry.getPackage(package_name)) |package| {
+        // Filter class tree to show only classes in this package
+        browser.filterClassesByNames(package.classes.items);
+
+        // Update status
+        var msg_buf: [64]u8 = undefined;
+        const msg = std.fmt.bufPrint(&msg_buf, "Package: {s} ({d} classes)", .{ package_name, package.classes.items.len }) catch "Package selected";
+        browser.setStatus(msg, false);
+    } else {
+        // Package not found
+        var msg_buf: [64]u8 = undefined;
+        const msg = std.fmt.bufPrint(&msg_buf, "Package not found: {s}", .{package_name}) catch "Package not found";
+        browser.setStatus(msg, true);
+    }
 }
 
 // Callback for browser - save package to file

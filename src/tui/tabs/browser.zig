@@ -68,6 +68,9 @@ pub const BrowserTab = struct {
     status_len: usize = 0,
     status_is_error: bool = false,
 
+    // All classes (for filtering)
+    all_class_roots: std.ArrayList(*TreeNode),
+
     // Callbacks for loading data
     on_load_classes: ?*const fn (*BrowserTab) void = null,
     on_select_package: ?*const fn (*BrowserTab, []const u8) void = null,
@@ -131,6 +134,7 @@ pub const BrowserTab = struct {
             .instance_method_list = instance_method_list,
             .class_method_list = class_method_list,
             .source_editor = source_editor,
+            .all_class_roots = std.ArrayList(*TreeNode).empty,
         };
 
         // Initialize dialog superclass default
@@ -234,7 +238,15 @@ pub const BrowserTab = struct {
         const node = try TreeNode.init(self.allocator, name, null);
 
         if (parent_name) |pname| {
-            // Find parent node
+            // Find parent node in all_class_roots (the full list)
+            for (self.all_class_roots.items) |root| {
+                if (self.findNode(root, pname)) |parent| {
+                    try parent.addChild(node);
+                    self.class_tree.rebuildFlatList();
+                    return;
+                }
+            }
+            // Also check in visible tree
             for (self.class_tree.roots.items) |root| {
                 if (self.findNode(root, pname)) |parent| {
                     try parent.addChild(node);
@@ -244,8 +256,53 @@ pub const BrowserTab = struct {
             }
         }
 
-        // Add as root
+        // Add as root to both lists
         try self.class_tree.addRoot(node);
+        try self.all_class_roots.append(self.allocator, node);
+    }
+
+    /// Filter class tree to show only classes in the given list (as flat list)
+    pub fn filterClassesByNames(self: *BrowserTab, class_names: []const []const u8) void {
+        // Clear current tree
+        self.class_tree.roots.clearRetainingCapacity();
+
+        // Collect all matching nodes from the full tree as roots (flat list)
+        for (self.all_class_roots.items) |root| {
+            self.collectMatchingNodes(root, class_names);
+        }
+
+        self.class_tree.rebuildFlatList();
+        self.class_tree.selected_index = if (self.class_tree.flat_list.items.len > 0) 0 else null;
+    }
+
+    /// Collect nodes that match the given names and add them as roots
+    fn collectMatchingNodes(self: *BrowserTab, node: *TreeNode, names: []const []const u8) void {
+        // Check if this node matches
+        for (names) |name| {
+            if (std.mem.eql(u8, node.text, name)) {
+                // Add as a root (will show as flat list)
+                self.class_tree.roots.append(self.allocator, node) catch {};
+                break;
+            }
+        }
+
+        // Check children recursively
+        for (node.children.items) |child| {
+            self.collectMatchingNodes(child, names);
+        }
+    }
+
+    /// Show all classes (restore hierarchical view)
+    pub fn showAllClasses(self: *BrowserTab) void {
+        // Clear current tree
+        self.class_tree.roots.clearRetainingCapacity();
+
+        // Add back all root classes (with their hierarchies intact)
+        for (self.all_class_roots.items) |root| {
+            self.class_tree.roots.append(self.allocator, root) catch {};
+        }
+
+        self.class_tree.rebuildFlatList();
     }
 
     fn findNode(_: *BrowserTab, node: *TreeNode, name: []const u8) ?*TreeNode {

@@ -1,3 +1,6 @@
+# Bootstrap stubs - must load first to prevent infinite recursion
+ansi-tests/bootstrap-stubs.st
+
 # Core Object hierarchy - load first
 ansi-tests/ProtoObject.cls
 ansi-tests/Object.cls
@@ -129,6 +132,9 @@ ansi-tests/SequencedStreamTest.cls
 
 # Smalltalk system stubs - load after all test framework classes
 ansi-tests/SmalltalkSystem-stubs.st
+
+# ANSI quick win methods (Integer, Boolean, Character, Collection, String)
+ansi-quick-wins.st
 
 # Test classes - load after all dependencies (alphabetical, grouped by superclass)
 # Tests inheriting from MainTestCase

@@ -353,8 +353,28 @@ Object subclass: #SessionManager
 
 !SessionManager class methodsFor: 'accessing'!
 current
-    "Return nil - no session manager in this environment"
-    ^nil!
+    "Return the current session manager (self for class-side access)"
+    ^self!
+
+imagePath
+    "Return the full path to the image without extension"
+    <primitive: 930>
+    ^'smalltalk'!
+
+imageFileName
+    "Return the full path to the image with extension"
+    <primitive: 931>
+    ^'smalltalk.image'!
+
+imageDirectory
+    "Return the directory containing the image"
+    <primitive: 932>
+    ^'.'!
+
+imagePath: aString
+    "Set the image path"
+    <primitive: 933>
+    ^self primitiveFailed!
 !
 
 !SessionManager methodsFor: 'warnings'!

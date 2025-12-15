@@ -103,6 +103,55 @@ fn encodeValue(val: Value, base: usize, heap_end: usize, allocator: std.mem.Allo
     }
 
     // Treat any non-heap object reference as a compiled method.
+    // First validate the pointer looks reasonable before treating as a method.
+    const method_align = @alignOf(CompiledMethod);
+
+    // Reject null or very low addresses - return nil, not raw bits
+    // (raw bits would become invalid pointers on reload)
+    if (ptr_usize < 4096) {
+        return .{ .tag = .immediate, .payload = Value.nil.bits };
+    }
+
+    // Reject impossibly high addresses (above user-space limit on 64-bit systems)
+    // User-mode addresses on Windows/Linux x64 are below 0x7FFFFFFFFFFF
+    const max_user_addr: usize = 0x7FFFFFFFFFFF;
+    if (ptr_usize > max_user_addr) {
+        return .{ .tag = .immediate, .payload = Value.nil.bits };
+    }
+
+    // Check alignment - unaligned pointers can't be valid CompiledMethods
+    if (ptr_usize % method_align != 0) {
+        return .{ .tag = .immediate, .payload = Value.nil.bits };
+    }
+
+    // Additional check: reject if pointer looks like it has high bits set that indicate
+    // it's likely a tagged value or garbage rather than a real pointer
+    // Valid heap-allocated pointers on most systems have certain patterns
+    const high_byte = (ptr_usize >> 56) & 0xFF;
+    if (high_byte != 0 and high_byte != 0x7F) {
+        // Non-zero high byte that isn't 0x7F (top of user space) is suspicious
+        return .{ .tag = .immediate, .payload = Value.nil.bits };
+    }
+
+    // Validate method header before adding to list - check for sane values
+    // This prevents garbage pointers from causing crashes later
+    const method_ptr: *CompiledMethod = @ptrFromInt(ptr_usize);
+    const hdr = method_ptr.header;
+
+    // Sanity checks - if any fail, this isn't a valid method
+    if (hdr.num_args > 32) return .{ .tag = .immediate, .payload = Value.nil.bits };
+    if (hdr.num_literals > 4096) return .{ .tag = .immediate, .payload = Value.nil.bits };
+    if (hdr.bytecode_size > 65000) return .{ .tag = .immediate, .payload = Value.nil.bits };
+    if (hdr.flags._padding != 0) return .{ .tag = .immediate, .payload = Value.nil.bits };
+
+    // Check that the method's computed size is reasonable
+    const method_size = @sizeOf(CompiledMethod.MethodHeader) +
+        @as(usize, hdr.num_literals) * @sizeOf(Value) +
+        @as(usize, hdr.bytecode_size);
+    if (method_size > 1024 * 1024) { // Methods shouldn't be > 1MB
+        return .{ .tag = .immediate, .payload = Value.nil.bits };
+    }
+
     const gop = try methods.getOrPut(ptr_usize);
     if (!gop.found_existing) {
         gop.value_ptr.* = method_list.items.len;
@@ -208,6 +257,19 @@ pub fn save(heap: *Heap, allocator: std.mem.Allocator, writer: anytype) Snapshot
 
     const object_count = try scanHeapObjects(heap, allocator, &methods, &method_list);
 
+    // Second pass: Scan all discovered methods for their literals to find
+    // transitively referenced methods. This is critical because a method's
+    // literals might reference other methods that weren't found in the first pass.
+    // We use index-based iteration so new methods added during the loop are also processed.
+    var method_scan_idx: usize = 0;
+    while (method_scan_idx < method_list.items.len) : (method_scan_idx += 1) {
+        const m = method_list.items[method_scan_idx];
+        const lits = m.ptr.getLiterals();
+        for (lits) |v| {
+            _ = try encodeValue(v, base, heap_end, allocator, &methods, &method_list);
+        }
+    }
+
     const header = ImageHeader{
         .space_size = heap.space_size,
         .used_size = heap.alloc_ptr,
@@ -248,9 +310,10 @@ pub fn save(heap: *Heap, allocator: std.mem.Allocator, writer: anytype) Snapshot
         try writeStruct(writer, enc);
     }
 
-    // Write methods
-    for (method_list.items) |m| {
-        const method = m.ptr;
+    // Write methods - use index-based iteration to handle any dynamically added methods
+    var write_method_idx: usize = 0;
+    while (write_method_idx < method_list.items.len) : (write_method_idx += 1) {
+        const method = method_list.items[write_method_idx].ptr;
         try writeStruct(writer, method.header);
 
         const lits = method.getLiterals();
@@ -315,9 +378,15 @@ pub fn save(heap: *Heap, allocator: std.mem.Allocator, writer: anytype) Snapshot
 }
 
 pub fn load(allocator: std.mem.Allocator, reader: anytype) SnapshotError!*Heap {
-    const header = readStruct(reader, ImageHeader) catch return SnapshotError.IoError;
-    if (!std.mem.eql(u8, &header.magic, &magic)) return SnapshotError.InvalidImage;
-    if (header.version != 1) return SnapshotError.UnsupportedVersion;
+    const header = readStruct(reader, ImageHeader) catch {
+        return SnapshotError.IoError;
+    };
+    if (!std.mem.eql(u8, &header.magic, &magic)) {
+        return SnapshotError.InvalidImage;
+    }
+    if (header.version != 1) {
+        return SnapshotError.UnsupportedVersion;
+    }
 
     const heap_size = header.space_size * 2;
     const heap = try Heap.init(allocator, heap_size);
@@ -336,9 +405,10 @@ pub fn load(allocator: std.mem.Allocator, reader: anytype) SnapshotError!*Heap {
     // Temporarily store encoded values to resolve methods after methods are loaded
     const encoded_classes = try allocator.alloc(EncodedValue, header.class_count);
     defer allocator.free(encoded_classes);
-    for (encoded_classes, 0..) |*slot, idx| {
-        slot.* = readStruct(reader, EncodedValue) catch return SnapshotError.IoError;
-        _ = idx;
+    for (encoded_classes) |*slot| {
+        slot.* = readStruct(reader, EncodedValue) catch {
+            return SnapshotError.IoError;
+        };
     }
 
     // Symbol table entries
@@ -354,10 +424,16 @@ pub fn load(allocator: std.mem.Allocator, reader: anytype) SnapshotError!*Heap {
     try encoded_symbols.ensureTotalCapacity(allocator, header.symbol_count);
     var sym_i: u32 = 0;
     while (sym_i < header.symbol_count) : (sym_i += 1) {
-        const len = readStruct(reader, u32) catch return SnapshotError.IoError;
+        const len = readStruct(reader, u32) catch {
+            return SnapshotError.IoError;
+        };
         const key_buf = try allocator.alloc(u8, len);
-        readExact(reader, key_buf) catch return SnapshotError.IoError;
-        const enc = readStruct(reader, EncodedValue) catch return SnapshotError.IoError;
+        readExact(reader, key_buf) catch {
+            return SnapshotError.IoError;
+        };
+        const enc = readStruct(reader, EncodedValue) catch {
+            return SnapshotError.IoError;
+        };
         encoded_symbols.appendAssumeCapacity(.{ .key = key_buf, .value = enc });
     }
 
@@ -373,10 +449,16 @@ pub fn load(allocator: std.mem.Allocator, reader: anytype) SnapshotError!*Heap {
     }
     var g_i: u32 = 0;
     while (g_i < header.global_count) : (g_i += 1) {
-        const len = readStruct(reader, u32) catch return SnapshotError.IoError;
+        const len = readStruct(reader, u32) catch {
+            return SnapshotError.IoError;
+        };
         const key_buf = try allocator.alloc(u8, len);
-        readExact(reader, key_buf) catch return SnapshotError.IoError;
-        const enc = readStruct(reader, EncodedValue) catch return SnapshotError.IoError;
+        readExact(reader, key_buf) catch {
+            return SnapshotError.IoError;
+        };
+        const enc = readStruct(reader, EncodedValue) catch {
+            return SnapshotError.IoError;
+        };
         encoded_globals.appendAssumeCapacity(.{ .key = key_buf, .value = enc });
     }
 
@@ -387,18 +469,27 @@ pub fn load(allocator: std.mem.Allocator, reader: anytype) SnapshotError!*Heap {
 
     var method_idx: usize = 0;
     while (method_idx < header.method_count) : (method_idx += 1) {
-        const mh = readStruct(reader, CompiledMethod.MethodHeader) catch return SnapshotError.IoError;
-        const lit_count = readStruct(reader, u32) catch return SnapshotError.IoError;
+        const mh = readStruct(reader, CompiledMethod.MethodHeader) catch {
+            return SnapshotError.IoError;
+        };
+        const lit_count = readStruct(reader, u32) catch {
+            return SnapshotError.IoError;
+        };
         const literals = try allocator.alloc(EncodedValue, lit_count);
         defer allocator.free(literals);
-        for (literals, 0..) |*lit, i| {
-            lit.* = readStruct(reader, EncodedValue) catch return SnapshotError.IoError;
-            _ = i;
+        for (literals) |*lit| {
+            lit.* = readStruct(reader, EncodedValue) catch {
+                return SnapshotError.IoError;
+            };
         }
-        const bc_len = readStruct(reader, u32) catch return SnapshotError.IoError;
+        const bc_len = readStruct(reader, u32) catch {
+            return SnapshotError.IoError;
+        };
         const bytecodes = try allocator.alloc(u8, bc_len);
         defer allocator.free(bytecodes);
-        readExact(reader, bytecodes) catch return SnapshotError.IoError;
+        readExact(reader, bytecodes) catch {
+            return SnapshotError.IoError;
+        };
 
         // Allocate compiled method with proper alignment (CompiledMethod needs 16-byte alignment)
         const header_size = @sizeOf(CompiledMethod.MethodHeader);

@@ -74,6 +74,29 @@ pub const Context = struct {
 
 /// The main Smalltalk interpreter
 pub const Interpreter = struct {
+    // ========================================================================
+    // Method Cache Constants - must be at top of struct in Zig
+    // ========================================================================
+    const METHOD_CACHE_SIZE: usize = 2048; // Must be power of 2
+    const MethodCacheEntry = struct {
+        class: Value,
+        selector: Value,
+        method: ?*CompiledMethod,
+        holder: Value, // The class that contains the method (for super sends)
+    };
+
+    // ========================================================================
+    // Inline Cache Constants - per-callsite caching
+    // ========================================================================
+    const INLINE_CACHE_SIZE: usize = 4096; // Must be power of 2
+    const InlineCacheEntry = struct {
+        method_ptr: usize, // Pointer to CompiledMethod containing this send
+        bytecode_offset: u16, // Offset of send bytecode within method
+        cached_class: Value, // Receiver class when cache was filled
+        cached_method: ?*CompiledMethod, // Method found for this class
+        cached_holder: Value, // Class containing the method
+    };
+
     heap: *Heap,
 
     // Execution stack
@@ -131,6 +154,33 @@ pub const Interpreter = struct {
     // Instruction counter for preemption timing
     instruction_count: u64,
 
+    // Method cache fields
+    method_cache: [METHOD_CACHE_SIZE]MethodCacheEntry,
+    method_cache_hits: u64,
+    method_cache_misses: u64,
+
+    // Inline cache fields (per-callsite caching)
+    inline_cache: [INLINE_CACHE_SIZE]InlineCacheEntry,
+    inline_cache_hits: u64,
+    inline_cache_misses: u64,
+
+    // Common selectors cached for fast comparison
+    selector_plus: Value,
+    selector_minus: Value,
+    selector_times: Value,
+    selector_divide: Value,
+    selector_modulo: Value,
+    selector_less: Value,
+    selector_greater: Value,
+    selector_less_equal: Value,
+    selector_greater_equal: Value,
+    selector_equal: Value,
+    selector_not_equal: Value,
+    selector_bitand: Value,
+    selector_bitor: Value,
+    selector_bitxor: Value,
+    selector_bitshift: Value,
+
     pub fn init(heap: *Heap, allocator: std.mem.Allocator) Interpreter {
         return .{
             .heap = heap,
@@ -162,7 +212,77 @@ pub const Interpreter = struct {
             .overlapped_pool = OverlappedPool.init(allocator),
             .allocator = allocator,
             .instruction_count = 0,
+            // Initialize method cache to empty
+            .method_cache = [_]MethodCacheEntry{.{ .class = Value.nil, .selector = Value.nil, .method = null, .holder = Value.nil }} ** METHOD_CACHE_SIZE,
+            .method_cache_hits = 0,
+            .method_cache_misses = 0,
+            // Initialize inline cache to empty
+            .inline_cache = [_]InlineCacheEntry{.{ .method_ptr = 0, .bytecode_offset = 0, .cached_class = Value.nil, .cached_method = null, .cached_holder = Value.nil }} ** INLINE_CACHE_SIZE,
+            .inline_cache_hits = 0,
+            .inline_cache_misses = 0,
+            // Common selectors - will be initialized on first use
+            .selector_plus = Value.nil,
+            .selector_minus = Value.nil,
+            .selector_times = Value.nil,
+            .selector_divide = Value.nil,
+            .selector_modulo = Value.nil,
+            .selector_less = Value.nil,
+            .selector_greater = Value.nil,
+            .selector_less_equal = Value.nil,
+            .selector_greater_equal = Value.nil,
+            .selector_equal = Value.nil,
+            .selector_not_equal = Value.nil,
+            .selector_bitand = Value.nil,
+            .selector_bitor = Value.nil,
+            .selector_bitxor = Value.nil,
+            .selector_bitshift = Value.nil,
         };
+    }
+
+    /// Initialize common selectors for fast arithmetic dispatch
+    pub fn initCommonSelectors(self: *Interpreter) void {
+        self.selector_plus = self.heap.internSymbol("+") catch Value.nil;
+        self.selector_minus = self.heap.internSymbol("-") catch Value.nil;
+        self.selector_times = self.heap.internSymbol("*") catch Value.nil;
+        self.selector_divide = self.heap.internSymbol("/") catch Value.nil;
+        self.selector_modulo = self.heap.internSymbol("\\\\") catch Value.nil;
+        self.selector_less = self.heap.internSymbol("<") catch Value.nil;
+        self.selector_greater = self.heap.internSymbol(">") catch Value.nil;
+        self.selector_less_equal = self.heap.internSymbol("<=") catch Value.nil;
+        self.selector_greater_equal = self.heap.internSymbol(">=") catch Value.nil;
+        self.selector_equal = self.heap.internSymbol("=") catch Value.nil;
+        self.selector_not_equal = self.heap.internSymbol("~=") catch Value.nil;
+        self.selector_bitand = self.heap.internSymbol("bitAnd:") catch Value.nil;
+        self.selector_bitor = self.heap.internSymbol("bitOr:") catch Value.nil;
+        self.selector_bitxor = self.heap.internSymbol("bitXor:") catch Value.nil;
+        self.selector_bitshift = self.heap.internSymbol("bitShift:") catch Value.nil;
+    }
+
+    /// Flush the method cache (call when methods are added/modified)
+    pub fn flushMethodCache(self: *Interpreter) void {
+        for (&self.method_cache) |*entry| {
+            entry.class = Value.nil;
+            entry.selector = Value.nil;
+            entry.method = null;
+            entry.holder = Value.nil;
+        }
+    }
+
+    /// Flush the inline cache (call when methods are added/modified)
+    pub fn flushInlineCache(self: *Interpreter) void {
+        for (&self.inline_cache) |*entry| {
+            entry.method_ptr = 0;
+            entry.bytecode_offset = 0;
+            entry.cached_class = Value.nil;
+            entry.cached_method = null;
+            entry.cached_holder = Value.nil;
+        }
+    }
+
+    /// Flush both method cache and inline cache
+    pub fn flushAllCaches(self: *Interpreter) void {
+        self.flushMethodCache();
+        self.flushInlineCache();
     }
 
     pub fn deinit(self: *Interpreter) void {
@@ -648,7 +768,7 @@ pub const Interpreter = struct {
         var current = exception_class;
         while (current.isObject()) {
             const current_obj = current.asObject();
-            const superclass = current_obj.getField(Heap.CLASS_FIELD_SUPERCLASS, Heap.CLASS_NUM_FIELDS);
+            const superclass = current_obj.getField(Heap.CLASS_FIELD_SUPERCLASS, current_obj.header.size);
             if (superclass.eql(handler_class)) {
                 return true;
             }
@@ -680,6 +800,11 @@ pub const Interpreter = struct {
 
     /// Execute a compiled method and return the result
     pub fn execute(self: *Interpreter, method: *CompiledMethod, recv: Value, args: []const Value) InterpreterError!Value {
+        // Initialize common selectors for fast arithmetic dispatch (once)
+        if (self.selector_plus.isNil()) {
+            self.initCommonSelectors();
+        }
+
         // Ensure we have a main process if none exists
         // This represents the "main thread" (REPL, file-in, etc.)
         if (self.process_scheduler.active_process == null) {
@@ -761,7 +886,8 @@ pub const Interpreter = struct {
                 const recv_class = self.heap.classOf(self.last_mnu_receiver);
                 var recv_name: []const u8 = "<?>";
                 if (recv_class.isObject()) {
-                    const name_val = recv_class.asObject().getField(Heap.CLASS_FIELD_NAME, Heap.CLASS_NUM_FIELDS);
+                    const rc_obj = recv_class.asObject();
+                    const name_val = rc_obj.getField(Heap.CLASS_FIELD_NAME, rc_obj.header.size);
                     if (name_val.isObject() and name_val.asObject().header.class_index == Heap.CLASS_SYMBOL) {
                         recv_name = name_val.asObject().bytes(name_val.asObject().header.size);
                     }
@@ -960,7 +1086,7 @@ pub const Interpreter = struct {
                 .send => {
                     const selector_index = self.fetchByte();
                     const num_args = self.fetchByte();
-                    self.sendMessage(selector_index, num_args, false) catch |err| {
+                    self.sendMessage(selector_index, num_args, false, self.ip - 3) catch |err| {
                         if (err == InterpreterError.BlockNonLocalReturn) {
                             // Non-local return from a block - check if the CURRENT method is the target
                             // IMPORTANT: Check temp_base BEFORE restoring caller's context
@@ -1011,7 +1137,7 @@ pub const Interpreter = struct {
                 .super_send => {
                     const selector_index = self.fetchByte();
                     const num_args = self.fetchByte();
-                    self.sendMessage(selector_index, num_args, true) catch |err| {
+                    self.sendMessage(selector_index, num_args, true, self.ip - 3) catch |err| {
                         if (err == InterpreterError.BlockNonLocalReturn) {
                             // Non-local return from a block - check if we're the target
                             if (self.temp_base == self.non_local_return_target) {
@@ -1339,7 +1465,8 @@ pub const Interpreter = struct {
                                 const class = self.heap.classOf(self.receiver);
                                 var inst_size: usize = 0;
                                 if (class.isObject()) {
-                                    const format_val = class.asObject().getField(Heap.CLASS_FIELD_FORMAT, Heap.CLASS_NUM_FIELDS);
+                                    const cls_obj = class.asObject();
+                                    const format_val = cls_obj.getField(Heap.CLASS_FIELD_FORMAT, cls_obj.header.size);
                                     if (format_val.isSmallInt()) {
                                         // Extract inst var count from format (low byte)
                                         inst_size = @intCast(format_val.asSmallInt() & 0xFF);
@@ -1435,7 +1562,8 @@ pub const Interpreter = struct {
             var num_fields: usize = 16; // Default fallback
             const class = self.heap.classOf(self.receiver);
             if (class.isObject()) {
-                const format_val = class.asObject().getField(Heap.CLASS_FIELD_FORMAT, Heap.CLASS_NUM_FIELDS);
+                const cls_obj = class.asObject();
+                const format_val = cls_obj.getField(Heap.CLASS_FIELD_FORMAT, cls_obj.header.size);
                 if (format_val.isSmallInt()) {
                     const spec = Heap.decodeInstanceSpec(format_val.asSmallInt());
                     num_fields = spec.inst_size;
@@ -1511,7 +1639,8 @@ pub const Interpreter = struct {
             var num_fields: usize = 16; // Default
             const class = self.heap.classOf(self.receiver);
             if (class.isObject()) {
-                const format_val = class.asObject().getField(Heap.CLASS_FIELD_FORMAT, Heap.CLASS_NUM_FIELDS);
+                const cls_obj = class.asObject();
+                const format_val = cls_obj.getField(Heap.CLASS_FIELD_FORMAT, cls_obj.header.size);
                 if (format_val.isSmallInt()) {
                     const spec = Heap.decodeInstanceSpec(format_val.asSmallInt());
                     num_fields = spec.inst_size;
@@ -1537,7 +1666,7 @@ pub const Interpreter = struct {
         }
     }
 
-    fn sendMessage(self: *Interpreter, selector_index: u8, num_args: u8, is_super: bool) InterpreterError!void {
+    fn sendMessage(self: *Interpreter, selector_index: u8, num_args: u8, is_super: bool, bytecode_offset: usize) InterpreterError!void {
         // Get selector from literals
         const literals = self.method.getLiterals();
         const selector = literals[selector_index];
@@ -1562,6 +1691,100 @@ pub const Interpreter = struct {
             args[i] = try self.pop();
         }
         const recv = try self.pop();
+
+        // ========================================================================
+        // SmallInteger Arithmetic Fast Paths
+        // ========================================================================
+        // Bypass full method lookup for common integer operations.
+        // Only active if selectors have been initialized (checked via selector_plus).
+        if (recv.isSmallInt() and num_args == 1 and !self.selector_plus.isNil()) {
+            const arg = args[0];
+            if (arg.isSmallInt()) {
+                const a = recv.asSmallInt();
+                const b = arg.asSmallInt();
+
+                // Binary arithmetic operations with overflow checking
+                if (selector.bits == self.selector_plus.bits) {
+                    const result = @addWithOverflow(a, b);
+                    if (result[1] == 0) {
+                        try self.push(Value.fromSmallInt(result[0]));
+                        return;
+                    }
+                    // Overflow - fall through to normal send (will use LargeInteger)
+                } else if (selector.bits == self.selector_minus.bits) {
+                    const result = @subWithOverflow(a, b);
+                    if (result[1] == 0) {
+                        try self.push(Value.fromSmallInt(result[0]));
+                        return;
+                    }
+                } else if (selector.bits == self.selector_times.bits) {
+                    const result = @mulWithOverflow(a, b);
+                    if (result[1] == 0) {
+                        try self.push(Value.fromSmallInt(result[0]));
+                        return;
+                    }
+                } else if (selector.bits == self.selector_divide.bits) {
+                    // Integer division - fall through if b == 0
+                    if (b != 0) {
+                        try self.push(Value.fromSmallInt(@divTrunc(a, b)));
+                        return;
+                    }
+                } else if (selector.bits == self.selector_modulo.bits) {
+                    // Modulo - fall through if b == 0
+                    if (b != 0) {
+                        try self.push(Value.fromSmallInt(@rem(a, b)));
+                        return;
+                    }
+                }
+                // Comparison operations
+                else if (selector.bits == self.selector_less.bits) {
+                    try self.push(if (a < b) Value.@"true" else Value.@"false");
+                    return;
+                } else if (selector.bits == self.selector_greater.bits) {
+                    try self.push(if (a > b) Value.@"true" else Value.@"false");
+                    return;
+                } else if (selector.bits == self.selector_less_equal.bits) {
+                    try self.push(if (a <= b) Value.@"true" else Value.@"false");
+                    return;
+                } else if (selector.bits == self.selector_greater_equal.bits) {
+                    try self.push(if (a >= b) Value.@"true" else Value.@"false");
+                    return;
+                } else if (selector.bits == self.selector_equal.bits) {
+                    try self.push(if (a == b) Value.@"true" else Value.@"false");
+                    return;
+                } else if (selector.bits == self.selector_not_equal.bits) {
+                    try self.push(if (a != b) Value.@"true" else Value.@"false");
+                    return;
+                }
+                // Bitwise operations
+                else if (selector.bits == self.selector_bitand.bits) {
+                    try self.push(Value.fromSmallInt(a & b));
+                    return;
+                } else if (selector.bits == self.selector_bitor.bits) {
+                    try self.push(Value.fromSmallInt(a | b));
+                    return;
+                } else if (selector.bits == self.selector_bitxor.bits) {
+                    try self.push(Value.fromSmallInt(a ^ b));
+                    return;
+                } else if (selector.bits == self.selector_bitshift.bits) {
+                    // bitShift: - positive shifts left, negative shifts right
+                    if (b >= 0 and b < 61) {
+                        const shift_amt: u6 = @intCast(b);
+                        const shifted = a << shift_amt;
+                        // Check for overflow
+                        if ((shifted >> shift_amt) == a) {
+                            try self.push(Value.fromSmallInt(shifted));
+                            return;
+                        }
+                    } else if (b < 0 and b > -61) {
+                        const shift_amt: u6 = @intCast(-b);
+                        try self.push(Value.fromSmallInt(a >> shift_amt));
+                        return;
+                    }
+                    // Fall through for large shifts
+                }
+            }
+        }
 
         // Fast-path: update class instanceSpec flags directly for setSpecialBehavior:to:
         if (selector.isObject()) {
@@ -1709,7 +1932,8 @@ pub const Interpreter = struct {
                         const obj = recv.asObject();
                         const class_of = self.heap.classOf(recv);
                         if (class_of.isObject()) {
-                            const spec_val = class_of.asObject().getField(Heap.CLASS_FIELD_FORMAT, Heap.CLASS_NUM_FIELDS);
+                            const cof_obj = class_of.asObject();
+                            const spec_val = cof_obj.getField(Heap.CLASS_FIELD_FORMAT, cof_obj.header.size);
                             if (spec_val.isSmallInt()) {
                                 const info = Heap.decodeInstanceSpec(spec_val.asSmallInt());
                                 std.debug.print("  (meta spec) size={}, pointers={}, variable={}\n", .{ info.inst_size, info.is_pointers, info.is_variable });
@@ -1727,6 +1951,11 @@ pub const Interpreter = struct {
 
         // Get the class to start lookup from
         const receiver_class = self.heap.classOf(recv);
+
+        // Inline cache disabled - overhead exceeds benefit in current implementation
+        // The global method cache already provides good caching for monomorphic sends
+        _ = bytecode_offset; // Silence unused parameter warning
+
         const super_lookup_class = if (!self.method_class.isNil()) self.method_class else receiver_class;
         const start_class = if (is_super)
             self.getSuperclass(super_lookup_class)
@@ -1852,7 +2081,7 @@ pub const Interpreter = struct {
             var class_name_dbg: []const u8 = "<unknown>";
             if (start_class.isObject()) {
                 const cls_obj = start_class.asObject();
-                const name_val = cls_obj.getField(Heap.CLASS_FIELD_NAME, Heap.CLASS_NUM_FIELDS);
+                const name_val = cls_obj.getField(Heap.CLASS_FIELD_NAME, cls_obj.header.size);
                 if (name_val.isObject() and name_val.asObject().header.class_index == Heap.CLASS_SYMBOL) {
                     class_name_dbg = name_val.asObject().bytes(name_val.asObject().header.size);
                 }
@@ -1962,7 +2191,7 @@ pub const Interpreter = struct {
                 const recv_class = self.heap.classOf(recv);
                 if (recv_class.isObject()) {
                     const recv_class_obj = recv_class.asObject();
-                    const name_val = recv_class_obj.getField(Heap.CLASS_FIELD_NAME, Heap.CLASS_NUM_FIELDS);
+                    const name_val = recv_class_obj.getField(Heap.CLASS_FIELD_NAME, recv_class_obj.header.size);
                     if (name_val.isObject() and name_val.asObject().header.class_index == Heap.CLASS_SYMBOL) {
                         recv_name = name_val.asObject().bytes(name_val.asObject().header.size);
                     }
@@ -1979,12 +2208,12 @@ pub const Interpreter = struct {
                     var c = start_class;
                     while (c.isObject()) {
                         const c_obj = c.asObject();
-                        const name_val = c_obj.getField(Heap.CLASS_FIELD_NAME, Heap.CLASS_NUM_FIELDS);
+                        const name_val = c_obj.getField(Heap.CLASS_FIELD_NAME, c_obj.header.size);
                         if (name_val.isObject() and name_val.asObject().header.class_index == Heap.CLASS_SYMBOL) {
                             const nm = name_val.asObject().bytes(name_val.asObject().header.size);
                             std.debug.print("  DNU lookup chain class={s}\n", .{nm});
                         }
-                        c = c_obj.getField(Heap.CLASS_FIELD_SUPERCLASS, Heap.CLASS_NUM_FIELDS);
+                        c = c_obj.getField(Heap.CLASS_FIELD_SUPERCLASS, c_obj.header.size);
                     }
                 }
                 if (DEBUG_VERBOSE) std.debug.print("DEBUG MessageNotUnderstood recv={s} selector={s}\n", .{ recv_name, sel_name }); 
@@ -2049,47 +2278,17 @@ pub const Interpreter = struct {
     fn getSuperclass(_: *Interpreter, class: Value) Value {
         if (class.isObject()) {
             const class_obj = class.asObject();
-            // Metaclasses have one extra field
-            const num_fields = if (class_obj.header.class_index == Heap.CLASS_METACLASS)
-                Heap.METACLASS_NUM_FIELDS
-            else
-                Heap.CLASS_NUM_FIELDS;
-            return class_obj.getField(Heap.CLASS_FIELD_SUPERCLASS, num_fields);
+            // Use actual object size for field access (old classes may have fewer fields)
+            return class_obj.getField(Heap.CLASS_FIELD_SUPERCLASS, class_obj.header.size);
         }
         return Value.nil;
     }
 
     pub fn lookupMethod(self: *Interpreter, start_class: Value, selector: Value) ?*CompiledMethod {
-        var class = start_class;
-
-        // Walk up the superclass chain
-        while (!class.isNil()) {
-            if (class.isObject()) {
-                const class_obj = class.asObject();
-
-                // Metaclasses have one extra field, so use the correct field count
-                const num_fields = if (class_obj.header.class_index == Heap.CLASS_METACLASS)
-                    Heap.METACLASS_NUM_FIELDS
-                else
-                    Heap.CLASS_NUM_FIELDS;
-
-                // Get method dictionary
-                const method_dict = class_obj.getField(Heap.CLASS_FIELD_METHOD_DICT, num_fields);
-
-                if (method_dict.isObject()) {
-                    // Look up selector in method dictionary
-                    if (self.lookupInMethodDict(method_dict, selector)) |method| {
-                        return method;
-                    }
-                }
-
-                // Move to superclass
-                class = class_obj.getField(Heap.CLASS_FIELD_SUPERCLASS, num_fields);
-            } else {
-                break;
-            }
+        // Use lookupMethodWithHolder and discard holder
+        if (self.lookupMethodWithHolder(start_class, selector)) |result| {
+            return result.method;
         }
-
         return null;
     }
 
@@ -2099,17 +2298,50 @@ pub const Interpreter = struct {
     };
 
     fn lookupMethodWithHolder(self: *Interpreter, start_class: Value, selector: Value) ?MethodLookup {
+        // Check method cache first
+        const hash = start_class.bits ^ selector.bits;
+        const index = hash & (METHOD_CACHE_SIZE - 1);
+        const entry = &self.method_cache[index];
+
+        if (entry.class.bits == start_class.bits and entry.selector.bits == selector.bits) {
+            // Cache hit!
+            self.method_cache_hits += 1;
+            if (entry.method) |method| {
+                return MethodLookup{
+                    .method = method,
+                    .holder = entry.holder,
+                };
+            }
+            return null; // Cached negative result
+        }
+
+        // Cache miss - do full lookup
+        self.method_cache_misses += 1;
+        const result = self.lookupMethodWithHolderUncached(start_class, selector);
+
+        // Update cache
+        entry.class = start_class;
+        entry.selector = selector;
+        if (result) |r| {
+            entry.method = r.method;
+            entry.holder = r.holder;
+        } else {
+            entry.method = null;
+            entry.holder = Value.nil;
+        }
+
+        return result;
+    }
+
+    /// Uncached method lookup with holder - walks the class hierarchy
+    fn lookupMethodWithHolderUncached(self: *Interpreter, start_class: Value, selector: Value) ?MethodLookup {
         var class = start_class;
 
         while (!class.isNil()) {
             if (class.isObject()) {
                 const class_obj = class.asObject();
-
-                // Metaclasses have one extra field, so use the correct field count
-                const num_fields = if (class_obj.header.class_index == Heap.CLASS_METACLASS)
-                    Heap.METACLASS_NUM_FIELDS
-                else
-                    Heap.CLASS_NUM_FIELDS;
+                // Use actual object size for field access (old classes may have fewer fields)
+                const num_fields = class_obj.header.size;
 
                 const method_dict = class_obj.getField(Heap.CLASS_FIELD_METHOD_DICT, num_fields);
                 if (method_dict.isObject()) {
@@ -2131,47 +2363,66 @@ pub const Interpreter = struct {
 
     fn lookupInMethodDict(self: *Interpreter, dict: Value, selector: Value) ?*CompiledMethod {
         _ = self;
-        // For now, method dictionaries are stored as Arrays of associations
-        // Each association is [selector, method]
-        // This is inefficient but simple for bootstrapping
+        // Method dictionaries are Arrays of [selector, method] pairs.
+        // We use hash-based lookup with linear probing for O(1) average case.
+        // Hash is computed from selector's bits (pointer value for interned symbols).
 
         if (!dict.isObject()) return null;
 
         const dict_obj = dict.asObject();
         const dict_size = dict_obj.header.size;
 
-        if (dict_size == 0) return null;
+        if (dict_size < 2) return null;
 
-        // Scan entire dictionary - don't break on nil because bootstrap may use sparse dictionaries
-        // and file-in may add methods to empty slots in the middle
-        var i: usize = 0;
-        while (i + 1 < dict_size) : (i += 2) {
-            const key = dict_obj.getField(i, dict_size);
+        // Number of slots (each slot is 2 entries: selector + method)
+        const num_slots = dict_size / 2;
+        if (num_slots == 0) return null;
 
-            // Compare selectors (skip nil entries)
-            if (!key.isNil()) {
-                var match = key.eql(selector);
-                // Symbols created during different file-in passes may be distinct objects;
-                // fall back to name comparison when both are symbols.
-                if (!match and key.isObject() and selector.isObject()) {
-                    const key_obj = key.asObject();
-                    const sel_obj = selector.asObject();
-                    if (key_obj.header.class_index == Heap.CLASS_SYMBOL and sel_obj.header.class_index == Heap.CLASS_SYMBOL) {
-                        const k_bytes = key_obj.bytes(key_obj.header.size);
-                        const s_bytes = sel_obj.bytes(sel_obj.header.size);
-                        match = std.mem.eql(u8, k_bytes, s_bytes);
-                    }
+        // Hash from selector bits - use a simple but effective hash
+        const hash = selector.bits *% 2654435761; // Knuth's multiplicative hash
+        var index = @as(usize, @intCast(hash)) % num_slots;
+
+        // Linear probe with wrap-around
+        var probes: usize = 0;
+        while (probes < num_slots) : (probes += 1) {
+            const slot_base = index * 2;
+            const key = dict_obj.getField(slot_base, dict_size);
+
+            // Empty slot means selector not found
+            if (key.isNil()) {
+                return null;
+            }
+
+            // Check for match - first try pointer equality (fast for interned symbols)
+            if (key.bits == selector.bits) {
+                const method_val = dict_obj.getField(slot_base + 1, dict_size);
+                if (method_val.isObject()) {
+                    const found_method: *CompiledMethod = @ptrCast(@alignCast(method_val.asObject()));
+                    return found_method;
                 }
+                return null;
+            }
 
-                if (match) {
-                    const method_val = dict_obj.getField(i + 1, dict_size);
-                    if (method_val.isObject()) {
-                        // The method value points to a CompiledMethod
-                        const found_method: *CompiledMethod = @ptrCast(@alignCast(method_val.asObject()));
-                        return found_method;
+            // Fallback: compare symbol bytes if both are symbols (for non-interned case)
+            if (key.isObject() and selector.isObject()) {
+                const key_obj = key.asObject();
+                const sel_obj = selector.asObject();
+                if (key_obj.header.class_index == Heap.CLASS_SYMBOL and sel_obj.header.class_index == Heap.CLASS_SYMBOL) {
+                    const k_bytes = key_obj.bytes(key_obj.header.size);
+                    const s_bytes = sel_obj.bytes(sel_obj.header.size);
+                    if (std.mem.eql(u8, k_bytes, s_bytes)) {
+                        const method_val = dict_obj.getField(slot_base + 1, dict_size);
+                        if (method_val.isObject()) {
+                            const found_method: *CompiledMethod = @ptrCast(@alignCast(method_val.asObject()));
+                            return found_method;
+                        }
+                        return null;
                     }
                 }
             }
+
+            // Move to next slot (linear probing)
+            index = (index + 1) % num_slots;
         }
 
         return null;
@@ -2203,9 +2454,10 @@ pub const Interpreter = struct {
         // Walk up the superclass chain looking for the class variable
         while (!class.isNil() and class.isObject()) {
             const class_obj = class.asObject();
+            const obj_size = class_obj.header.size;
 
             // Get class variables dictionary from this class
-            const class_vars = class_obj.getField(Heap.CLASS_FIELD_CLASS_VARS, Heap.CLASS_NUM_FIELDS);
+            const class_vars = class_obj.getField(Heap.CLASS_FIELD_CLASS_VARS, obj_size);
 
             if (class_vars.isObject()) {
                 const vars_obj = class_vars.asObject();
@@ -2231,7 +2483,7 @@ pub const Interpreter = struct {
             }
 
             // Move to superclass
-            class = class_obj.getField(Heap.CLASS_FIELD_SUPERCLASS, Heap.CLASS_NUM_FIELDS);
+            class = class_obj.getField(Heap.CLASS_FIELD_SUPERCLASS, obj_size);
         }
 
         return null;
@@ -2261,9 +2513,10 @@ pub const Interpreter = struct {
         // Walk up the superclass chain looking for the class variable
         while (!class.isNil() and class.isObject()) {
             const class_obj = class.asObject();
+            const obj_size = class_obj.header.size;
 
             // Get class variables dictionary from this class
-            const class_vars = class_obj.getField(Heap.CLASS_FIELD_CLASS_VARS, Heap.CLASS_NUM_FIELDS);
+            const class_vars = class_obj.getField(Heap.CLASS_FIELD_CLASS_VARS, obj_size);
 
             if (class_vars.isObject()) {
                 const vars_obj = class_vars.asObject();
@@ -2291,7 +2544,7 @@ pub const Interpreter = struct {
             }
 
             // Move to superclass
-            class = class_obj.getField(Heap.CLASS_FIELD_SUPERCLASS, Heap.CLASS_NUM_FIELDS);
+            class = class_obj.getField(Heap.CLASS_FIELD_SUPERCLASS, obj_size);
         }
 
         return false;
@@ -2389,7 +2642,8 @@ pub const Interpreter = struct {
             const recv_class = self.heap.classOf(recv);
             var recv_name: []const u8 = "<?>";
             if (recv_class.isObject()) {
-                const name_val = recv_class.asObject().getField(Heap.CLASS_FIELD_NAME, Heap.CLASS_NUM_FIELDS);
+                const rc_obj = recv_class.asObject();
+                const name_val = rc_obj.getField(Heap.CLASS_FIELD_NAME, rc_obj.header.size);
                 if (name_val.isObject() and name_val.asObject().header.class_index == Heap.CLASS_SYMBOL) {
                     recv_name = name_val.asObject().bytes(name_val.asObject().header.size);
                 }
@@ -2397,7 +2651,8 @@ pub const Interpreter = struct {
             const arg_class = self.heap.classOf(arg);
             var arg_name: []const u8 = "<?>";
             if (arg_class.isObject()) {
-                const name_val = arg_class.asObject().getField(Heap.CLASS_FIELD_NAME, Heap.CLASS_NUM_FIELDS);
+                const ac_obj = arg_class.asObject();
+                const name_val = ac_obj.getField(Heap.CLASS_FIELD_NAME, ac_obj.header.size);
                 if (name_val.isObject() and name_val.asObject().header.class_index == Heap.CLASS_SYMBOL) {
                     arg_name = name_val.asObject().bytes(name_val.asObject().header.size);
                 }
@@ -2412,26 +2667,28 @@ pub const Interpreter = struct {
                     const s0 = blk: {
                         const cls = self.heap.classOf(slot0);
                         if (cls.isObject()) {
-                            const nv = cls.asObject().getField(Heap.CLASS_FIELD_NAME, Heap.CLASS_NUM_FIELDS);
+                            const cls_obj = cls.asObject();
+                            const nv = cls_obj.getField(Heap.CLASS_FIELD_NAME, cls_obj.header.size);
                             if (nv.isObject() and nv.asObject().header.class_index == Heap.CLASS_SYMBOL) {
                                 break :blk nv.asObject().bytes(nv.asObject().header.size);
                             }
                         }
                         if (slot0.isSmallInt()) break :blk "SmallInteger";
                         if (slot0.isNil()) break :blk "nil";
-                        break :blk "<?>";            
+                        break :blk "<?>";
                     };
                     const s1 = blk: {
                         const cls = self.heap.classOf(slot1);
                         if (cls.isObject()) {
-                            const nv = cls.asObject().getField(Heap.CLASS_FIELD_NAME, Heap.CLASS_NUM_FIELDS);
+                            const cls_obj = cls.asObject();
+                            const nv = cls_obj.getField(Heap.CLASS_FIELD_NAME, cls_obj.header.size);
                             if (nv.isObject() and nv.asObject().header.class_index == Heap.CLASS_SYMBOL) {
                                 break :blk nv.asObject().bytes(nv.asObject().header.size);
                             }
                         }
                         if (slot1.isSmallInt()) break :blk "SmallInteger";
                         if (slot1.isNil()) break :blk "nil";
-                        break :blk "<?>";            
+                        break :blk "<?>";
                     };
                     std.debug.print("  outer_temp_base={} slot0={s} slot1={s}\n", .{ base, s0, s1 });
                 }
@@ -2526,7 +2783,8 @@ pub const Interpreter = struct {
         const recv_class = self.heap.classOf(recv);
         var recv_name: []const u8 = "<?>";
         if (recv_class.isObject()) {
-            const name_val = recv_class.asObject().getField(Heap.CLASS_FIELD_NAME, Heap.CLASS_NUM_FIELDS);
+            const rc_obj = recv_class.asObject();
+            const name_val = rc_obj.getField(Heap.CLASS_FIELD_NAME, rc_obj.header.size);
             if (name_val.isObject() and name_val.asObject().header.class_index == Heap.CLASS_SYMBOL) {
                 recv_name = name_val.asObject().bytes(name_val.asObject().header.size);
             }
