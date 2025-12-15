@@ -2095,6 +2095,27 @@ pub const Interpreter = struct {
             self.inline_cache_hits += 1;
             if (ic_entry.cached_method) |found_method| {
                 const method_holder = ic_entry.cached_holder;
+
+                // JIT path - check if method is JIT-compiled
+                if (self.jit_enabled) {
+                    if (self.jit_compiler) |jit_ptr| {
+                        // Check if already compiled, or try to compile
+                        var compiled = jit_ptr.getCompiled(found_method);
+                        if (compiled == null and JIT.isJitEligible(found_method)) {
+                            _ = jit_ptr.compile(found_method) catch null;
+                            compiled = jit_ptr.getCompiled(found_method);
+                        }
+                        if (compiled) |code| {
+                            self.receiver = recv;
+                            const result = code.entry(self);
+                            self.sp = recv_pos;
+                            try self.push(result);
+                            self.jit_compiled_calls += 1;
+                            return;
+                        }
+                    }
+                }
+
                 // Execute the cached method (same logic as below)
                 if (found_method.header.primitive_index != 0) {
                     if (primitives.executePrimitive(self, found_method.header.primitive_index)) |result| {

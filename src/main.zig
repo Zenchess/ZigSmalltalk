@@ -453,7 +453,21 @@ pub fn main() !void {
     heap.interpreter = &interp;
 
     if (!repl_mode) {
-        // Print JIT stats if JIT was enabled
+        // Print cache and JIT stats
+        const ic_total = interp.inline_cache_hits + interp.inline_cache_misses;
+        const mc_total = interp.method_cache_hits + interp.method_cache_misses;
+        if (ic_total > 0 or mc_total > 0) {
+            std.debug.print("Inline Cache: {d} hits, {d} misses ({d:.1}% hit rate)\n", .{
+                interp.inline_cache_hits,
+                interp.inline_cache_misses,
+                if (ic_total > 0) @as(f64, @floatFromInt(interp.inline_cache_hits)) * 100.0 / @as(f64, @floatFromInt(ic_total)) else 0.0,
+            });
+            std.debug.print("Method Cache: {d} hits, {d} misses ({d:.1}% hit rate)\n", .{
+                interp.method_cache_hits,
+                interp.method_cache_misses,
+                if (mc_total > 0) @as(f64, @floatFromInt(interp.method_cache_hits)) * 100.0 / @as(f64, @floatFromInt(mc_total)) else 0.0,
+            });
+        }
         if (interp.jit_enabled) {
             std.debug.print("JIT Stats: {d} compiled calls, {d} interpreted calls\n", .{ interp.jit_compiled_calls, interp.jit_interpreted_calls });
         }
