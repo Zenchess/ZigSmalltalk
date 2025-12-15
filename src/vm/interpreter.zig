@@ -6,6 +6,7 @@ const primitives = @import("primitives.zig");
 const debugger = @import("debugger.zig");
 const scheduler = @import("scheduler.zig");
 const overlapped = @import("overlapped.zig");
+const jit = @import("jit.zig");
 
 const Value = object.Value;
 const Object = object.Object;
@@ -15,6 +16,7 @@ const Opcode = bytecodes.Opcode;
 const Scheduler = scheduler.Scheduler;
 const Process = scheduler.Process;
 const OverlappedPool = overlapped.OverlappedPool;
+const JIT = jit.JIT;
 
 var debug_receiver_idx2_count: usize = 0;
 var debug_send_special_count: usize = 0;
@@ -185,6 +187,12 @@ pub const Interpreter = struct {
     selector_ifTrueIfFalse: Value,
     selector_ifFalseIfTrue: Value,
 
+    // JIT Compiler (optional - null if JIT disabled)
+    jit_compiler: ?*JIT,
+    jit_enabled: bool,
+    jit_compiled_calls: u64,
+    jit_interpreted_calls: u64,
+
     pub fn init(heap: *Heap, allocator: std.mem.Allocator) Interpreter {
         return .{
             .heap = heap,
@@ -245,7 +253,36 @@ pub const Interpreter = struct {
             .selector_ifFalse = Value.nil,
             .selector_ifTrueIfFalse = Value.nil,
             .selector_ifFalseIfTrue = Value.nil,
+            // JIT is disabled by default - call enableJit() to enable
+            .jit_compiler = null,
+            .jit_enabled = false,
+            .jit_compiled_calls = 0,
+            .jit_interpreted_calls = 0,
         };
+    }
+
+    /// Enable JIT compilation
+    pub fn enableJit(self: *Interpreter) !void {
+        if (self.jit_compiler == null) {
+            const jit_ptr = try self.allocator.create(JIT);
+            jit_ptr.* = JIT.init(self.allocator);
+            self.jit_compiler = jit_ptr;
+        }
+        self.jit_enabled = true;
+    }
+
+    /// Disable JIT compilation
+    pub fn disableJit(self: *Interpreter) void {
+        self.jit_enabled = false;
+    }
+
+    /// Deinitialize JIT compiler
+    pub fn deinitJit(self: *Interpreter) void {
+        if (self.jit_compiler) |jit_ptr| {
+            jit_ptr.deinit();
+            self.allocator.destroy(jit_ptr);
+            self.jit_compiler = null;
+        }
     }
 
     /// Initialize common selectors for fast arithmetic dispatch
@@ -1711,7 +1748,7 @@ pub const Interpreter = struct {
         }
     }
 
-    fn sendMessage(self: *Interpreter, selector_index: u8, num_args: u8, is_super: bool, bytecode_offset: usize) InterpreterError!void {
+    pub fn sendMessage(self: *Interpreter, selector_index: u8, num_args: u8, is_super: bool, bytecode_offset: usize) InterpreterError!void {
         // Get selector from literals
         const literals = self.method.getLiterals();
         const selector = literals[selector_index];
@@ -2179,6 +2216,34 @@ pub const Interpreter = struct {
                     }
                 }
             }
+
+            // ========================================================================
+            // JIT Execution Path
+            // ========================================================================
+            // If JIT is enabled and method is compiled, execute native code
+            if (self.jit_enabled) {
+                if (self.jit_compiler) |jit_ptr| {
+                    if (jit_ptr.getCompiled(found_method)) |compiled| {
+                        // Set up receiver for JIT code
+                        self.receiver = recv;
+                        // Receiver and args are already on stack at recv_pos
+                        // JIT code will access them via interpreter's stack
+
+                        // Call the JIT-compiled code
+                        const result = compiled.entry(self);
+
+                        // Pop receiver+args from stack
+                        self.sp = recv_pos;
+
+                        // Push result
+                        try self.push(result);
+
+                        self.jit_compiled_calls += 1;
+                        return;
+                    }
+                }
+            }
+            self.jit_interpreted_calls += 1;
 
             // Execute the method bytecode
             // Save current context

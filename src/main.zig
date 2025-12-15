@@ -352,8 +352,20 @@ pub fn main() !void {
     // Create interpreter
     var interp = Interpreter.init(heap, allocator);
     defer interp.deinit();
+    defer interp.deinitJit();
     // Register interpreter with heap for GC stack tracing
     heap.interpreter = &interp;
+
+    // Check for --jit flag to enable JIT compilation
+    for (args) |arg| {
+        if (std.mem.eql(u8, arg, "--jit")) {
+            interp.enableJit() catch |err| {
+                std.debug.print("Warning: Failed to enable JIT: {any}\n", .{err});
+            };
+            std.debug.print("JIT compilation enabled\n", .{});
+            break;
+        }
+    }
 
     // Process load-order file if specified
     if (load_order_path) |order_path| {
