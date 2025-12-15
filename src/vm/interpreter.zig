@@ -180,6 +180,11 @@ pub const Interpreter = struct {
     selector_bitor: Value,
     selector_bitxor: Value,
     selector_bitshift: Value,
+    // Boolean conditional selectors (for fast path)
+    selector_ifTrue: Value,
+    selector_ifFalse: Value,
+    selector_ifTrueIfFalse: Value,
+    selector_ifFalseIfTrue: Value,
 
     pub fn init(heap: *Heap, allocator: std.mem.Allocator) Interpreter {
         return .{
@@ -236,6 +241,10 @@ pub const Interpreter = struct {
             .selector_bitor = Value.nil,
             .selector_bitxor = Value.nil,
             .selector_bitshift = Value.nil,
+            .selector_ifTrue = Value.nil,
+            .selector_ifFalse = Value.nil,
+            .selector_ifTrueIfFalse = Value.nil,
+            .selector_ifFalseIfTrue = Value.nil,
         };
     }
 
@@ -256,6 +265,11 @@ pub const Interpreter = struct {
         self.selector_bitor = self.heap.internSymbol("bitOr:") catch Value.nil;
         self.selector_bitxor = self.heap.internSymbol("bitXor:") catch Value.nil;
         self.selector_bitshift = self.heap.internSymbol("bitShift:") catch Value.nil;
+        // Boolean conditional selectors
+        self.selector_ifTrue = self.heap.internSymbol("ifTrue:") catch Value.nil;
+        self.selector_ifFalse = self.heap.internSymbol("ifFalse:") catch Value.nil;
+        self.selector_ifTrueIfFalse = self.heap.internSymbol("ifTrue:ifFalse:") catch Value.nil;
+        self.selector_ifFalseIfTrue = self.heap.internSymbol("ifFalse:ifTrue:") catch Value.nil;
     }
 
     /// Flush the method cache (call when methods are added/modified)
@@ -1683,14 +1697,15 @@ pub const Interpreter = struct {
             if (DEBUG_VERBOSE) std.debug.print("DEBUG sendMessage selector non-object bits=0x{x} literal index={}\n", .{selector.bits, selector_index});
         }
         self.last_send_selector = selector_name;
-        // Pop args and receiver
-        var args: [16]Value = undefined;
-        var i: usize = num_args;
-        while (i > 0) {
-            i -= 1;
-            args[i] = try self.pop();
-        }
-        const recv = try self.pop();
+
+        // ========================================================================
+        // OPTIMIZATION: Leave receiver+args on stack, reference by offset
+        // ========================================================================
+        // Stack layout: [..., recv, arg0, arg1, ...], sp points past last arg
+        // recv_pos = sp - num_args - 1 (position of receiver)
+        // args are at recv_pos+1, recv_pos+2, etc.
+        const recv_pos = self.sp - @as(usize, num_args) - 1;
+        const recv = self.stack[recv_pos];
 
         // ========================================================================
         // SmallInteger Arithmetic Fast Paths
@@ -1698,7 +1713,7 @@ pub const Interpreter = struct {
         // Bypass full method lookup for common integer operations.
         // Only active if selectors have been initialized (checked via selector_plus).
         if (recv.isSmallInt() and num_args == 1 and !self.selector_plus.isNil()) {
-            const arg = args[0];
+            const arg = self.stack[recv_pos + 1]; // args[0]
             if (arg.isSmallInt()) {
                 const a = recv.asSmallInt();
                 const b = arg.asSmallInt();
@@ -1707,64 +1722,79 @@ pub const Interpreter = struct {
                 if (selector.bits == self.selector_plus.bits) {
                     const result = @addWithOverflow(a, b);
                     if (result[1] == 0) {
-                        try self.push(Value.fromSmallInt(result[0]));
+                        // Write result to recv position, adjust sp
+                        self.stack[recv_pos] = Value.fromSmallInt(result[0]);
+                        self.sp = recv_pos + 1;
                         return;
                     }
                     // Overflow - fall through to normal send (will use LargeInteger)
                 } else if (selector.bits == self.selector_minus.bits) {
                     const result = @subWithOverflow(a, b);
                     if (result[1] == 0) {
-                        try self.push(Value.fromSmallInt(result[0]));
+                        self.stack[recv_pos] = Value.fromSmallInt(result[0]);
+                        self.sp = recv_pos + 1;
                         return;
                     }
                 } else if (selector.bits == self.selector_times.bits) {
                     const result = @mulWithOverflow(a, b);
                     if (result[1] == 0) {
-                        try self.push(Value.fromSmallInt(result[0]));
+                        self.stack[recv_pos] = Value.fromSmallInt(result[0]);
+                        self.sp = recv_pos + 1;
                         return;
                     }
                 } else if (selector.bits == self.selector_divide.bits) {
                     // Integer division - fall through if b == 0
                     if (b != 0) {
-                        try self.push(Value.fromSmallInt(@divTrunc(a, b)));
+                        self.stack[recv_pos] = Value.fromSmallInt(@divTrunc(a, b));
+                        self.sp = recv_pos + 1;
                         return;
                     }
                 } else if (selector.bits == self.selector_modulo.bits) {
                     // Modulo - fall through if b == 0
                     if (b != 0) {
-                        try self.push(Value.fromSmallInt(@rem(a, b)));
+                        self.stack[recv_pos] = Value.fromSmallInt(@rem(a, b));
+                        self.sp = recv_pos + 1;
                         return;
                     }
                 }
                 // Comparison operations
                 else if (selector.bits == self.selector_less.bits) {
-                    try self.push(if (a < b) Value.@"true" else Value.@"false");
+                    self.stack[recv_pos] = if (a < b) Value.@"true" else Value.@"false";
+                    self.sp = recv_pos + 1;
                     return;
                 } else if (selector.bits == self.selector_greater.bits) {
-                    try self.push(if (a > b) Value.@"true" else Value.@"false");
+                    self.stack[recv_pos] = if (a > b) Value.@"true" else Value.@"false";
+                    self.sp = recv_pos + 1;
                     return;
                 } else if (selector.bits == self.selector_less_equal.bits) {
-                    try self.push(if (a <= b) Value.@"true" else Value.@"false");
+                    self.stack[recv_pos] = if (a <= b) Value.@"true" else Value.@"false";
+                    self.sp = recv_pos + 1;
                     return;
                 } else if (selector.bits == self.selector_greater_equal.bits) {
-                    try self.push(if (a >= b) Value.@"true" else Value.@"false");
+                    self.stack[recv_pos] = if (a >= b) Value.@"true" else Value.@"false";
+                    self.sp = recv_pos + 1;
                     return;
                 } else if (selector.bits == self.selector_equal.bits) {
-                    try self.push(if (a == b) Value.@"true" else Value.@"false");
+                    self.stack[recv_pos] = if (a == b) Value.@"true" else Value.@"false";
+                    self.sp = recv_pos + 1;
                     return;
                 } else if (selector.bits == self.selector_not_equal.bits) {
-                    try self.push(if (a != b) Value.@"true" else Value.@"false");
+                    self.stack[recv_pos] = if (a != b) Value.@"true" else Value.@"false";
+                    self.sp = recv_pos + 1;
                     return;
                 }
                 // Bitwise operations
                 else if (selector.bits == self.selector_bitand.bits) {
-                    try self.push(Value.fromSmallInt(a & b));
+                    self.stack[recv_pos] = Value.fromSmallInt(a & b);
+                    self.sp = recv_pos + 1;
                     return;
                 } else if (selector.bits == self.selector_bitor.bits) {
-                    try self.push(Value.fromSmallInt(a | b));
+                    self.stack[recv_pos] = Value.fromSmallInt(a | b);
+                    self.sp = recv_pos + 1;
                     return;
                 } else if (selector.bits == self.selector_bitxor.bits) {
-                    try self.push(Value.fromSmallInt(a ^ b));
+                    self.stack[recv_pos] = Value.fromSmallInt(a ^ b);
+                    self.sp = recv_pos + 1;
                     return;
                 } else if (selector.bits == self.selector_bitshift.bits) {
                     // bitShift: - positive shifts left, negative shifts right
@@ -1773,16 +1803,78 @@ pub const Interpreter = struct {
                         const shifted = a << shift_amt;
                         // Check for overflow
                         if ((shifted >> shift_amt) == a) {
-                            try self.push(Value.fromSmallInt(shifted));
+                            self.stack[recv_pos] = Value.fromSmallInt(shifted);
+                            self.sp = recv_pos + 1;
                             return;
                         }
                     } else if (b < 0 and b > -61) {
                         const shift_amt: u6 = @intCast(-b);
-                        try self.push(Value.fromSmallInt(a >> shift_amt));
+                        self.stack[recv_pos] = Value.fromSmallInt(a >> shift_amt);
+                        self.sp = recv_pos + 1;
                         return;
                     }
                     // Fall through for large shifts
                 }
+            }
+        }
+
+        // ========================================================================
+        // Boolean Conditional Fast Paths (using cached selectors - NO string compare!)
+        // ========================================================================
+        // Only if receiver is boolean and selectors are initialized
+        if ((recv.isTrue() or recv.isFalse()) and !self.selector_ifTrue.isNil()) {
+            if (selector.bits == self.selector_ifTrueIfFalse.bits and num_args == 2) {
+                const chosen_block = if (recv.isTrue()) self.stack[recv_pos + 1] else self.stack[recv_pos + 2];
+                // Pop recv+args, push block for primBlockValue
+                self.sp = recv_pos;
+                try self.push(chosen_block);
+                const res = primitives.primBlockValue(self) catch |err| {
+                    return err;
+                };
+                try self.push(res);
+                return;
+            }
+            if (selector.bits == self.selector_ifFalseIfTrue.bits and num_args == 2) {
+                const chosen_block = if (recv.isFalse()) self.stack[recv_pos + 1] else self.stack[recv_pos + 2];
+                self.sp = recv_pos;
+                try self.push(chosen_block);
+                const res = primitives.primBlockValue(self) catch |err| {
+                    return err;
+                };
+                try self.push(res);
+                return;
+            }
+            if (selector.bits == self.selector_ifTrue.bits and num_args == 1) {
+                if (recv.isTrue()) {
+                    const block = self.stack[recv_pos + 1];
+                    self.sp = recv_pos;
+                    try self.push(block);
+                    const res = primitives.primBlockValue(self) catch |err| {
+                        return err;
+                    };
+                    try self.push(res);
+                } else {
+                    // Pop recv+args, push nil
+                    self.sp = recv_pos;
+                    try self.push(Value.nil);
+                }
+                return;
+            }
+            if (selector.bits == self.selector_ifFalse.bits and num_args == 1) {
+                if (recv.isFalse()) {
+                    const block = self.stack[recv_pos + 1];
+                    self.sp = recv_pos;
+                    try self.push(block);
+                    const res = primitives.primBlockValue(self) catch |err| {
+                        return err;
+                    };
+                    try self.push(res);
+                } else {
+                    // Pop recv+args, push nil
+                    self.sp = recv_pos;
+                    try self.push(Value.nil);
+                }
+                return;
             }
         }
 
@@ -1791,53 +1883,6 @@ pub const Interpreter = struct {
             const sel_obj = selector.asObject();
             if (sel_obj.header.class_index == Heap.CLASS_SYMBOL) {
                 const sel_name = sel_obj.bytes(sel_obj.header.size);
-
-                // Fast-path boolean conditionals to avoid Dolphin methods overwriting primitives
-                if (std.mem.eql(u8, sel_name, "ifTrue:ifFalse:") and num_args == 2 and (recv.isTrue() or recv.isFalse())) {
-                    const chosen_block = if (recv.isTrue()) args[0] else args[1];
-                    try self.push(chosen_block);
-                    const res = primitives.primBlockValue(self) catch |err| {
-                        return err;
-                    };
-                    try self.push(res);
-                    return;
-                }
-
-                if (std.mem.eql(u8, sel_name, "ifFalse:ifTrue:") and num_args == 2 and (recv.isTrue() or recv.isFalse())) {
-                    const chosen_block = if (recv.isFalse()) args[0] else args[1];
-                    try self.push(chosen_block);
-                    const res = primitives.primBlockValue(self) catch |err| {
-                        return err;
-                    };
-                    try self.push(res);
-                    return;
-                }
-
-                if (std.mem.eql(u8, sel_name, "ifTrue:") and num_args == 1 and (recv.isTrue() or recv.isFalse())) {
-                    if (recv.isTrue()) {
-                        try self.push(args[0]);
-                        const res = primitives.primBlockValue(self) catch |err| {
-                            return err;
-                        };
-                        try self.push(res);
-                    } else {
-                        try self.push(Value.nil);
-                    }
-                    return;
-                }
-
-                if (std.mem.eql(u8, sel_name, "ifFalse:") and num_args == 1 and (recv.isTrue() or recv.isFalse())) {
-                    if (recv.isFalse()) {
-                        try self.push(args[0]);
-                        const res = primitives.primBlockValue(self) catch |err| {
-                            return err;
-                        };
-                        try self.push(res);
-                    } else {
-                        try self.push(Value.nil);
-                    }
-                    return;
-                }
 
                 // Fast-path: Behavior>>allSubclasses without needing closure captures
                 if (std.mem.eql(u8, sel_name, "allSubclasses") and recv.isObject() and num_args == 0) {
@@ -1870,7 +1915,9 @@ pub const Interpreter = struct {
                     for (result_list.items, 0..) |v, fi| {
                         fields[fi] = v;
                     }
-                    try self.push(arr_val);
+                    // Pop recv (num_args=0), push result
+                    self.stack[recv_pos] = arr_val;
+                    self.sp = recv_pos + 1;
                     return;
                 }
 
@@ -1879,12 +1926,14 @@ pub const Interpreter = struct {
                     std.mem.startsWith(u8, sel_name, "newMessagePattern:forProtocolNamed:") or
                     std.mem.eql(u8, sel_name, "protocolDescription:"))
                 {
-                    try self.push(Value.nil);
+                    // Pop recv+args, push nil
+                    self.stack[recv_pos] = Value.nil;
+                    self.sp = recv_pos + 1;
                     return;
                 }
                 if (std.mem.eql(u8, sel_name, "setSpecialBehavior:to:") and recv.isObject() and num_args == 2) {
-                    const mask_val = args[0];
-                    const bool_val = args[1];
+                    const mask_val = self.stack[recv_pos + 1]; // args[0]
+                    const bool_val = self.stack[recv_pos + 2]; // args[1]
                     if (DEBUG_VERBOSE) std.debug.print("DEBUG fastpath setSpecialBehavior args: mask smallInt?={} bool true?={} false?={}\n", .{ mask_val.isSmallInt(), bool_val.isTrue(), bool_val.isFalse() });
 
                     var mask: i61 = Heap.INSTSPEC_NULLTERM_MASK; // default to NullTerm mask if we can't parse
@@ -1902,7 +1951,9 @@ pub const Interpreter = struct {
                             new_spec &= ~mask;
                         }
                         recv_obj.setField(Heap.CLASS_FIELD_FORMAT, Value.fromSmallInt(new_spec), recv_obj.header.size);
-                        try self.push(Value.fromSmallInt(new_spec));
+                        // Pop recv+args, push result
+                        self.stack[recv_pos] = Value.fromSmallInt(new_spec);
+                        self.sp = recv_pos + 1;
                         return;
                     }
                     // If we can't handle, fall through to normal send
@@ -1952,27 +2003,119 @@ pub const Interpreter = struct {
         // Get the class to start lookup from
         const receiver_class = self.heap.classOf(recv);
 
-        // Inline cache disabled - overhead exceeds benefit in current implementation
-        // The global method cache already provides good caching for monomorphic sends
-        _ = bytecode_offset; // Silence unused parameter warning
+        // ========================================================================
+        // Monomorphic Inline Cache (MIC) - per-callsite caching
+        // ========================================================================
+        // For monomorphic sends (95%+ of sends), we want just:
+        //   1 load (receiver class) - already done above
+        //   1 compare (vs cached class)
+        //   1 conditional jump (to cached method)
+        // This avoids the hash computation of the global cache on hot paths.
+        const method_ptr = @intFromPtr(self.method);
+        const ic_hash = method_ptr ^ @as(usize, bytecode_offset);
+        const ic_index = ic_hash & (INLINE_CACHE_SIZE - 1);
+        const ic_entry = &self.inline_cache[ic_index];
+
+        // Fast path: check if this exact callsite has a cached lookup
+        if (!is_super and ic_entry.method_ptr == method_ptr and
+            ic_entry.bytecode_offset == @as(u16, @intCast(bytecode_offset)) and
+            ic_entry.cached_class.bits == receiver_class.bits)
+        {
+            // Inline cache HIT - use cached method directly
+            self.inline_cache_hits += 1;
+            if (ic_entry.cached_method) |found_method| {
+                const method_holder = ic_entry.cached_holder;
+                // Execute the cached method (same logic as below)
+                if (found_method.header.primitive_index != 0) {
+                    if (primitives.executePrimitive(self, found_method.header.primitive_index)) |result| {
+                        try self.push(result);
+                        return;
+                    } else |err| {
+                        if (err == InterpreterError.ContinueExecution) return;
+                        if (err == InterpreterError.MessageNotUnderstood) {
+                            self.last_mnu_selector = selector_name;
+                            self.last_mnu_receiver = recv;
+                            self.last_mnu_method = self.currentMethodSource();
+                            return err;
+                        }
+                        if (err == InterpreterError.BlockNonLocalReturn) return err;
+                        // Primitive failed - restore stack and fall through
+                        self.sp = recv_pos;
+                        try self.push(self.stack[recv_pos]);
+                        var arg_idx: usize = 0;
+                        while (arg_idx < num_args) : (arg_idx += 1) {
+                            try self.push(self.stack[recv_pos + 1 + arg_idx]);
+                        }
+                    }
+                }
+                // Execute method bytecode (inlined from below for speed)
+                if (self.context_ptr >= self.contexts.len - 1) {
+                    return InterpreterError.StackOverflow;
+                }
+                self.contexts[self.context_ptr] = .{
+                    .method = self.method,
+                    .method_class = self.method_class,
+                    .ip = self.ip,
+                    .receiver = self.receiver,
+                    .temp_base = self.temp_base,
+                    .outer_temp_base = self.outer_temp_base,
+                    .home_temp_base = self.home_temp_base,
+                    .num_args = 0,
+                    .num_temps = 0,
+                    .outer_context = null,
+                    .closure = null,
+                    .heap_context = self.heap_context,
+                    .home_heap_context = self.home_heap_context,
+                };
+                self.context_ptr += 1;
+                self.method = found_method;
+                self.method_class = method_holder;
+                self.ip = 0;
+                self.receiver = recv;
+                self.temp_base = recv_pos;
+                self.outer_temp_base = self.temp_base;
+                self.home_temp_base = self.temp_base;
+                self.heap_context = Value.nil;
+                self.home_heap_context = Value.nil;
+                const total_temps = found_method.header.num_temps;
+                const local_temps = if (total_temps > num_args) total_temps - @as(u8, @intCast(num_args)) else 0;
+                var k: usize = 0;
+                while (k < local_temps) : (k += 1) {
+                    try self.push(Value.nil);
+                }
+                return;
+            }
+        }
+
+        // Inline cache MISS - fall through to global cache lookup
+        self.inline_cache_misses += 1;
 
         const super_lookup_class = if (!self.method_class.isNil()) self.method_class else receiver_class;
         const start_class = if (is_super)
             self.getSuperclass(super_lookup_class)
         else
             self.heap.classOf(recv);
-        // Look up method in class hierarchy
+        // Look up method in class hierarchy (uses global method cache)
         if (self.lookupMethodWithHolder(start_class, selector)) |method_lookup| {
+            // Update inline cache for non-super sends
+            if (!is_super) {
+                ic_entry.* = .{
+                    .method_ptr = method_ptr,
+                    .bytecode_offset = @intCast(bytecode_offset),
+                    .cached_class = receiver_class,
+                    .cached_method = method_lookup.method,
+                    .cached_holder = method_lookup.holder,
+                };
+            }
             const found_method = method_lookup.method;
             const method_holder = method_lookup.holder;
             // Execute the found method
             if (found_method.header.primitive_index != 0) {
-                // Push receiver and args back for primitive
-                try self.push(recv);
-                for (args[0..num_args]) |arg| {
-                    try self.push(arg);
-                }
+                // Primitives pop their arguments from the stack, so we need to ensure
+                // recv+args are at the top of stack. Since they're already there, the
+                // primitive can pop them directly.
                 if (primitives.executePrimitive(self, found_method.header.primitive_index)) |result| {
+                    // Primitive consumed recv+args via pop, push result
                     try self.push(result);
                     return;
                 } else |err| {
@@ -1995,10 +2138,14 @@ pub const Interpreter = struct {
                         return err;
                     }
                     // Primitive failed, fall through to execute bytecode
-                    // Pop the args and receiver we just pushed
-                    var j: usize = 0;
-                    while (j < num_args + 1) : (j += 1) {
-                        _ = try self.pop();
+                    // Most primitives pop all args then fail immediately without pushing,
+                    // so the original values are still in the stack array at their positions.
+                    // We restore recv+args by reading from those positions.
+                    self.sp = recv_pos;  // Reset sp to before recv
+                    try self.push(self.stack[recv_pos]);  // Push recv
+                    var arg_idx: usize = 0;
+                    while (arg_idx < num_args) : (arg_idx += 1) {
+                        try self.push(self.stack[recv_pos + 1 + arg_idx]);
                     }
                 }
             }
@@ -2047,20 +2194,17 @@ pub const Interpreter = struct {
             self.method_class = method_holder;
             self.ip = 0;
             self.receiver = recv;
-            self.temp_base = self.sp;
+            // OPTIMIZATION: recv+args already on stack at recv_pos
+            // temp_base points to receiver position
+            self.temp_base = recv_pos;
             self.outer_temp_base = self.temp_base;
             self.home_temp_base = self.temp_base; // Blocks in this method return to this context
             // Clear heap contexts - method has its own fresh temps, not shared with calling block
             self.heap_context = Value.nil;
             self.home_heap_context = Value.nil;
 
-            // Push receiver (at temp_base, but NOT accessible as temp - receiver is accessed via self.receiver)
-            try self.push(recv);
-
-            // Push arguments (these are temps 0, 1, 2, ...)
-            for (args[0..num_args]) |arg| {
-                try self.push(arg);
-            }
+            // OPTIMIZATION: recv+args already on stack, no need to push them
+            // Receiver is at stack[temp_base], args at stack[temp_base+1..]
 
             // Allocate space for temporaries
             const total_temps = found_method.header.num_temps;
@@ -2109,16 +2253,19 @@ pub const Interpreter = struct {
                 };
                 // Message has: selector, arguments, lookupClass
                 message.setField(0, selector, 3); // selector
-                // Create arguments array
+                // Create arguments array - read args from stack (they're still there)
                 const args_array = self.heap.allocateObject(Heap.CLASS_ARRAY, num_args, .variable) catch {
                     return InterpreterError.OutOfMemory;
                 };
                 var j: usize = 0;
                 while (j < num_args) : (j += 1) {
-                    args_array.setField(j, args[j], num_args);
+                    args_array.setField(j, self.stack[recv_pos + 1 + j], num_args);
                 }
                 message.setField(1, Value.fromObject(args_array), 3); // arguments
                 message.setField(2, start_class, 3); // lookupClass
+
+                // Pop original recv+args from stack before calling DNU
+                self.sp = recv_pos;
 
                 // If doesNotUnderstand: is a primitive, execute it directly
                 if (found_dnu.header.primitive_index != 0) {
