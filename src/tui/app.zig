@@ -141,12 +141,14 @@ pub const App = struct {
         var browser = try BrowserTab.init(allocator, content_rect);
         const ffi_config = try FFIConfigTab.init(allocator, content_rect);
 
-        // Create package registry with default packages
+        // Create package registry with system packages
         var package_registry = PackageRegistry.init(allocator);
-        _ = try package_registry.createPackage("Unpackaged");
+        try package_registry.initSystemPackages();
 
-        // Add default packages to browser
-        try browser.addPackage("Unpackaged");
+        // Add all packages to browser
+        for (package_registry.packages.items) |pkg| {
+            try browser.addPackage(pkg.name);
+        }
 
         const app = try allocator.create(App);
         app.* = App{
@@ -171,9 +173,9 @@ pub const App = struct {
             },
             .browser_items = &[_]StatusItem{
                 .{ .text = "Save", .key = "Ctrl+S" },
-                .{ .text = "Export Pkg", .key = "Ctrl+E" },
+                .{ .text = "Export", .key = "Ctrl+E" },
+                .{ .text = "New Pkg", .key = "Ctrl+N" },
                 .{ .text = "New Class", .key = "Ctrl+A" },
-                .{ .text = "Switch Pane", .key = "Tab" },
             },
             .default_items = &[_]StatusItem{
                 .{ .text = "Quit", .key = "Ctrl+Q" },
@@ -190,7 +192,9 @@ pub const App = struct {
         try app.transcript.addLine("  Ctrl+Shift+S - Save Image    F12 - Save Image As    Ctrl+Q - Quit", .normal);
         try app.transcript.addLine("", .normal);
         try app.transcript.addLine("Workspace: Ctrl+D execute | Ctrl+P print | Ctrl+I inspect", .normal);
-        try app.transcript.addLine("Browser:   Ctrl+S save method | Ctrl+E export package | Ctrl+A new class", .normal);
+        try app.transcript.addLine("Browser:   Ctrl+S save | Ctrl+E export pkg | Ctrl+N new pkg | Ctrl+A new class", .normal);
+        try app.transcript.addLine("", .normal);
+        try app.transcript.addLine("Packages: System packages in system-packages/, user packages in packages/", .normal);
 
         // Set global transcript for primitive output redirection
         transcript_mod.setGlobalTranscript(&app.transcript);
@@ -207,6 +211,7 @@ pub const App = struct {
         app.browser.on_new_method = &browserNewMethod;
         app.browser.on_select_package = &browserSelectPackage;
         app.browser.on_save_package = &browserSavePackage;
+        app.browser.on_create_package = &browserCreatePackage;
 
         // Set global app pointer for callbacks
         g_app = app;
@@ -515,11 +520,18 @@ pub const App = struct {
 
         // Handle browser BEFORE tab bar so Tab works for pane switching
         if (self.active_tab == 2) {
-            // Handle Ctrl+S to save method
+            // Handle Ctrl+key shortcuts for browser
             if (key == .ctrl) {
-                if (key.ctrl == 19) { // Ctrl+S
-                    self.saveMethod();
-                    return;
+                switch (key.ctrl) {
+                    19 => { // Ctrl+S - Save method
+                        self.saveMethod();
+                        return;
+                    },
+                    14 => { // Ctrl+N - New package
+                        self.browser.showNewPackageDialog();
+                        return;
+                    },
+                    else => {},
                 }
             }
 
@@ -765,6 +777,9 @@ pub const App = struct {
             }
 
             self.browser.addClass(name, parent_name) catch {};
+
+            // Auto-categorize into appropriate package
+            self.package_registry.categorizeClass(name) catch {};
         }
 
         // Add FFI libraries to the browser
@@ -1843,6 +1858,23 @@ fn browserSelectPackage(browser: *BrowserTab, package_name: []const u8) void {
 }
 
 // Callback for browser - save package to file
+fn browserCreatePackage(browser: *BrowserTab, package_name: []const u8) void {
+    const app = g_app orelse return;
+
+    // Create the package (user package, not system)
+    const pkg = app.package_registry.createPackage(package_name) catch {
+        browser.setStatus("Out of memory creating package", true);
+        return;
+    };
+    pkg.is_system = false; // User packages are not system packages
+
+    // Success message
+    var msg_buf: [64]u8 = undefined;
+    const msg = std.fmt.bufPrint(&msg_buf, "Created package: {s}", .{package_name}) catch "Package created";
+    browser.setStatus(msg, false);
+    app.transcript.addSuccess(msg) catch {};
+}
+
 fn browserSavePackage(browser: *BrowserTab, package_name: []const u8) void {
     const app = g_app orelse return;
 

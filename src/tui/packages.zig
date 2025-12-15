@@ -6,8 +6,10 @@ pub const Package = struct {
     allocator: std.mem.Allocator,
     name: []const u8,
     classes: std.ArrayList([]const u8),
-    file_path: ?[]const u8 = null, // Path for saving (relative to packages/)
+    file_path: ?[]const u8 = null, // Path for saving (relative to base directory)
     modified: bool = false,
+    is_system: bool = false, // System packages are read-only and saved to system-packages/
+    loaded: bool = true, // Whether the package is currently loaded
 
     pub fn init(allocator: std.mem.Allocator, name: []const u8) Package {
         return .{
@@ -52,6 +54,92 @@ pub const Package = struct {
         }
         return false;
     }
+
+    /// Get the base directory for this package type
+    pub fn getBaseDir(self: *const Package) []const u8 {
+        return if (self.is_system) "system-packages" else "packages";
+    }
+};
+
+/// System package definitions - maps package names to class name patterns
+pub const SystemPackageDefinitions = struct {
+    pub const Kernel = [_][]const u8{
+        "Object", "UndefinedObject", "Boolean", "True", "False",
+        "Behavior", "Class", "Metaclass", "ClassDescription",
+        "CompiledMethod", "BlockClosure", "Context", "MethodContext",
+        "Process", "ProcessorScheduler", "Semaphore", "Delay",
+        "Message", "MessageSend", "Symbol", "Pragma",
+    };
+
+    pub const Collections = [_][]const u8{
+        "Collection", "SequenceableCollection", "ArrayedCollection",
+        "Array", "ByteArray", "String", "WordArray",
+        "OrderedCollection", "SortedCollection", "LinkedList", "Interval",
+        "Set", "IdentitySet", "Dictionary", "IdentityDictionary",
+        "Bag", "Association", "Link", "HashedCollection",
+    };
+
+    pub const Magnitude = [_][]const u8{
+        "Magnitude", "Number", "Integer", "SmallInteger", "LargeInteger",
+        "Float", "Fraction", "Character", "Date", "Time", "Duration",
+        "DateAndTime", "Timestamp", "Point", "Rectangle",
+    };
+
+    pub const Streams = [_][]const u8{
+        "Stream", "PositionableStream", "ReadStream", "WriteStream",
+        "ReadWriteStream", "FileStream", "ExternalStream",
+        "TextStream", "TranscriptStream", "NullStream",
+    };
+
+    pub const Exceptions = [_][]const u8{
+        "Exception", "Error", "Notification", "Warning",
+        "MessageNotUnderstood", "ZeroDivide", "SubscriptOutOfBounds",
+        "KeyNotFound", "NotFound", "Halt", "AssertionFailure",
+    };
+
+    pub const FFI = [_][]const u8{
+        "FFILibrary", "ExternalStructure", "ExternalAddress",
+        "ExternalData", "ExternalFunction", "ExternalType",
+        "RaylibColor", "RaylibVector2", "RaylibVector3", "RaylibRectangle",
+    };
+
+    pub const Testing = [_][]const u8{
+        "TestCase", "TestSuite", "TestResult", "TestResource",
+        "TestRunner", "SUnitTest",
+    };
+
+    /// Get all system package names
+    pub fn getPackageNames() []const []const u8 {
+        return &[_][]const u8{
+            "Kernel", "Collections", "Magnitude", "Streams", "Exceptions", "FFI", "Testing",
+        };
+    }
+
+    /// Check if a class belongs to a system package
+    pub fn getPackageForClass(class_name: []const u8) ?[]const u8 {
+        for (Kernel) |name| {
+            if (std.mem.eql(u8, name, class_name)) return "Kernel";
+        }
+        for (Collections) |name| {
+            if (std.mem.eql(u8, name, class_name)) return "Collections";
+        }
+        for (Magnitude) |name| {
+            if (std.mem.eql(u8, name, class_name)) return "Magnitude";
+        }
+        for (Streams) |name| {
+            if (std.mem.eql(u8, name, class_name)) return "Streams";
+        }
+        for (Exceptions) |name| {
+            if (std.mem.eql(u8, name, class_name)) return "Exceptions";
+        }
+        for (FFI) |name| {
+            if (std.mem.eql(u8, name, class_name)) return "FFI";
+        }
+        for (Testing) |name| {
+            if (std.mem.eql(u8, name, class_name)) return "Testing";
+        }
+        return null;
+    }
 };
 
 /// Package Registry - manages all packages
@@ -75,6 +163,17 @@ pub const PackageRegistry = struct {
         }
         self.packages.deinit(self.allocator);
         self.class_to_package.deinit(self.allocator);
+    }
+
+    /// Initialize system packages
+    pub fn initSystemPackages(self: *PackageRegistry) !void {
+        for (SystemPackageDefinitions.getPackageNames()) |pkg_name| {
+            const pkg = try self.createPackage(pkg_name);
+            pkg.is_system = true;
+        }
+        // Also create Unpackaged for classes that don't fit elsewhere
+        const unpackaged = try self.createPackage("Unpackaged");
+        unpackaged.is_system = false; // User can modify this
     }
 
     pub fn createPackage(self: *PackageRegistry, name: []const u8) !*Package {
@@ -103,6 +202,32 @@ pub const PackageRegistry = struct {
         return null;
     }
 
+    pub fn removePackage(self: *PackageRegistry, name: []const u8) bool {
+        var i: usize = 0;
+        while (i < self.packages.items.len) {
+            if (std.mem.eql(u8, self.packages.items[i].name, name)) {
+                const pkg = self.packages.orderedRemove(i);
+                // Remove all class mappings for this package
+                var to_remove = std.ArrayList([]const u8).init(self.allocator);
+                defer to_remove.deinit();
+                var iter = self.class_to_package.iterator();
+                while (iter.next()) |entry| {
+                    if (entry.value_ptr.* == pkg) {
+                        to_remove.append(entry.key_ptr.*) catch continue;
+                    }
+                }
+                for (to_remove.items) |key| {
+                    _ = self.class_to_package.remove(key);
+                }
+                pkg.deinit(self.allocator);
+                self.allocator.destroy(pkg);
+                return true;
+            }
+            i += 1;
+        }
+        return false;
+    }
+
     pub fn addClassToPackage(self: *PackageRegistry, package_name: []const u8, class_name: []const u8) !void {
         const pkg = self.getPackage(package_name) orelse try self.createPackage(package_name);
 
@@ -113,6 +238,17 @@ pub const PackageRegistry = struct {
 
         try pkg.addClass(class_name);
         try self.class_to_package.put(self.allocator, class_name, pkg);
+    }
+
+    /// Automatically categorize a class into the appropriate system package
+    pub fn categorizeClass(self: *PackageRegistry, class_name: []const u8) !void {
+        // Check if class matches a system package pattern
+        if (SystemPackageDefinitions.getPackageForClass(class_name)) |pkg_name| {
+            try self.addClassToPackage(pkg_name, class_name);
+        } else {
+            // Put in Unpackaged
+            try self.addClassToPackage("Unpackaged", class_name);
+        }
     }
 
     pub fn getPackageForClass(self: *PackageRegistry, class_name: []const u8) ?*Package {
@@ -127,18 +263,19 @@ pub const PackageRegistry = struct {
         return names;
     }
 
-    /// File out a package to ./packages/<name>.st
+    /// File out a package to the appropriate directory
     pub fn fileOutPackage(self: *PackageRegistry, package: *Package, heap: *Heap) !void {
         const file_name = package.file_path orelse return error.NoFilePath;
+        const base_dir = package.getBaseDir();
 
-        // Ensure packages directory exists
-        std.fs.cwd().makeDir("packages") catch |err| {
+        // Ensure directory exists
+        std.fs.cwd().makeDir(base_dir) catch |err| {
             if (err != error.PathAlreadyExists) return err;
         };
 
         // Build full path
         var path_buf: [256]u8 = undefined;
-        const full_path = std.fmt.bufPrint(&path_buf, "packages/{s}", .{file_name}) catch return error.PathTooLong;
+        const full_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ base_dir, file_name }) catch return error.PathTooLong;
 
         // Open file for writing
         var file = std.fs.cwd().createFile(full_path, .{}) catch return error.IoError;
@@ -149,7 +286,11 @@ pub const PackageRegistry = struct {
         // Write header comment
         const len = std.fmt.bufPrint(&buf, "\"Package: {s}\"\n", .{package.name}) catch return error.IoError;
         file.writeAll(len) catch return error.IoError;
-        file.writeAll("\"Generated by ZigSmalltalk\"\n\n") catch return error.IoError;
+        if (package.is_system) {
+            file.writeAll("\"System Package - Generated by ZigSmalltalk\"\n\n") catch return error.IoError;
+        } else {
+            file.writeAll("\"User Package - Generated by ZigSmalltalk\"\n\n") catch return error.IoError;
+        }
 
         // Write each class
         for (package.classes.items) |class_name| {
@@ -157,6 +298,25 @@ pub const PackageRegistry = struct {
         }
 
         package.modified = false;
+    }
+
+    /// Load a package from file
+    pub fn loadPackageFromFile(self: *PackageRegistry, package_name: []const u8, is_system: bool) !*Package {
+        const base_dir = if (is_system) "system-packages" else "packages";
+        var path_buf: [256]u8 = undefined;
+        const full_path = std.fmt.bufPrint(&path_buf, "{s}/{s}.st", .{ base_dir, package_name }) catch return error.PathTooLong;
+
+        // Check if file exists
+        _ = std.fs.cwd().statFile(full_path) catch return error.FileNotFound;
+
+        // Create or get the package
+        const pkg = try self.createPackage(package_name);
+        pkg.is_system = is_system;
+        pkg.loaded = true;
+
+        // Note: Actual file loading would require the FileIn module
+        // For now, just mark as loaded
+        return pkg;
     }
 
     fn fileOutClass(_: *PackageRegistry, file: std.fs.File, class_name: []const u8, heap: *Heap) !void {

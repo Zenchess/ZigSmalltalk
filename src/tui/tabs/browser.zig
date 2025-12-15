@@ -58,6 +58,11 @@ pub const BrowserTab = struct {
     dialog_inst_vars_len: usize = 0,
     dialog_field: DialogField = .class_name,
 
+    // New package dialog state
+    show_new_package_dialog: bool = false,
+    dialog_package_name: [64]u8 = [_]u8{0} ** 64,
+    dialog_package_name_len: usize = 0,
+
     // Status message
     status_message: [128]u8 = undefined,
     status_len: usize = 0,
@@ -73,6 +78,7 @@ pub const BrowserTab = struct {
     on_save_class_definition: ?*const fn (*BrowserTab, []const u8, []const u8) void = null,
     on_new_method: ?*const fn (*BrowserTab, bool) void = null, // Called when user wants to create new method (bool = class_side)
     on_save_package: ?*const fn (*BrowserTab, []const u8) void = null, // Called to save package to file
+    on_create_package: ?*const fn (*BrowserTab, []const u8) void = null, // Called to create new package
 
     pub const DialogField = enum {
         class_name,
@@ -426,7 +432,12 @@ pub const BrowserTab = struct {
     }
 
     pub fn handleKey(self: *BrowserTab, key: Key) EventResult {
-        // Handle new class dialog first
+        // Handle new package dialog first
+        if (self.show_new_package_dialog) {
+            return self.handlePackageDialogKey(key);
+        }
+
+        // Handle new class dialog
         if (self.show_new_class_dialog) {
             return self.handleDialogKey(key);
         }
@@ -591,6 +602,58 @@ pub const BrowserTab = struct {
                 self.dialog_inst_vars[0..self.dialog_inst_vars_len],
             );
         }
+    }
+
+    pub fn showNewPackageDialog(self: *BrowserTab) void {
+        self.show_new_package_dialog = true;
+        self.dialog_package_name_len = 0;
+    }
+
+    fn handlePackageDialogKey(self: *BrowserTab, key: Key) EventResult {
+        switch (key) {
+            .escape => {
+                self.show_new_package_dialog = false;
+                return .consumed;
+            },
+            .enter => {
+                // Submit dialog - create the package
+                if (self.dialog_package_name_len > 0) {
+                    self.createPackageFromDialog();
+                    self.show_new_package_dialog = false;
+                }
+                return .consumed;
+            },
+            .backspace => {
+                if (self.dialog_package_name_len > 0) self.dialog_package_name_len -= 1;
+                return .consumed;
+            },
+            .char => |c| {
+                // Add character to package name (only alphanumeric)
+                if (c < 128) {
+                    const char: u8 = @intCast(c);
+                    if ((char >= 'A' and char <= 'Z') or
+                        (char >= 'a' and char <= 'z') or
+                        (char >= '0' and char <= '9') or
+                        char == '_' or char == '-')
+                    {
+                        if (self.dialog_package_name_len < self.dialog_package_name.len - 1) {
+                            self.dialog_package_name[self.dialog_package_name_len] = char;
+                            self.dialog_package_name_len += 1;
+                        }
+                    }
+                }
+                return .consumed;
+            },
+            else => return .consumed,
+        }
+    }
+
+    fn createPackageFromDialog(self: *BrowserTab) void {
+        if (self.on_create_package) |cb| {
+            cb(self, self.dialog_package_name[0..self.dialog_package_name_len]);
+        }
+        // Add to browser's package list
+        self.addPackage(self.dialog_package_name[0..self.dialog_package_name_len]) catch {};
     }
 
     fn save(self: *BrowserTab) void {
@@ -1151,6 +1214,40 @@ pub const BrowserTab = struct {
         if (self.show_new_class_dialog) {
             self.drawNewClassDialog(screen);
         }
+
+        // Draw new package dialog if visible
+        if (self.show_new_package_dialog) {
+            self.drawNewPackageDialog(screen);
+        }
+    }
+
+    fn drawNewPackageDialog(self: *BrowserTab, screen: *Screen) void {
+        const dialog_width: u16 = 50;
+        const dialog_height: u16 = 7;
+        const dialog_x = (self.rect.width -| dialog_width) / 2 + self.rect.x;
+        const dialog_y = (self.rect.height -| dialog_height) / 2 + self.rect.y;
+
+        const dialog_rect = Rect.init(dialog_x, dialog_y, dialog_width, dialog_height);
+
+        // Draw dialog background
+        screen.fillRect(dialog_rect.x, dialog_rect.y, dialog_rect.width, dialog_rect.height, ' ', style_mod.styles.normal);
+        widget.drawBorderRounded(screen, dialog_rect, true);
+        widget.drawTitle(screen, dialog_rect, "New Package (Ctrl+N)", true);
+
+        const label_style = style_mod.styles.normal;
+        const field_style = Style{ .fg = style_mod.theme.text, .bg = style_mod.theme.surface1, .bold = false };
+
+        // Package name field
+        screen.drawText(dialog_x + 2, dialog_y + 2, "Name:", label_style);
+        screen.fillRect(dialog_x + 8, dialog_y + 2, dialog_width - 12, 1, ' ', field_style);
+        screen.drawTextClipped(dialog_x + 8, dialog_y + 2, self.dialog_package_name[0..self.dialog_package_name_len], dialog_width - 12, field_style);
+
+        // Help text
+        screen.drawText(dialog_x + 2, dialog_y + 4, "Enter: create | Esc: cancel", style_mod.styles.dim);
+
+        // Position cursor at end of name field
+        screen.cursor_visible = true;
+        screen.setCursor(dialog_x + 8 + @as(u16, @intCast(self.dialog_package_name_len)), dialog_y + 2);
     }
 
     fn drawNewClassDialog(self: *BrowserTab, screen: *Screen) void {
