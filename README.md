@@ -127,10 +127,19 @@ ZigSmalltalk can automatically generate bindings for C libraries at compile time
 The easiest way to configure FFI bindings is through the **FFI Config** tab (`F4`) in the TUI:
 
 1. Press `F4` to open the FFI Config tab
-2. Add libraries by specifying the library name, headers, and link name
-3. Enable/disable libraries as needed
-4. Press `Ctrl+S` to save the configuration
-5. Rebuild with `zig build gen-ffi && zig build`
+2. Press `A` to add a new library
+3. Enter the library name (e.g., `Raylib`)
+4. Enter the **full path** to the header file (e.g., `C:\raylib\include\raylib.h` or `/usr/include/raylib.h`)
+5. Enter the **full path** to the library file (e.g., `C:\raylib\lib\libraylib.dll.a` or `/usr/lib/libraylib.so`)
+6. Press `Enter` to add, then `Ctrl+S` to save
+7. Regenerate bindings and rebuild:
+
+```bash
+zig build gen-ffi
+zig build
+```
+
+**Note (Windows):** Ensure the DLL file is in your PATH at runtime.
 
 ### Advanced: Direct JSON Configuration
 
@@ -140,11 +149,10 @@ The configuration is stored in `ffi-config.json`:
 {
   "libraries": [
     {
-      "name": "GLFW",
-      "headers": ["GLFW/glfw3.h"],
-      "link": "glfw",
-      "enabled": true,
-      "functions": ["glfwInit", "glfwCreateWindow", "glfwPollEvents"]
+      "name": "Raylib",
+      "headers": ["C:\\raylib\\include\\raylib.h"],
+      "link": "C:\\raylib\\lib\\libraylib.dll.a",
+      "enabled": true
     }
   ]
 }

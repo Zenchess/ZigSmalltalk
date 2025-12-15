@@ -1,3 +1,29 @@
+"Dynamic class and method creation primitives"
+
+"SmallInteger printString - needed for FFI struct generation"
+!SmallInteger methodsFor!
+
+printString
+    "Answer a string representation of the receiver using VM primitive."
+    <primitive: 44>
+    ^self primitiveFailed!
+
+!
+
+!Class methodsFor!
+
+subclass: aSymbol
+    "Create a new subclass of the receiver with the given name"
+    <primitive: 796>
+    ^self primitiveFailed!
+
+compile: sourceString
+    "Compile and install a method from source code"
+    <primitive: 797>
+    ^self primitiveFailed!
+
+!
+
 !ByteArray methodsFor!
 
 uint8At: offset
@@ -192,6 +218,68 @@ printOn: aStream
     aStream nextPut: $)!
 
 !
+
+"FFI Library Introspection and Dynamic Struct Generation"
+
+Object subclass: #FFILibrary
+    instanceVariableNames: ''
+    classVariableNames: ''
+    poolDictionaries: ''
+    classInstanceVariableNames: ''!
+
+!FFILibrary class methodsFor!
+
+structNamesFor: libraryName
+    "Return array of struct names for the given library"
+    <primitive: 790>
+    ^#()!
+
+structInfo: structName for: libraryName
+    "Return struct info: #(size #(fieldName offset size accessorType) ...)"
+    <primitive: 791>
+    ^nil!
+
+generateStructsFor: libraryName
+    "Dynamically generate ExternalStructure subclasses for all structs in the library"
+    | structNames |
+    structNames := self structNamesFor: libraryName.
+    structNames do: [:name |
+        self createStructClass: name inLibrary: libraryName
+    ].
+    ^structNames size!
+
+createStructClass: structName inLibrary: libraryName
+    | info size newClass base |
+    info := self structInfo: structName for: libraryName.
+    info isNil ifTrue: [^nil].
+    size := info at: 1.
+    base := ExternalStructure.
+    newClass := base subclass: structName.
+    newClass class compile: ('byteSize ^' , size printString).
+    self addAccessorsFor: info to: newClass.
+    ^newClass!
+
+addAccessorsFor: info to: newClass
+    "Add getter and setter methods for each field"
+    | idx fieldInfo fieldName offset accessorType |
+    idx := 2.
+    [idx <= info size] whileTrue: [
+        fieldInfo := info at: idx.
+        fieldName := fieldInfo at: 1.
+        offset := fieldInfo at: 2.
+        accessorType := fieldInfo at: 4.
+        newClass compile: (fieldName , ' ^self ' , accessorType , 'At: ' , offset printString).
+        newClass compile: (fieldName , ': value self ' , accessorType , 'At: ' , offset printString , ' put: value').
+        idx := idx + 1.
+    ]!
+
+loadLibrary: libraryName
+    "Load a library and generate all its struct classes"
+    ^self generateStructsFor: libraryName!
+
+!
+
+"Hand-coded Raylib structs for backwards compatibility (will be replaced by auto-generated ones)"
 
 ExternalStructure subclass: #RaylibColor
     instanceVariableNames: ''

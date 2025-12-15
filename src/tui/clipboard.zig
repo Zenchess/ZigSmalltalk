@@ -1,12 +1,20 @@
 const std = @import("std");
-const posix = std.posix;
+const builtin = @import("builtin");
+
+const is_windows = builtin.os.tag == .windows;
+const posix = if (!is_windows) std.posix else undefined;
 
 /// Cross-platform clipboard support
 /// Uses OSC 52 escape sequences (works with most modern terminals)
 /// Falls back to system utilities (wl-copy/xclip/xsel) if OSC 52 fails
 
 fn getStdout() std.fs.File {
-    return std.fs.File{ .handle = posix.STDOUT_FILENO };
+    if (is_windows) {
+        const handle = std.os.windows.GetStdHandle(std.os.windows.STD_OUTPUT_HANDLE) catch unreachable;
+        return std.fs.File{ .handle = handle };
+    } else {
+        return std.fs.File{ .handle = posix.STDOUT_FILENO };
+    }
 }
 
 pub const ClipboardError = error{

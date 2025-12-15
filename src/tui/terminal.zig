@@ -1,5 +1,9 @@
 const std = @import("std");
-const posix = std.posix;
+const builtin = @import("builtin");
+
+// Platform-specific imports
+const is_windows = builtin.os.tag == .windows;
+const posix = if (!is_windows) std.posix else undefined;
 
 pub const Size = struct {
     width: u16,
@@ -7,33 +11,88 @@ pub const Size = struct {
 };
 
 pub const Terminal = struct {
-    original_termios: posix.termios,
-    tty: std.fs.File,
+    original_termios: if (!is_windows) posix.termios else void,
+    original_console_mode: if (is_windows) u32 else void, // Store original Windows console mode
+    tty: std.fs.File, // For output (and input on Unix)
+    tty_input: std.fs.File, // For input (separate handle on Windows)
     width: u16,
     height: u16,
 
     var instance: ?*Terminal = null;
 
     pub fn init() !Terminal {
-        // Open /dev/tty directly for proper terminal access
-        const tty = try std.fs.openFileAbsolute("/dev/tty", .{ .mode = .read_write });
-        const original = try posix.tcgetattr(tty.handle);
+        if (is_windows) {
+            // On Windows, use separate handles for input and output
+            const out_handle = std.os.windows.GetStdHandle(std.os.windows.STD_OUTPUT_HANDLE) catch return error.NoStdout;
+            const in_handle = std.os.windows.GetStdHandle(std.os.windows.STD_INPUT_HANDLE) catch return error.NoStdin;
 
-        var term = Terminal{
-            .original_termios = original,
-            .tty = tty,
-            .width = 80,
-            .height = 24,
-        };
+            // Get original console mode so we can restore it later
+            var original_mode: u32 = 0;
+            _ = std.os.windows.kernel32.GetConsoleMode(in_handle, &original_mode);
 
-        const size = term.getSize() catch Size{ .width = 80, .height = 24 };
-        term.width = size.width;
-        term.height = size.height;
+            var term = Terminal{
+                .original_termios = {},
+                .original_console_mode = original_mode,
+                .tty = std.fs.File{ .handle = out_handle },
+                .tty_input = std.fs.File{ .handle = in_handle },
+                .width = 120,
+                .height = 30,
+            };
+            const size = term.getSize() catch Size{ .width = 120, .height = 30 };
+            term.width = size.width;
+            term.height = size.height;
+            return term;
+        } else {
+            // Open /dev/tty directly for proper terminal access
+            const tty = try std.fs.openFileAbsolute("/dev/tty", .{ .mode = .read_write });
+            const original = try posix.tcgetattr(tty.handle);
 
-        return term;
+            var term = Terminal{
+                .original_termios = original,
+                .original_console_mode = {},
+                .tty = tty,
+                .tty_input = tty, // Same handle for Unix
+                .width = 80,
+                .height = 24,
+            };
+
+            const size = term.getSize() catch Size{ .width = 80, .height = 24 };
+            term.width = size.width;
+            term.height = size.height;
+
+            return term;
+        }
     }
 
     pub fn enableRawMode(self: *Terminal) !void {
+        if (is_windows) {
+            // Windows: Configure console for raw input mode
+            const in_handle = self.tty_input.handle;
+            const out_handle = self.tty.handle;
+
+            // Console mode flags for input
+            const ENABLE_WINDOW_INPUT: u32 = 0x0008;
+            const ENABLE_MOUSE_INPUT: u32 = 0x0010;
+            const ENABLE_VIRTUAL_TERMINAL_INPUT: u32 = 0x0200;
+
+            // Console mode flags for output
+            const ENABLE_PROCESSED_OUTPUT: u32 = 0x0001;
+            const ENABLE_VIRTUAL_TERMINAL_PROCESSING: u32 = 0x0004;
+
+            // Set input mode: disable echo/line input, enable VT input and mouse
+            const input_mode: u32 = ENABLE_WINDOW_INPUT | ENABLE_MOUSE_INPUT | ENABLE_VIRTUAL_TERMINAL_INPUT;
+            _ = std.os.windows.kernel32.SetConsoleMode(in_handle, input_mode);
+
+            // Set output mode: enable VT processing for ANSI escape codes
+            var output_mode: u32 = 0;
+            _ = std.os.windows.kernel32.GetConsoleMode(out_handle, &output_mode);
+            output_mode |= ENABLE_PROCESSED_OUTPUT | ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+            _ = std.os.windows.kernel32.SetConsoleMode(out_handle, output_mode);
+
+            instance = self;
+            return;
+        }
+
         var raw = self.original_termios;
 
         // Input modes: no break, no CR to NL, no parity check, no strip char, no start/stop output control
@@ -65,6 +124,12 @@ pub const Terminal = struct {
     }
 
     pub fn disableRawMode(self: *Terminal) void {
+        if (is_windows) {
+            // Restore original console mode
+            _ = std.os.windows.kernel32.SetConsoleMode(self.tty_input.handle, self.original_console_mode);
+            instance = null;
+            return;
+        }
         posix.tcsetattr(self.tty.handle, .FLUSH, self.original_termios) catch {};
         instance = null;
     }
@@ -76,19 +141,34 @@ pub const Terminal = struct {
         ansi.showCursor();
         ansi.exitAltScreen();
         ansi.resetStyle();
-        self.tty.close();
+        if (!is_windows) {
+            self.tty.close();
+        }
     }
 
     pub fn getSize(self: *Terminal) !Size {
-        var wsz: posix.winsize = undefined;
-        const rc = std.os.linux.ioctl(self.tty.handle, posix.T.IOCGWINSZ, @intFromPtr(&wsz));
-        if (rc == 0) {
-            return Size{
-                .width = wsz.col,
-                .height = wsz.row,
-            };
+        _ = self;
+        if (is_windows) {
+            // On Windows, try to get console size via Windows API
+            var csbi: std.os.windows.CONSOLE_SCREEN_BUFFER_INFO = undefined;
+            const handle = std.os.windows.GetStdHandle(std.os.windows.STD_OUTPUT_HANDLE) catch return error.GetSizeFailed;
+            if (std.os.windows.kernel32.GetConsoleScreenBufferInfo(handle, &csbi) != 0) {
+                const width: u16 = @intCast(csbi.srWindow.Right - csbi.srWindow.Left + 1);
+                const height: u16 = @intCast(csbi.srWindow.Bottom - csbi.srWindow.Top + 1);
+                return Size{ .width = width, .height = height };
+            }
+            return Size{ .width = 120, .height = 30 };
+        } else {
+            var wsz: posix.winsize = undefined;
+            const rc = std.posix.system.ioctl(std.posix.STDOUT_FILENO, posix.T.IOCGWINSZ, @intFromPtr(&wsz));
+            if (rc == 0) {
+                return Size{
+                    .width = wsz.col,
+                    .height = wsz.row,
+                };
+            }
+            return error.GetSizeFailed;
         }
-        return error.GetSizeFailed;
     }
 
     pub fn updateSize(self: *Terminal) void {
@@ -101,7 +181,12 @@ pub const Terminal = struct {
 // ANSI escape code helpers
 pub const ansi = struct {
     fn getStdout() std.fs.File {
-        return std.fs.File{ .handle = posix.STDOUT_FILENO };
+        if (is_windows) {
+            const handle = std.os.windows.GetStdHandle(std.os.windows.STD_OUTPUT_HANDLE) catch unreachable;
+            return std.fs.File{ .handle = handle };
+        } else {
+            return std.fs.File{ .handle = posix.STDOUT_FILENO };
+        }
     }
 
     pub fn clear() void {
@@ -138,7 +223,6 @@ pub const ansi = struct {
         // Enable mouse tracking:
         // 1000 = X10 compatibility mode (button press)
         // 1002 = Button-event tracking (press, release, motion while pressed)
-        // 1003 = Any-event tracking (all motion)
         // 1006 = SGR extended mode (allows coordinates > 223)
         _ = getStdout().write("\x1b[?1000h\x1b[?1002h\x1b[?1006h") catch {};
     }

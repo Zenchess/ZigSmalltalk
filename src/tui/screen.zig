@@ -75,6 +75,8 @@ pub const Screen = struct {
         for (self.cells) |*cell| {
             cell.* = Cell{};
         }
+        // Hide cursor by default; components that need it will set cursor_visible = true
+        self.cursor_visible = false;
     }
 
     pub fn clearWithStyle(self: *Screen, s: Style) void {
@@ -213,6 +215,9 @@ pub const Screen = struct {
     }
 
     pub fn flush(self: *Screen) void {
+        // Hide cursor during rendering to prevent flicker
+        ansi.hideCursor();
+
         var current_style: ?Style = null;
 
         var y: u16 = 0;
@@ -270,6 +275,49 @@ pub const Screen = struct {
         // Mark all prev_cells as different to force redraw
         for (self.prev_cells) |*cell| {
             cell.char = 0;
+        }
+    }
+
+    /// Flush all cells unconditionally (for use after resize)
+    pub fn flushFull(self: *Screen) void {
+        // Hide cursor during rendering to prevent flicker
+        ansi.hideCursor();
+
+        var current_style: ?Style = null;
+
+        var y: u16 = 0;
+        while (y < self.height) : (y += 1) {
+            // Move to start of each line and draw everything
+            ansi.moveCursor(y, 0);
+            var x: u16 = 0;
+            while (x < self.width) : (x += 1) {
+                if (self.idx(x, y)) |i| {
+                    const cell = self.cells[i];
+
+                    // Update style if changed
+                    if (current_style == null or !current_style.?.eql(cell.style)) {
+                        cell.style.apply();
+                        current_style = cell.style;
+                    }
+
+                    // Write character
+                    ansi.writeChar(cell.char);
+
+                    // Update prev buffer
+                    self.prev_cells[i] = cell;
+                }
+            }
+        }
+
+        // Reset style
+        ansi.resetStyle();
+
+        // Position cursor
+        if (self.cursor_visible) {
+            ansi.moveCursor(self.cursor_y, self.cursor_x);
+            ansi.showCursor();
+        } else {
+            ansi.hideCursor();
         }
     }
 };

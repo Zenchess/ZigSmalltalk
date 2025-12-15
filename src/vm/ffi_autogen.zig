@@ -350,12 +350,17 @@ fn generateWrapper(comptime func: anytype) fn (*Heap, []const Value, std.mem.All
     }.call;
 }
 
+/// Maximum number of arguments we track type info for
+pub const MAX_FFI_ARGS = 16;
+
 /// Registry entry for an FFI function
 pub const FFIFunction = struct {
     name: []const u8,
     wrapper: *const fn (*Heap, []const Value, std.mem.Allocator) FFIError!Value,
     arg_count: usize,
     return_type: []const u8,
+    /// Type names for each argument (up to MAX_FFI_ARGS)
+    arg_types: [MAX_FFI_ARGS][]const u8,
 };
 
 /// Check if a function type can be wrapped (all types resolvable)
@@ -531,11 +536,21 @@ pub fn generateRegistryAuto(comptime CImport: type) [countAllWrappableFunctions(
             if (@typeInfo(FieldType) == .@"fn") {
                 if (canWrapFunction(FieldType)) {
                     const fn_info = @typeInfo(FieldType).@"fn";
+
+                    // Build arg_types array
+                    var arg_types: [MAX_FFI_ARGS][]const u8 = .{""} ** MAX_FFI_ARGS;
+                    inline for (fn_info.params, 0..) |param, i| {
+                        if (i < MAX_FFI_ARGS) {
+                            arg_types[i] = @typeName(param.type orelse void);
+                        }
+                    }
+
                     funcs[idx] = .{
                         .name = decl.name,
                         .wrapper = generateWrapper(field),
                         .arg_count = fn_info.params.len,
                         .return_type = @typeName(fn_info.return_type orelse void),
+                        .arg_types = arg_types,
                     };
                     idx += 1;
                 }
@@ -619,11 +634,21 @@ pub fn generateRegistryFor(comptime CImport: type, comptime func_names: []const 
             if (@typeInfo(FieldType) == .@"fn") {
                 if (canWrapFunction(FieldType)) {
                     const fn_info = @typeInfo(FieldType).@"fn";
+
+                    // Build arg_types array
+                    var arg_types: [MAX_FFI_ARGS][]const u8 = .{""} ** MAX_FFI_ARGS;
+                    inline for (fn_info.params, 0..) |param, i| {
+                        if (i < MAX_FFI_ARGS) {
+                            arg_types[i] = @typeName(param.type orelse void);
+                        }
+                    }
+
                     funcs[idx] = .{
                         .name = name,
                         .wrapper = generateWrapper(field),
                         .arg_count = fn_info.params.len,
                         .return_type = @typeName(fn_info.return_type orelse void),
+                        .arg_types = arg_types,
                     };
                     idx += 1;
                 }

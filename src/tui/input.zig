@@ -80,6 +80,9 @@ pub const Key = union(enum) {
     ctrl_left,
     ctrl_right,
 
+    // Ctrl+Shift combinations
+    ctrl_shift_s, // Save image
+
     pub fn isCtrl(self: Key, char: u8) bool {
         return switch (self) {
             .ctrl => |c| c == char,
@@ -132,6 +135,7 @@ pub const Key = union(enum) {
             .ctrl_down => try writer.writeAll("Ctrl+Down"),
             .ctrl_left => try writer.writeAll("Ctrl+Left"),
             .ctrl_right => try writer.writeAll("Ctrl+Right"),
+            .ctrl_shift_s => try writer.writeAll("Ctrl+Shift+S"),
             .unknown => try writer.writeAll("Unknown"),
         }
     }
@@ -146,9 +150,12 @@ pub const InputReader = struct {
     // Paste buffer for bracketed paste mode
     paste_buf: ?[]u8 = null,
 
+    // Track if mouse button is held down (for filtering garbage during drag)
+    mouse_button_down: bool = false,
+
     pub fn init(terminal: *const @import("terminal.zig").Terminal, allocator: std.mem.Allocator) InputReader {
         return .{
-            .tty = terminal.tty,
+            .tty = terminal.tty_input, // Use input handle (separate on Windows)
             .allocator = allocator,
         };
     }
@@ -191,11 +198,36 @@ pub const InputReader = struct {
         // Check for mouse event (SGR format: ESC [ < ...)
         if (self.buf_len >= 3 and self.buf[0] == 27 and self.buf[1] == '[' and self.buf[2] == '<') {
             if (self.parseMouseEvent()) |mouse| {
+                // Track mouse button state
+                if (mouse.event_type == .press) {
+                    self.mouse_button_down = true;
+                } else if (mouse.event_type == .release) {
+                    self.mouse_button_down = false;
+                }
                 return .{ .mouse = mouse };
+            }
+            // If mouse parsing failed, it was still a mouse sequence - don't interpret as keys
+            return null;
+        }
+
+        // Also check for partial mouse sequences that might have lost the ESC prefix
+        if (self.buf_len >= 1 and self.buf[0] == '<') {
+            return null;
+        }
+
+        // If mouse button is held down, discard characters that look like mouse sequence fragments
+        // These are typically digits, semicolons, M, m that arrive as fragments during drag
+        if (self.mouse_button_down and self.buf_len >= 1) {
+            const c = self.buf[0];
+            if (c == ';' or c == 'M' or c == 'm' or (c >= '0' and c <= '9')) {
+                // Likely a mouse coordinate fragment - discard
+                return null;
             }
         }
 
-        return .{ .key = self.parseKey() };
+        const key = self.parseKey();
+        self.logKeyToFile(key);
+        return .{ .key = key };
     }
 
     fn readBracketedPaste(self: *InputReader) ?[]const u8 {
@@ -260,11 +292,48 @@ pub const InputReader = struct {
     }
 
     fn parseMouseEvent(self: *InputReader) ?MouseEvent {
-        // SGR format: ESC [ < button ; x ; y ; M/m
+        // SGR format: ESC [ < button ; x ; y M/m
         // button encodes: bits 0-1 = button, bit 2 = shift, bit 3 = alt, bit 4 = ctrl
         // bit 5 = motion, bits 6-7 = scroll
 
-        if (self.buf_len < 9) return null; // Minimum: ESC [ < 0 ; 1 ; 1 M
+        // First check if we have a complete sequence (ends with M or m)
+        var has_terminator = false;
+        for (self.buf[0..self.buf_len]) |c| {
+            if (c == 'M' or c == 'm') {
+                has_terminator = true;
+                break;
+            }
+        }
+
+        // If no terminator, try to read more bytes to complete the sequence
+        // Use non-blocking reads without sleep for responsiveness
+        if (!has_terminator) {
+            var attempts: usize = 0;
+            while (attempts < 3 and self.buf_len < self.buf.len) {
+                var temp_buf: [16]u8 = undefined;
+                const bytes_read = self.tty.read(&temp_buf) catch break;
+                if (bytes_read == 0) {
+                    attempts += 1;
+                    continue;
+                }
+
+                // Append to buffer
+                const copy_len = @min(bytes_read, self.buf.len - self.buf_len);
+                @memcpy(self.buf[self.buf_len..][0..copy_len], temp_buf[0..copy_len]);
+                self.buf_len += copy_len;
+
+                // Check if we now have a terminator
+                for (temp_buf[0..bytes_read]) |c| {
+                    if (c == 'M' or c == 'm') {
+                        has_terminator = true;
+                        break;
+                    }
+                }
+                if (has_terminator) break;
+            }
+        }
+
+        if (!has_terminator) return null;
 
         // Find the parameters - start after '<'
         var pos: usize = 3;
@@ -332,13 +401,136 @@ pub const InputReader = struct {
         return null;
     }
 
+    // Debug: store last key bytes for display (always, not just unknown)
+    pub var debug_last_bytes: [32]u8 = undefined;
+    pub var debug_last_len: usize = 0;
+
+    // Debug: log key bytes to file (use absolute path for reliability)
+    const log_path = "C:\\programming\\ZigSmalltalk\\keylog.txt";
+
+    fn logKeyToFile(self: *InputReader, key: Key) void {
+        // Open for append, or create if doesn't exist
+        const file = std.fs.openFileAbsolute(log_path, .{ .mode = .write_only }) catch |err| {
+            if (err == error.FileNotFound) {
+                // Create the file if it doesn't exist
+                return if (std.fs.createFileAbsolute(log_path, .{})) |f| {
+                    self.writeKeyLog(f, key);
+                    f.close();
+                } else |_| {};
+            }
+            return;
+        };
+        defer file.close();
+        file.seekFromEnd(0) catch return;
+        self.writeKeyLog(file, key);
+    }
+
+    fn writeKeyLog(self: *InputReader, file: std.fs.File, key: Key) void {
+
+        // Build the log line in a buffer
+        var log_buf: [256]u8 = undefined;
+        var pos: usize = 0;
+
+        // Write "Key: "
+        const prefix = "Key: ";
+        @memcpy(log_buf[pos..][0..prefix.len], prefix);
+        pos += prefix.len;
+
+        // Write bytes as hex
+        for (self.buf[0..self.buf_len]) |byte| {
+            const hex = std.fmt.bufPrint(log_buf[pos..], "{X:0>2} ", .{byte}) catch break;
+            pos += hex.len;
+        }
+
+        // Write bytes as chars
+        log_buf[pos] = '\'';
+        pos += 1;
+        for (self.buf[0..self.buf_len]) |byte| {
+            if (pos >= log_buf.len - 20) break;
+            if (byte >= 32 and byte < 127) {
+                log_buf[pos] = byte;
+            } else {
+                log_buf[pos] = '.';
+            }
+            pos += 1;
+        }
+        log_buf[pos] = '\'';
+        pos += 1;
+
+        // Write parsed key type
+        const key_name: []const u8 = switch (key) {
+            .char => "char",
+            .ctrl => "ctrl",
+            .alt => "alt",
+            .f1 => "F1",
+            .f2 => "F2",
+            .f3 => "F3",
+            .f4 => "F4",
+            .f5 => "F5",
+            .f6 => "F6",
+            .f7 => "F7",
+            .f8 => "F8",
+            .f9 => "F9",
+            .f10 => "F10",
+            .f11 => "F11",
+            .f12 => "F12",
+            .up => "Up",
+            .down => "Down",
+            .left => "Left",
+            .right => "Right",
+            .home => "Home",
+            .end => "End",
+            .page_up => "PageUp",
+            .page_down => "PageDown",
+            .insert => "Insert",
+            .delete => "Delete",
+            .backspace => "Backspace",
+            .tab => "Tab",
+            .shift_tab => "Shift+Tab",
+            .enter => "Enter",
+            .escape => "Escape",
+            .unknown => "Unknown",
+            .shift_up => "Shift+Up",
+            .shift_down => "Shift+Down",
+            .shift_left => "Shift+Left",
+            .shift_right => "Shift+Right",
+            .shift_home => "Shift+Home",
+            .shift_end => "Shift+End",
+            .shift_insert => "Shift+Insert",
+            .ctrl_up => "Ctrl+Up",
+            .ctrl_down => "Ctrl+Down",
+            .ctrl_left => "Ctrl+Left",
+            .ctrl_right => "Ctrl+Right",
+            .ctrl_shift_s => "Ctrl+Shift+S",
+        };
+        const arrow = " -> ";
+        @memcpy(log_buf[pos..][0..arrow.len], arrow);
+        pos += arrow.len;
+        @memcpy(log_buf[pos..][0..key_name.len], key_name);
+        pos += key_name.len;
+        log_buf[pos] = '\n';
+        pos += 1;
+
+        // Write to file
+        _ = file.write(log_buf[0..pos]) catch {};
+    }
+
     fn parseKey(self: *InputReader) Key {
+        // Always store debug bytes for any key press
+        self.storeDebugBytes();
         if (self.buf_len == 0) return .unknown;
 
         const c = self.buf[0];
 
+        // Check for Windows-specific special keys first (0x00 or 0xE0 prefix)
+        if (c == 0x00 or c == 0xE0) {
+            if (self.parseWindowsSpecialKey()) |key| {
+                return key;
+            }
+        }
+
         // Control characters (Ctrl+A through Ctrl+Z)
-        if (c < 27 and c != 9 and c != 10 and c != 13) {
+        if (c < 27 and c != 9 and c != 10 and c != 13 and c != 0) {
             return .{ .ctrl = c };
         }
 
@@ -368,7 +560,15 @@ pub const InputReader = struct {
             return .{ .char = codepoint };
         }
 
+        // Store debug info for unknown keys
+        self.storeDebugBytes();
         return .unknown;
+    }
+
+    fn storeDebugBytes(self: *InputReader) void {
+        const copy_len = @min(self.buf_len, debug_last_bytes.len);
+        @memcpy(debug_last_bytes[0..copy_len], self.buf[0..copy_len]);
+        debug_last_len = copy_len;
     }
 
     fn parseEscapeSequence(self: *InputReader) Key {
@@ -430,6 +630,19 @@ pub const InputReader = struct {
                 };
             }
 
+            // Windows Terminal / xterm F1-F4 sequences (ESC [ 1 P, ESC [ 1 Q, etc.)
+            // Some terminals send ESC [ [ A for F1, ESC [ [ B for F2, etc.
+            if (self.buf_len >= 4 and self.buf[2] == '[') {
+                return switch (self.buf[3]) {
+                    'A' => .f1,
+                    'B' => .f2,
+                    'C' => .f3,
+                    'D' => .f4,
+                    'E' => .f5,
+                    else => .unknown,
+                };
+            }
+
             // Modified insert/delete/etc (ESC [ n ; m ~) e.g., Shift+Insert = ESC [ 2 ; 2 ~
             if (self.buf_len >= 6 and self.buf[3] == ';' and self.buf[5] == '~') {
                 const key_num = self.buf[2];
@@ -470,6 +683,52 @@ pub const InputReader = struct {
                     };
                 }
             }
+
+            // CSI u sequences (ESC [ <codepoint> ; <modifier> u) - kitty/xterm extended key protocol
+            // Look for 'u' terminator
+            if (self.buf_len >= 5) {
+                var u_pos: ?usize = null;
+                for (self.buf[2..self.buf_len], 2..) |ch, idx| {
+                    if (ch == 'u') {
+                        u_pos = idx;
+                        break;
+                    }
+                }
+                if (u_pos) |end_pos| {
+                    // Parse: ESC [ <codepoint> ; <modifier> u
+                    // Find semicolon
+                    var semi_pos: ?usize = null;
+                    for (self.buf[2..end_pos], 2..) |ch, idx| {
+                        if (ch == ';') {
+                            semi_pos = idx;
+                            break;
+                        }
+                    }
+                    if (semi_pos) |sp| {
+                        // Parse codepoint (digits before semicolon)
+                        var codepoint: u32 = 0;
+                        for (self.buf[2..sp]) |ch| {
+                            if (ch >= '0' and ch <= '9') {
+                                codepoint = codepoint * 10 + (ch - '0');
+                            }
+                        }
+                        // Parse modifier (digits after semicolon)
+                        var modifier: u32 = 0;
+                        for (self.buf[sp + 1 .. end_pos]) |ch| {
+                            if (ch >= '0' and ch <= '9') {
+                                modifier = modifier * 10 + (ch - '0');
+                            }
+                        }
+                        // Modifier 6 = Ctrl+Shift
+                        if (modifier == 6) {
+                            // Ctrl+Shift+S (83='S' or 115='s')
+                            if (codepoint == 83 or codepoint == 115) {
+                                return .ctrl_shift_s;
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         // SS3 sequences (ESC O) - F1-F4 on some terminals
@@ -481,11 +740,61 @@ pub const InputReader = struct {
                 'S' => .f4,
                 'H' => .home,
                 'F' => .end,
-                else => .unknown,
+                else => blk: {
+                    self.storeDebugBytes();
+                    break :blk .unknown;
+                },
             };
         }
 
+        // Unknown escape sequence - store for debug
+        self.storeDebugBytes();
         return .escape;
+    }
+
+    /// Check if running on Windows
+    fn isWindows() bool {
+        const builtin = @import("builtin");
+        return builtin.os.tag == .windows;
+    }
+
+    /// Parse Windows-specific virtual key codes
+    /// Windows console sends: 0x00 or 0xE0 followed by scan code
+    fn parseWindowsSpecialKey(self: *InputReader) ?Key {
+        if (!isWindows()) return null;
+        if (self.buf_len < 2) return null;
+
+        // Windows sends 0x00 or 0xE0 prefix for special keys
+        if (self.buf[0] != 0x00 and self.buf[0] != 0xE0) return null;
+
+        return switch (self.buf[1]) {
+            // Function keys
+            59 => .f1,  // 0x3B
+            60 => .f2,  // 0x3C
+            61 => .f3,  // 0x3D
+            62 => .f4,  // 0x3E
+            63 => .f5,  // 0x3F
+            64 => .f6,  // 0x40
+            65 => .f7,  // 0x41
+            66 => .f8,  // 0x42
+            67 => .f9,  // 0x43
+            68 => .f10, // 0x44
+            133 => .f11, // 0x85
+            134 => .f12, // 0x86
+            // Arrow keys (with 0xE0 prefix)
+            72 => .up,    // 0x48
+            80 => .down,  // 0x50
+            75 => .left,  // 0x4B
+            77 => .right, // 0x4D
+            // Navigation keys
+            71 => .home,     // 0x47
+            79 => .end,      // 0x4F
+            73 => .page_up,  // 0x49
+            81 => .page_down, // 0x51
+            82 => .insert,   // 0x52
+            83 => .delete,   // 0x53
+            else => null,
+        };
     }
 
     fn parseUtf8(self: *InputReader) !u21 {

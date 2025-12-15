@@ -1,10 +1,15 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const Screen = @import("../screen.zig").Screen;
 const input = @import("../input.zig");
 const style_mod = @import("../style.zig");
 const widget = @import("../widgets/widget.zig");
 const ListView = @import("../widgets/listview.zig").ListView;
 const TextArea = @import("../widgets/textarea.zig").TextArea;
+const build_options = @import("build_options");
+const ffi_autogen = if (build_options.ffi_enabled) @import("../../vm/ffi_autogen.zig") else undefined;
+
+const is_windows = builtin.os.tag == .windows;
 
 const Key = input.Key;
 const MouseEvent = input.MouseEvent;
@@ -55,7 +60,7 @@ pub const FFIConfigTab = struct {
     pub fn init(allocator: std.mem.Allocator, rect: Rect) !FFIConfigTab {
         const list_rect = Rect.init(rect.x + 2, rect.y + 4, rect.width - 4, rect.height - 10);
         var library_list = try ListView.init(allocator, list_rect);
-        library_list.state.title = "Configured Libraries";
+        library_list.state.title = if (build_options.ffi_enabled) "Available FFI Libraries" else "FFI Disabled";
 
         var tab = FFIConfigTab{
             .allocator = allocator,
@@ -64,13 +69,31 @@ pub const FFIConfigTab = struct {
             .library_list = library_list,
         };
 
-        // Load config from file
-        tab.loadConfig() catch {
-            // If no config file, add defaults
-            try tab.addDefaultLibraries();
-        };
+        if (build_options.ffi_enabled) {
+            // Load only the libraries that are actually available (compiled in)
+            tab.loadAvailableLibraries();
+        } else {
+            tab.status_message = "FFI is disabled - libraries not found at build time";
+        }
 
         return tab;
+    }
+
+    /// Load libraries that are actually available at runtime (from ffi_autogen)
+    fn loadAvailableLibraries(self: *FFIConfigTab) void {
+        if (!build_options.ffi_enabled) return;
+
+        for (ffi_autogen.available_libraries) |lib_name| {
+            self.libraries.append(self.allocator, .{
+                .name = lib_name,
+                .headers = &[_][]const u8{},
+                .link = "",
+                .enabled = true,
+            }) catch continue;
+        }
+
+        self.refreshList();
+        self.status_message = "Showing libraries available at runtime";
     }
 
     pub fn deinit(self: *FFIConfigTab) void {
@@ -198,18 +221,22 @@ pub const FFIConfigTab = struct {
             try file.writeAll("    {\n");
 
             var buf: [512]u8 = undefined;
+            var escaped_buf: [512]u8 = undefined;
+
             var len = std.fmt.bufPrint(&buf, "      \"name\": \"{s}\",\n", .{lib.name}) catch continue;
             try file.writeAll(len);
 
             try file.writeAll("      \"headers\": [");
             for (lib.headers, 0..) |h, j| {
                 if (j > 0) try file.writeAll(", ");
-                len = std.fmt.bufPrint(&buf, "\"{s}\"", .{h}) catch continue;
+                const escaped = escapeJsonString(h, &escaped_buf);
+                len = std.fmt.bufPrint(&buf, "\"{s}\"", .{escaped}) catch continue;
                 try file.writeAll(len);
             }
             try file.writeAll("],\n");
 
-            len = std.fmt.bufPrint(&buf, "      \"link\": \"{s}\",\n", .{lib.link}) catch continue;
+            const escaped_link = escapeJsonString(lib.link, &escaped_buf);
+            len = std.fmt.bufPrint(&buf, "      \"link\": \"{s}\",\n", .{escaped_link}) catch continue;
             try file.writeAll(len);
 
             len = std.fmt.bufPrint(&buf, "      \"enabled\": {}\n", .{lib.enabled}) catch continue;
@@ -225,37 +252,55 @@ pub const FFIConfigTab = struct {
         try file.writeAll("  ]\n}\n");
 
         self.dirty = false;
-        self.status_message = "Config saved - run 'zig build' to generate bindings";
+        self.status_message = "Config saved - run 'zig build gen-ffi' to regenerate";
+    }
+
+    /// Escape backslashes and quotes for JSON strings
+    fn escapeJsonString(str: []const u8, buf: *[512]u8) []const u8 {
+        var pos: usize = 0;
+        for (str) |c| {
+            if (pos >= buf.len - 2) break;
+            if (c == '\\') {
+                buf[pos] = '\\';
+                pos += 1;
+                buf[pos] = '\\';
+                pos += 1;
+            } else if (c == '"') {
+                buf[pos] = '\\';
+                pos += 1;
+                buf[pos] = '"';
+                pos += 1;
+            } else {
+                buf[pos] = c;
+                pos += 1;
+            }
+        }
+        return buf[0..pos];
     }
 
     fn refreshList(self: *FFIConfigTab) void {
         self.library_list.clear();
 
+        if (!build_options.ffi_enabled) {
+            self.library_list.addItem("FFI support is not available in this build", null) catch {};
+            self.library_list.addItem("", null) catch {};
+            self.library_list.addItem("To enable FFI, install the required libraries:", null) catch {};
+            self.library_list.addItem("  - libffi (required)", null) catch {};
+            self.library_list.addItem("  - raylib, glfw, glew (optional)", null) catch {};
+            self.library_list.addItem("", null) catch {};
+            self.library_list.addItem("Then rebuild with: zig build", null) catch {};
+            return;
+        }
+
         for (self.libraries.items) |lib| {
             var buf: [256]u8 = undefined;
-            const enabled = if (lib.enabled) "[x]" else "[ ]";
 
-            const headers_str = blk: {
-                var h_buf: [128]u8 = undefined;
-                var h_pos: usize = 0;
-                for (lib.headers, 0..) |header, i| {
-                    if (i > 0 and h_pos < h_buf.len - 2) {
-                        h_buf[h_pos] = ',';
-                        h_buf[h_pos + 1] = ' ';
-                        h_pos += 2;
-                    }
-                    const to_copy = @min(header.len, h_buf.len - h_pos);
-                    @memcpy(h_buf[h_pos .. h_pos + to_copy], header[0..to_copy]);
-                    h_pos += to_copy;
-                }
-                break :blk h_buf[0..h_pos];
-            };
+            // Get function count from ffi_autogen
+            const func_count: usize = if (ffi_autogen.getLibraryFunctions(lib.name)) |funcs| funcs.len else 0;
 
-            const display = std.fmt.bufPrint(&buf, "{s} {s} (-l{s}) - {s}", .{
-                enabled,
+            const display = std.fmt.bufPrint(&buf, "{s} ({d} functions)", .{
                 lib.name,
-                lib.link,
-                headers_str,
+                func_count,
             }) catch lib.name;
 
             self.library_list.addItem(display, null) catch {};
@@ -268,6 +313,11 @@ pub const FFIConfigTab = struct {
     }
 
     pub fn handleKey(self: *FFIConfigTab, key: Key) EventResult {
+        // When FFI is disabled, just allow basic navigation
+        if (!build_options.ffi_enabled) {
+            return self.library_list.handleKey(key);
+        }
+
         // Handle add dialog
         if (self.show_add_dialog) {
             return self.handleDialogKey(key);
@@ -476,11 +526,32 @@ pub const FFIConfigTab = struct {
 
         self.dirty = true;
         self.refreshList();
-        self.status_message = "Library added - Ctrl+S to save";
+        self.status_message = "Library added - Ctrl+S, then: zig build gen-ffi && zig build";
     }
 
     pub fn handleMouse(self: *FFIConfigTab, mouse: MouseEvent) void {
-        if (self.show_add_dialog) return;
+        // Handle dialog mouse clicks
+        if (self.show_add_dialog) {
+            if (mouse.event_type == .press and mouse.button == .left) {
+                const dialog_width: u16 = 60;
+                const dialog_x = (self.rect.width -| dialog_width) / 2 + self.rect.x;
+                const dialog_y = (self.rect.height -| 13) / 2 + self.rect.y;
+
+                // Check if click is on name field (y = dialog_y + 2)
+                if (mouse.y == dialog_y + 2 and mouse.x >= dialog_x + 10 and mouse.x < dialog_x + dialog_width - 4) {
+                    self.dialog_field = .name;
+                }
+                // Check if click is on headers field (y = dialog_y + 4)
+                else if (mouse.y == dialog_y + 4 and mouse.x >= dialog_x + 10 and mouse.x < dialog_x + dialog_width - 4) {
+                    self.dialog_field = .headers;
+                }
+                // Check if click is on link field (y = dialog_y + 7)
+                else if (mouse.y == dialog_y + 7 and mouse.x >= dialog_x + 10 and mouse.x < dialog_x + dialog_width - 4) {
+                    self.dialog_field = .link;
+                }
+            }
+            return;
+        }
 
         const list_rect = Rect.init(self.rect.x + 2, self.rect.y + 4, self.rect.width - 4, self.rect.height - 10);
 
@@ -514,33 +585,32 @@ pub const FFIConfigTab = struct {
 
         // Draw main border
         widget.drawBorderRounded(screen, rect, self.focused);
-        widget.drawTitle(screen, rect, "FFI Configuration", self.focused);
+        const title = if (build_options.ffi_enabled) "FFI Configuration" else "FFI Configuration (Disabled)";
+        widget.drawTitle(screen, rect, title, self.focused);
 
         // Draw header text
         const header_style = style_mod.styles.normal;
-        screen.drawText(rect.x + 2, rect.y + 2, "Configure C library bindings for Smalltalk FFI:", header_style);
+        const header_text = if (build_options.ffi_enabled)
+            "Available C library bindings for Smalltalk FFI:"
+        else
+            "FFI support is not available - libraries not found during build:";
+        screen.drawText(rect.x + 2, rect.y + 2, header_text, header_style);
 
         // Update and draw library list
         self.library_list.state.rect = Rect.init(rect.x + 2, rect.y + 4, rect.width - 4, rect.height - 10);
         self.library_list.state.focused = self.focused and !self.show_add_dialog;
         self.library_list.draw(screen);
 
-        // Draw buttons/help at bottom
+        // Draw help text at bottom
         const button_y = rect.y + rect.height - 4;
-        const button_style = style_mod.styles.status;
-        const key_style = style_mod.styles.status_key;
+        const help_style = style_mod.styles.status;
 
-        screen.drawText(rect.x + 2, button_y, "Enter", key_style);
-        screen.drawText(rect.x + 8, button_y, "Toggle", button_style);
-
-        screen.drawText(rect.x + 18, button_y, "A", key_style);
-        screen.drawText(rect.x + 20, button_y, "Add", button_style);
-
-        screen.drawText(rect.x + 26, button_y, "D/Del", key_style);
-        screen.drawText(rect.x + 32, button_y, "Delete", button_style);
-
-        screen.drawText(rect.x + 42, button_y, "Ctrl+S", key_style);
-        screen.drawText(rect.x + 49, button_y, "Save", button_style);
+        if (build_options.ffi_enabled) {
+            screen.drawText(rect.x + 2, button_y, "A: Add library | D/Del: Remove | Enter: Toggle | Ctrl+S: Save", help_style);
+            screen.drawText(rect.x + 2, button_y + 1, "After changes: zig build gen-ffi && zig build", style_mod.styles.dim);
+        } else {
+            screen.drawText(rect.x + 2, button_y, "Install libffi and rebuild to enable FFI support", help_style);
+        }
 
         // Draw status bar
         const status_y = rect.y + rect.height - 2;
@@ -575,8 +645,9 @@ pub const FFIConfigTab = struct {
         widget.drawTitle(screen, dialog_rect, "Add Library", true);
 
         const label_style = style_mod.styles.normal;
-        const field_style = style_mod.styles.selected;
-        const active_style = Style{ .fg = style_mod.ui.foreground, .bg = style_mod.ui.tab_active, .bold = false };
+        // Use high contrast styles for text fields
+        const field_style = Style{ .fg = style_mod.theme.text, .bg = style_mod.theme.surface1, .bold = false };
+        const active_style = Style{ .fg = style_mod.theme.base, .bg = style_mod.theme.blue, .bold = true };
 
         // Name field
         const name_style = if (self.dialog_field == .name) active_style else field_style;
@@ -584,21 +655,39 @@ pub const FFIConfigTab = struct {
         screen.fillRect(dialog_x + 10, dialog_y + 2, dialog_width - 14, 1, ' ', name_style);
         screen.drawTextClipped(dialog_x + 10, dialog_y + 2, self.dialog_name[0..self.dialog_name_len], dialog_width - 14, name_style);
 
-        // Headers field
+        // Header file path field
         const headers_style = if (self.dialog_field == .headers) active_style else field_style;
-        screen.drawText(dialog_x + 2, dialog_y + 4, "Headers:", label_style);
+        screen.drawText(dialog_x + 2, dialog_y + 4, "Header:", label_style);
         screen.fillRect(dialog_x + 10, dialog_y + 4, dialog_width - 14, 1, ' ', headers_style);
         screen.drawTextClipped(dialog_x + 10, dialog_y + 4, self.dialog_headers[0..self.dialog_headers_len], dialog_width - 14, headers_style);
-        screen.drawText(dialog_x + 2, dialog_y + 5, "(comma separated, e.g. SDL.h, SDL_image.h)", style_mod.styles.dim);
+        if (is_windows) {
+            screen.drawText(dialog_x + 2, dialog_y + 5, "(e.g. C:\\raylib\\include\\raylib.h)", style_mod.styles.dim);
+        } else {
+            screen.drawText(dialog_x + 2, dialog_y + 5, "(e.g. /usr/include/raylib.h)", style_mod.styles.dim);
+        }
 
-        // Link library field
+        // Library file path field
         const link_style = if (self.dialog_field == .link) active_style else field_style;
-        screen.drawText(dialog_x + 2, dialog_y + 7, "Link (-l):", label_style);
-        screen.fillRect(dialog_x + 12, dialog_y + 7, dialog_width - 16, 1, ' ', link_style);
-        screen.drawTextClipped(dialog_x + 12, dialog_y + 7, self.dialog_link[0..self.dialog_link_len], dialog_width - 16, link_style);
+        screen.drawText(dialog_x + 2, dialog_y + 7, "Library:", label_style);
+        screen.fillRect(dialog_x + 10, dialog_y + 7, dialog_width - 14, 1, ' ', link_style);
+        screen.drawTextClipped(dialog_x + 10, dialog_y + 7, self.dialog_link[0..self.dialog_link_len], dialog_width - 14, link_style);
+        if (is_windows) {
+            screen.drawText(dialog_x + 2, dialog_y + 8, "(e.g. C:\\raylib\\lib\\libraylib.dll.a)", style_mod.styles.dim);
+        } else {
+            screen.drawText(dialog_x + 2, dialog_y + 8, "(e.g. /usr/lib/libraylib.so)", style_mod.styles.dim);
+        }
 
         // Help text
-        screen.drawText(dialog_x + 2, dialog_y + 9, "Tab: next field | Enter: add | Esc: cancel", style_mod.styles.dim);
-        screen.drawText(dialog_x + 2, dialog_y + 10, "All functions auto-discovered on rebuild", style_mod.styles.dim);
+        const help_y = dialog_y + 9;
+        screen.drawText(dialog_x + 2, help_y, "Tab: next field | Enter: add | Esc: cancel", style_mod.styles.dim);
+        screen.drawText(dialog_x + 2, help_y + 1, "After save: zig build gen-ffi && zig build", style_mod.styles.dim);
+
+        // Position cursor at end of active field and make it visible
+        screen.cursor_visible = true;
+        switch (self.dialog_field) {
+            .name => screen.setCursor(dialog_x + 10 + @as(u16, @intCast(self.dialog_name_len)), dialog_y + 2),
+            .headers => screen.setCursor(dialog_x + 10 + @as(u16, @intCast(self.dialog_headers_len)), dialog_y + 4),
+            .link => screen.setCursor(dialog_x + 10 + @as(u16, @intCast(self.dialog_link_len)), dialog_y + 7),
+        }
     }
 };

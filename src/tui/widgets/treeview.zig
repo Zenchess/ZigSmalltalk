@@ -162,6 +162,52 @@ pub const TreeView = struct {
         }
     }
 
+    /// Handle mouse events. Returns true if a node was clicked (selection may have changed).
+    /// The node_toggled flag indicates if the click was on an expansion arrow.
+    pub fn handleMouse(self: *TreeView, mouse_x: u16, mouse_y: u16) struct { clicked: bool, toggled: bool } {
+        const content = self.state.contentRect();
+
+        // Check if click is within content area
+        if (mouse_x < content.x or mouse_x >= content.x + content.width) {
+            return .{ .clicked = false, .toggled = false };
+        }
+        if (mouse_y < content.y or mouse_y >= content.y + content.height) {
+            return .{ .clicked = false, .toggled = false };
+        }
+
+        // Calculate which row was clicked
+        const rel_y = mouse_y - content.y;
+        const clicked_idx = self.scroll_offset + rel_y;
+
+        if (clicked_idx >= self.flat_list.items.len) {
+            return .{ .clicked = false, .toggled = false };
+        }
+
+        const node = self.flat_list.items[clicked_idx];
+
+        // Calculate the x position of the expansion arrow for this node
+        const indent: u16 = @intCast(node.level * 2);
+        const arrow_start = content.x + indent;
+        const arrow_end = arrow_start + 2; // Arrow is 2 characters wide
+
+        // Check if click is on the expansion arrow
+        if (mouse_x >= arrow_start and mouse_x < arrow_end and node.hasChildren()) {
+            // Toggle expansion
+            node.expanded = !node.expanded;
+            self.rebuildFlatList();
+            // Also select this node
+            self.selected_index = clicked_idx;
+            return .{ .clicked = true, .toggled = true };
+        }
+
+        // Normal click - just select the node
+        self.selected_index = clicked_idx;
+        if (self.on_select) |cb| {
+            cb(self, node);
+        }
+        return .{ .clicked = true, .toggled = false };
+    }
+
     pub fn handleKey(self: *TreeView, key: Key) EventResult {
         if (self.flat_list.items.len == 0) return .ignored;
 
@@ -326,13 +372,21 @@ pub const TreeView = struct {
     fn drawScrollbar(self: *TreeView, screen: *Screen, content: Rect) void {
         const total = self.flat_list.items.len;
         const visible = @as(usize, content.height);
-        if (total <= visible) return;
+        if (total <= visible or content.height == 0) return;
 
         const scrollbar_x = content.x + content.width - 1;
 
-        // Calculate thumb position and size
-        const thumb_size = @max(1, (visible * content.height) / total);
-        const thumb_pos = @as(u16, @intCast((self.scroll_offset * (content.height - thumb_size)) / (total - visible)));
+        // Calculate thumb size - ensure it's at least 1 but not larger than content height
+        const raw_thumb_size = (visible * visible) / total;
+        const thumb_size: u16 = @intCast(@max(1, @min(raw_thumb_size, visible)));
+
+        // Calculate thumb position - ensure we don't overflow
+        const scroll_range = total - visible;
+        const track_range = content.height -| thumb_size; // Saturating subtraction
+        const thumb_pos: u16 = if (scroll_range > 0 and track_range > 0)
+            @intCast(@min(self.scroll_offset * track_range / scroll_range, track_range))
+        else
+            0;
 
         // Draw scrollbar track
         var row: u16 = 0;

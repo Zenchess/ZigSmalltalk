@@ -1,6 +1,14 @@
 "FFI Auto-Generated Bindings Support"
 "Add FFI methods to String and Object"
 
+!Object methodsFor!
+
+primitiveFailed
+    "Called when a primitive fails. Return nil."
+    ^nil!
+
+!
+
 !String methodsFor!
 
 ffiCall: functionName with: args

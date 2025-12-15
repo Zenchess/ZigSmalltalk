@@ -457,8 +457,45 @@ pub const FileIn = struct {
             // Check if this looks more like an expression than a method body
             // Method bodies typically start with a selector (lowercase) or a unary selector
             // Expressions like "Transcript := TranscriptShell new" have ":=" in them
+            // Also, "ClassName message" where ClassName differs from current_class is an expression
             if (std.mem.indexOf(u8, chunk, ":=") != null) {
                 self.current_class = null; // Clear class context
+            } else {
+                // Check if the expression starts with a different class name than current_class
+                // Skip leading comments to find the actual expression start
+                var effective_chunk = chunk;
+                while (effective_chunk.len > 0) {
+                    const trimmed2 = std.mem.trimLeft(u8, effective_chunk, " \t\r\n");
+                    if (trimmed2.len > 0 and trimmed2[0] == '"') {
+                        // Skip comment
+                        var i: usize = 1;
+                        while (i < trimmed2.len) : (i += 1) {
+                            if (trimmed2[i] == '"') {
+                                if (i + 1 < trimmed2.len and trimmed2[i + 1] == '"') {
+                                    i += 1;
+                                } else {
+                                    effective_chunk = trimmed2[i + 1 ..];
+                                    break;
+                                }
+                            }
+                        }
+                        if (i >= trimmed2.len) break;
+                    } else {
+                        effective_chunk = trimmed2;
+                        break;
+                    }
+                }
+                // If expression starts with ClassName that's different from current_class, clear context
+                if (effective_chunk.len > 0 and std.ascii.isUpper(effective_chunk[0])) {
+                    // Extract the class name from the expression
+                    var name_end: usize = 0;
+                    while (name_end < effective_chunk.len and (std.ascii.isAlphanumeric(effective_chunk[name_end]) or effective_chunk[name_end] == '_')) : (name_end += 1) {}
+                    const expr_class_name = effective_chunk[0..name_end];
+                    // If it's a different class name, this is an expression, not a method
+                    if (!std.mem.eql(u8, expr_class_name, self.current_class.?)) {
+                        self.current_class = null; // Clear class context
+                    }
+                }
             }
         }
 
@@ -481,42 +518,73 @@ pub const FileIn = struct {
     fn isExpressionChunk(chunk: []const u8) bool {
         if (chunk.len == 0) return false;
 
+        // Skip leading comments (text between double quotes)
+        var effective_chunk = chunk;
+        while (effective_chunk.len > 0) {
+            const trimmed = std.mem.trimLeft(u8, effective_chunk, " \t\r\n");
+            if (trimmed.len > 0 and trimmed[0] == '"') {
+                // Skip this comment - find closing quote
+                var i: usize = 1;
+                while (i < trimmed.len) : (i += 1) {
+                    if (trimmed[i] == '"') {
+                        // Check for escaped quote ""
+                        if (i + 1 < trimmed.len and trimmed[i + 1] == '"') {
+                            i += 1; // Skip escaped quote
+                        } else {
+                            // End of comment
+                            effective_chunk = trimmed[i + 1 ..];
+                            break;
+                        }
+                    }
+                }
+                if (i >= trimmed.len) {
+                    // Unclosed comment - treat as non-expression
+                    return false;
+                }
+            } else {
+                effective_chunk = trimmed;
+                break;
+            }
+        }
+
+        if (effective_chunk.len == 0) return false;
+
         // Expressions often start with '(' for grouped message sends
-        if (chunk[0] == '(') return true;
+        if (effective_chunk[0] == '(') return true;
 
         // Blocks are also expressions
-        if (chunk[0] == '[') return true;
+        if (effective_chunk[0] == '[') return true;
 
         // Temporary variable declarations indicate an expression
-        if (chunk[0] == '|') return true;
+        if (effective_chunk[0] == '|') return true;
 
         // Literals: strings, numbers (but NOT symbols starting with # - those could be categoriesForClass metadata)
-        if (chunk[0] == '\'' or std.ascii.isDigit(chunk[0])) return true;
+        if (effective_chunk[0] == '\'' or std.ascii.isDigit(effective_chunk[0])) return true;
 
         // Check for ClassName followed by a proper message send pattern:
         // - ClassName unaryMessage (lowercase letter after class name + whitespace)
         // - ClassName keyword: args (has a colon indicating keyword message)
-        if (std.ascii.isUpper(chunk[0])) {
+        if (std.ascii.isUpper(effective_chunk[0])) {
             // Find end of class name
             var i: usize = 0;
-            while (i < chunk.len and (std.ascii.isAlphanumeric(chunk[i]) or chunk[i] == '_')) : (i += 1) {}
+            while (i < effective_chunk.len and (std.ascii.isAlphanumeric(effective_chunk[i]) or effective_chunk[i] == '_')) : (i += 1) {}
 
             // Must have whitespace after class name
-            if (i >= chunk.len or !std.ascii.isWhitespace(chunk[i])) return false;
+            if (i >= effective_chunk.len or !std.ascii.isWhitespace(effective_chunk[i])) return false;
 
             // Skip whitespace
-            while (i < chunk.len and std.ascii.isWhitespace(chunk[i])) : (i += 1) {}
+            while (i < effective_chunk.len and std.ascii.isWhitespace(effective_chunk[i])) : (i += 1) {}
 
-            if (i >= chunk.len) return false;
+            if (i >= effective_chunk.len) return false;
 
             // The message must start with a lowercase letter (proper Smalltalk convention)
             // This distinguishes "DefaultSortAlgorithm initialize" from "Building Suites"
-            if (std.ascii.isLower(chunk[i])) {
+            if (std.ascii.isLower(effective_chunk[i])) {
                 return true;
             }
 
             // Also check for keyword message (contains ':')
-            if (std.mem.indexOfScalar(u8, chunk, ':') != null) {
+            if (std.mem.indexOfScalar(u8, effective_chunk, ':') != null) {
                 return true;
             }
         }
@@ -529,7 +597,7 @@ pub const FileIn = struct {
         // Lazily initialize interpreter
         if (self.interp == null) {
             const interp_ptr = self.allocator.create(interpreter.Interpreter) catch return;
-            interp_ptr.* = interpreter.Interpreter.init(self.heap);
+            interp_ptr.* = interpreter.Interpreter.init(self.heap, self.allocator);
             // Register interpreter with heap for GC stack tracing
             self.heap.interpreter = interp_ptr;
             self.interp = interp_ptr;

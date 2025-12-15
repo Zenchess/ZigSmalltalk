@@ -71,11 +71,28 @@ pub const TextArea = struct {
         }
         self.lines.clearRetainingCapacity();
 
-        // Split text into lines
+        // Split text into lines (handle both \n and \r\n line endings)
         var iter = std.mem.splitScalar(u8, text, '\n');
         while (iter.next()) |line_text| {
             var line: std.ArrayList(u8) = .empty;
-            try line.appendSlice(self.allocator, line_text);
+            // Strip control characters that could cause display issues
+            // Keep only printable ASCII and valid UTF-8 continuation bytes
+            for (line_text) |c| {
+                // Skip \r, \t converted to space, skip other control chars (0-31 except tab)
+                if (c == '\r') continue;
+                if (c == '\t') {
+                    // Convert tab to spaces
+                    try line.append(self.allocator, ' ');
+                    try line.append(self.allocator, ' ');
+                    try line.append(self.allocator, ' ');
+                    try line.append(self.allocator, ' ');
+                } else if (c < 32 and c != '\t') {
+                    // Skip other control characters
+                    continue;
+                } else {
+                    try line.append(self.allocator, c);
+                }
+            }
             try self.lines.append(self.allocator, line);
         }
 
@@ -514,17 +531,13 @@ pub const TextArea = struct {
             return .consumed;
         }
 
-        // Only handle left button events for selection
+        // Only handle left button events
         if (mouse.button != .left) {
             return .ignored;
         }
 
         // Check if mouse is in content area
         if (!text_rect.contains(mouse.x, mouse.y)) {
-            // Mouse released outside - stop selection
-            if (mouse.event_type == .release) {
-                self.mouse_selecting = false;
-            }
             return .ignored;
         }
 
@@ -536,13 +549,13 @@ pub const TextArea = struct {
 
         switch (mouse.event_type) {
             .press => {
-                // Start new selection
+                // Start new selection (selection only, never moves text)
                 if (target_line < self.lines.items.len) {
                     self.cursor_line = target_line;
                     const line_len = self.lines.items[target_line].items.len;
                     self.cursor_col = @min(target_col, line_len);
 
-                    // Clear any existing selection and start fresh
+                    // Always clear existing selection and start fresh - no drag-to-move
                     self.selection_start_line = self.cursor_line;
                     self.selection_start_col = self.cursor_col;
                     self.selection_end_line = self.cursor_line;
@@ -552,36 +565,36 @@ pub const TextArea = struct {
                 return .consumed;
             },
             .drag => {
-                // Extend selection if we're in selection mode
+                // Extend selection only - no text movement
                 if (self.mouse_selecting) {
                     if (target_line < self.lines.items.len) {
                         self.cursor_line = target_line;
                         const line_len = self.lines.items[target_line].items.len;
                         self.cursor_col = @min(target_col, line_len);
 
-                        // Update selection end
+                        // Update selection end only
                         self.selection_end_line = self.cursor_line;
                         self.selection_end_col = self.cursor_col;
                     }
                     return .consumed;
                 }
+                return .consumed; // Always consume drag events to prevent any side effects
             },
             .release => {
-                // Finish selection
-                if (self.mouse_selecting) {
-                    self.mouse_selecting = false;
+                // Finish selection - no text modification
+                self.mouse_selecting = false;
 
-                    // If selection start equals end, clear selection (it was just a click)
-                    if (self.selection_start_line == self.selection_end_line and
-                        self.selection_start_col == self.selection_end_col)
-                    {
-                        self.clearSelection();
-                    }
-                    return .consumed;
+                // If selection start equals end, clear selection (it was just a click)
+                if (self.selection_start_line == self.selection_end_line and
+                    self.selection_start_col == self.selection_end_col)
+                {
+                    self.clearSelection();
                 }
+                return .consumed;
             },
             .move => {
                 // Ignore regular mouse movement
+                return .consumed;
             },
         }
 
@@ -776,24 +789,57 @@ pub const TextArea = struct {
             if (line_idx >= self.lines.items.len) break;
 
             const line = self.lines.items[line_idx].items;
-            var col: u16 = 0;
 
-            while (col < text_rect.width) : (col += 1) {
-                const char_idx = self.scroll_x + col;
-                if (char_idx >= line.len) break;
+            // Iterate through UTF-8 codepoints, tracking both byte position and display column
+            var byte_idx: usize = 0;
+            var display_col: usize = 0;
+
+            // Skip characters before scroll_x
+            while (byte_idx < line.len and display_col < self.scroll_x) {
+                const cp_len = std.unicode.utf8ByteSequenceLength(line[byte_idx]) catch 1;
+                byte_idx += cp_len;
+                display_col += 1;
+            }
+
+            // Draw visible characters
+            var screen_col: u16 = 0;
+            while (byte_idx < line.len and screen_col < text_rect.width) {
+                // Safely decode UTF-8, treating invalid bytes as single characters
+                const byte = line[byte_idx];
+                var cp_len: usize = 1;
+                var codepoint: u21 = '?';
+
+                if (byte < 0x80) {
+                    // ASCII - single byte
+                    codepoint = byte;
+                } else if (byte >= 0xC0 and byte < 0xF8) {
+                    // Potential multi-byte sequence
+                    cp_len = std.unicode.utf8ByteSequenceLength(byte) catch 1;
+                    const end_idx = @min(byte_idx + cp_len, line.len);
+                    if (end_idx - byte_idx == cp_len) {
+                        // Have enough bytes, try to decode
+                        codepoint = std.unicode.utf8Decode(line[byte_idx..end_idx]) catch '?';
+                    } else {
+                        // Not enough bytes - treat as single replacement char
+                        cp_len = 1;
+                    }
+                } else {
+                    // Invalid start byte (0x80-0xBF or 0xF8+) - skip as single byte
+                    codepoint = '?';
+                }
 
                 var char_style = style.styles.normal;
 
-                // Check if character is selected
+                // Check if character is selected (using display column for selection)
                 if (self.normalizedSelection()) |sel| {
                     const in_selection = if (line_idx > sel.start_line and line_idx < sel.end_line)
                         true
                     else if (line_idx == sel.start_line and line_idx == sel.end_line)
-                        char_idx >= sel.start_col and char_idx < sel.end_col
+                        display_col >= sel.start_col and display_col < sel.end_col
                     else if (line_idx == sel.start_line)
-                        char_idx >= sel.start_col
+                        display_col >= sel.start_col
                     else if (line_idx == sel.end_line)
-                        char_idx < sel.end_col
+                        display_col < sel.end_col
                     else
                         false;
 
@@ -802,7 +848,11 @@ pub const TextArea = struct {
                     }
                 }
 
-                screen.setCell(text_rect.x + col, text_rect.y + row, line[char_idx], char_style);
+                screen.setCell(text_rect.x + screen_col, text_rect.y + row, codepoint, char_style);
+
+                byte_idx += cp_len;
+                display_col += 1;
+                screen_col += 1;
             }
         }
 

@@ -14,8 +14,8 @@
     },
     {
       "name": "Raylib",
-      "headers": [],
-      "link": "",
+      "headers": ["c:/raylib/include/raylib.h"],
+      "link": "c:/raylib/lib/raylib.dll",
       "enabled": true
     }
   ]
