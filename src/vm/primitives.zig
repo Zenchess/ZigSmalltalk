@@ -3269,36 +3269,142 @@ fn primFalseOr(interp: *Interpreter) InterpreterError!Value {
 // Loop Control Flow Primitives
 // ============================================================================
 
+/// Helper struct to hold pre-extracted block info for fast loop evaluation
+const BlockInfo = struct {
+    method: *CompiledMethod,
+    start_ip: usize,
+    receiver: Value,
+    outer_temp_base: usize,
+    home_temp_base: usize,
+    uses_heap_context: bool,
+    heap_context: Value,
+    home_heap_context: Value,
+    local_temps: usize,
+};
+
+/// Extract block info once, for reuse in tight loops
+fn extractBlockInfo(interp: *Interpreter, block: Value) ?BlockInfo {
+    if (!block.isObject()) return null;
+    const block_obj = block.asObject();
+    if (block_obj.header.class_index != Heap.CLASS_BLOCK_CLOSURE) return null;
+
+    const outer_temp_base_val = block_obj.getField(0, 6);
+    const start_pc = block_obj.getField(1, 6);
+    const num_args_val = block_obj.getField(2, 6);
+    const method_val = block_obj.getField(3, 6);
+    const block_receiver = block_obj.getField(4, 6);
+    const home_temp_base_val = block_obj.getField(5, 6);
+
+    if (!start_pc.isSmallInt() or !num_args_val.isSmallInt() or !method_val.isObject()) return null;
+    if (num_args_val.asSmallInt() != 0) return null; // whileTrue blocks take no args
+
+    const uses_heap_context = outer_temp_base_val.isObject() and
+        outer_temp_base_val.asObject().header.class_index == Heap.CLASS_METHOD_CONTEXT;
+
+    if (!outer_temp_base_val.isSmallInt() and !uses_heap_context) return null;
+
+    const block_method: *CompiledMethod = @ptrCast(@alignCast(method_val.asObject()));
+    const total_temps = block_method.header.num_temps;
+
+    return BlockInfo{
+        .method = block_method,
+        .start_ip = @intCast(start_pc.asSmallInt()),
+        .receiver = block_receiver,
+        .outer_temp_base = if (uses_heap_context) interp.sp else @intCast(outer_temp_base_val.asSmallInt()),
+        .home_temp_base = if (uses_heap_context) interp.sp else if (home_temp_base_val.isSmallInt()) @intCast(home_temp_base_val.asSmallInt()) else interp.temp_base,
+        .uses_heap_context = uses_heap_context,
+        .heap_context = if (uses_heap_context) outer_temp_base_val else Value.nil,
+        .home_heap_context = if (uses_heap_context) home_temp_base_val else Value.nil,
+        .local_temps = total_temps,
+    };
+}
+
+/// Fast inline block evaluation for loops - avoids full save/restore per iteration
+fn evaluateBlockFast(interp: *Interpreter, info: *const BlockInfo, saved_sp: usize) InterpreterError!Value {
+    // Set up minimal interpreter state for block execution
+    interp.method = info.method;
+    interp.ip = info.start_ip;
+    interp.receiver = info.receiver;
+    interp.sp = saved_sp;
+    interp.temp_base = saved_sp;
+
+    if (info.uses_heap_context) {
+        interp.heap_context = info.heap_context;
+        interp.home_heap_context = info.home_heap_context;
+        interp.outer_temp_base = saved_sp;
+        interp.home_temp_base = saved_sp;
+    } else {
+        interp.outer_temp_base = info.outer_temp_base;
+        interp.home_temp_base = info.home_temp_base;
+        interp.heap_context = Value.nil;
+        interp.home_heap_context = Value.nil;
+    }
+
+    // Push receiver and allocate local temps
+    try interp.push(info.receiver);
+    var k: usize = 0;
+    while (k < info.local_temps) : (k += 1) {
+        try interp.push(Value.nil);
+    }
+
+    // Execute block bytecode
+    return interp.interpretLoop();
+}
+
 // [condition] whileTrue: [body] - evaluates body while condition returns true
+// OPTIMIZED: Saves interpreter state once, evaluates blocks inline
 fn primWhileTrue(interp: *Interpreter) InterpreterError!Value {
     const body_block = try interp.pop();
     const cond_block = try interp.pop();
 
-    // Validate both are blocks
-    if (!cond_block.isObject() or !body_block.isObject()) {
+    // Extract block info once (validates blocks too)
+    const cond_info = extractBlockInfo(interp, cond_block) orelse {
         try interp.push(cond_block);
         try interp.push(body_block);
         return InterpreterError.PrimitiveFailed;
-    }
+    };
 
-    const cond_obj = cond_block.asObject();
-    const body_obj = body_block.asObject();
-
-    if (cond_obj.header.class_index != Heap.CLASS_BLOCK_CLOSURE or
-        body_obj.header.class_index != Heap.CLASS_BLOCK_CLOSURE)
-    {
+    const body_info = extractBlockInfo(interp, body_block) orelse {
         try interp.push(cond_block);
         try interp.push(body_block);
         return InterpreterError.PrimitiveFailed;
-    }
+    };
 
-    // Loop: evaluate condition, if true evaluate body, repeat
+    // Save interpreter state ONCE at start
+    const saved_ip = interp.ip;
+    const saved_method = interp.method;
+    const saved_sp = interp.sp;
+    const saved_temp_base = interp.temp_base;
+    const saved_outer_temp_base = interp.outer_temp_base;
+    const saved_home_temp_base = interp.home_temp_base;
+    const saved_receiver = interp.receiver;
+    const saved_context_ptr = interp.context_ptr;
+    const saved_heap_context = interp.heap_context;
+    const saved_home_heap_context = interp.home_heap_context;
+
+    // Set up for primitive block execution
+    interp.primitive_block_bases[interp.primitive_block_depth] = interp.context_ptr;
+    interp.primitive_block_depth += 1;
+
+    // Loop with inline block evaluation
     var iteration_count: usize = 0;
-    const max_iterations: usize = 1000000; // Safety limit
+    const max_iterations: usize = 10000000; // Higher limit for optimized loop
 
     while (iteration_count < max_iterations) : (iteration_count += 1) {
-        // Evaluate condition
-        const cond_result = evaluateBlock(interp, cond_block) catch |err| {
+        // Evaluate condition (inline)
+        const cond_result = evaluateBlockFast(interp, &cond_info, saved_sp) catch |err| {
+            // Restore state on error
+            interp.primitive_block_depth -= 1;
+            interp.ip = saved_ip;
+            interp.method = saved_method;
+            interp.sp = saved_sp;
+            interp.temp_base = saved_temp_base;
+            interp.outer_temp_base = saved_outer_temp_base;
+            interp.home_temp_base = saved_home_temp_base;
+            interp.receiver = saved_receiver;
+            interp.context_ptr = saved_context_ptr;
+            interp.heap_context = saved_heap_context;
+            interp.home_heap_context = saved_home_heap_context;
             return err;
         };
 
@@ -3307,58 +3413,132 @@ fn primWhileTrue(interp: *Interpreter) InterpreterError!Value {
             break;
         }
 
-        // Evaluate body (result is discarded)
-        _ = evaluateBlock(interp, body_block) catch |err| {
+        // Evaluate body (inline, result discarded)
+        _ = evaluateBlockFast(interp, &body_info, saved_sp) catch |err| {
+            // Restore state on error
+            interp.primitive_block_depth -= 1;
+            interp.ip = saved_ip;
+            interp.method = saved_method;
+            interp.sp = saved_sp;
+            interp.temp_base = saved_temp_base;
+            interp.outer_temp_base = saved_outer_temp_base;
+            interp.home_temp_base = saved_home_temp_base;
+            interp.receiver = saved_receiver;
+            interp.context_ptr = saved_context_ptr;
+            interp.heap_context = saved_heap_context;
+            interp.home_heap_context = saved_home_heap_context;
             return err;
         };
     }
+
+    // Restore state ONCE at end
+    interp.primitive_block_depth -= 1;
+    interp.ip = saved_ip;
+    interp.method = saved_method;
+    interp.sp = saved_sp;
+    interp.temp_base = saved_temp_base;
+    interp.outer_temp_base = saved_outer_temp_base;
+    interp.home_temp_base = saved_home_temp_base;
+    interp.receiver = saved_receiver;
+    interp.context_ptr = saved_context_ptr;
+    interp.heap_context = saved_heap_context;
+    interp.home_heap_context = saved_home_heap_context;
 
     return Value.nil;
 }
 
 // [condition] whileFalse: [body] - evaluates body while condition returns false
+// OPTIMIZED: Saves interpreter state once, evaluates blocks inline
 fn primWhileFalse(interp: *Interpreter) InterpreterError!Value {
     const body_block = try interp.pop();
     const cond_block = try interp.pop();
 
-    // Validate both are blocks
-    if (!cond_block.isObject() or !body_block.isObject()) {
+    // Extract block info once (validates blocks too)
+    const cond_info = extractBlockInfo(interp, cond_block) orelse {
         try interp.push(cond_block);
         try interp.push(body_block);
         return InterpreterError.PrimitiveFailed;
-    }
+    };
 
-    const cond_obj = cond_block.asObject();
-    const body_obj = body_block.asObject();
-
-    if (cond_obj.header.class_index != Heap.CLASS_BLOCK_CLOSURE or
-        body_obj.header.class_index != Heap.CLASS_BLOCK_CLOSURE)
-    {
+    const body_info = extractBlockInfo(interp, body_block) orelse {
         try interp.push(cond_block);
         try interp.push(body_block);
         return InterpreterError.PrimitiveFailed;
-    }
+    };
 
-    // Loop: evaluate condition, if false evaluate body, repeat
+    // Save interpreter state ONCE at start
+    const saved_ip = interp.ip;
+    const saved_method = interp.method;
+    const saved_sp = interp.sp;
+    const saved_temp_base = interp.temp_base;
+    const saved_outer_temp_base = interp.outer_temp_base;
+    const saved_home_temp_base = interp.home_temp_base;
+    const saved_receiver = interp.receiver;
+    const saved_context_ptr = interp.context_ptr;
+    const saved_heap_context = interp.heap_context;
+    const saved_home_heap_context = interp.home_heap_context;
+
+    // Set up for primitive block execution
+    interp.primitive_block_bases[interp.primitive_block_depth] = interp.context_ptr;
+    interp.primitive_block_depth += 1;
+
+    // Loop with inline block evaluation
     var iteration_count: usize = 0;
-    const max_iterations: usize = 1000000; // Safety limit
+    const max_iterations: usize = 10000000; // Higher limit for optimized loop
 
     while (iteration_count < max_iterations) : (iteration_count += 1) {
-        // Evaluate condition
-        const cond_result = evaluateBlock(interp, cond_block) catch |err| {
+        // Evaluate condition (inline)
+        const cond_result = evaluateBlockFast(interp, &cond_info, saved_sp) catch |err| {
+            // Restore state on error
+            interp.primitive_block_depth -= 1;
+            interp.ip = saved_ip;
+            interp.method = saved_method;
+            interp.sp = saved_sp;
+            interp.temp_base = saved_temp_base;
+            interp.outer_temp_base = saved_outer_temp_base;
+            interp.home_temp_base = saved_home_temp_base;
+            interp.receiver = saved_receiver;
+            interp.context_ptr = saved_context_ptr;
+            interp.heap_context = saved_heap_context;
+            interp.home_heap_context = saved_home_heap_context;
             return err;
         };
 
-        // Check if condition is false
+        // Check if condition is false (continue loop if false)
         if (!cond_result.isFalse()) {
             break;
         }
 
-        // Evaluate body (result is discarded)
-        _ = evaluateBlock(interp, body_block) catch |err| {
+        // Evaluate body (inline, result discarded)
+        _ = evaluateBlockFast(interp, &body_info, saved_sp) catch |err| {
+            // Restore state on error
+            interp.primitive_block_depth -= 1;
+            interp.ip = saved_ip;
+            interp.method = saved_method;
+            interp.sp = saved_sp;
+            interp.temp_base = saved_temp_base;
+            interp.outer_temp_base = saved_outer_temp_base;
+            interp.home_temp_base = saved_home_temp_base;
+            interp.receiver = saved_receiver;
+            interp.context_ptr = saved_context_ptr;
+            interp.heap_context = saved_heap_context;
+            interp.home_heap_context = saved_home_heap_context;
             return err;
         };
     }
+
+    // Restore state ONCE at end
+    interp.primitive_block_depth -= 1;
+    interp.ip = saved_ip;
+    interp.method = saved_method;
+    interp.sp = saved_sp;
+    interp.temp_base = saved_temp_base;
+    interp.outer_temp_base = saved_outer_temp_base;
+    interp.home_temp_base = saved_home_temp_base;
+    interp.receiver = saved_receiver;
+    interp.context_ptr = saved_context_ptr;
+    interp.heap_context = saved_heap_context;
+    interp.home_heap_context = saved_home_heap_context;
 
     return Value.nil;
 }
@@ -9957,6 +10137,10 @@ fn primCompileMethod(interp: *Interpreter) InterpreterError!Value {
         try interp.push(source_val);
         return InterpreterError.PrimitiveFailed;
     };
+
+    // Invalidate inline cache since method dictionary changed
+    interp.invalidateInlineCache();
+    interp.flushMethodCache();
 
     return class_val;
 }

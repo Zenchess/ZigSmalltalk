@@ -92,6 +92,7 @@ pub const Interpreter = struct {
         cached_class: Value, // Receiver class when cache was filled
         cached_method: ?*CompiledMethod, // Method found for this class
         cached_holder: Value, // Class containing the method
+        cached_version: u32, // Cache version when entry was created
     };
 
     heap: *Heap,
@@ -160,6 +161,7 @@ pub const Interpreter = struct {
     inline_cache: [INLINE_CACHE_SIZE]InlineCacheEntry,
     inline_cache_hits: u64,
     inline_cache_misses: u64,
+    cache_version: u32, // Global version - increment when methods change to invalidate caches
 
     // Common selectors cached for fast comparison
     selector_plus: Value,
@@ -219,9 +221,10 @@ pub const Interpreter = struct {
             .method_cache_hits = 0,
             .method_cache_misses = 0,
             // Initialize inline cache to empty
-            .inline_cache = [_]InlineCacheEntry{.{ .method_ptr = 0, .bytecode_offset = 0, .cached_class = Value.nil, .cached_method = null, .cached_holder = Value.nil }} ** INLINE_CACHE_SIZE,
+            .inline_cache = [_]InlineCacheEntry{.{ .method_ptr = 0, .bytecode_offset = 0, .cached_class = Value.nil, .cached_method = null, .cached_holder = Value.nil, .cached_version = 0 }} ** INLINE_CACHE_SIZE,
             .inline_cache_hits = 0,
             .inline_cache_misses = 0,
+            .cache_version = 1, // Start at 1 so version 0 means "uninitialized"
             // Common selectors - will be initialized on first use
             .selector_plus = Value.nil,
             .selector_minus = Value.nil,
@@ -279,14 +282,25 @@ pub const Interpreter = struct {
         }
     }
 
-    /// Flush the inline cache (call when methods are added/modified)
+    /// Invalidate the inline cache by incrementing version
+    /// This is O(1) instead of O(n) for clearing all entries
+    /// Call when methods are added/modified to any class
+    pub fn invalidateInlineCache(self: *Interpreter) void {
+        self.cache_version +%= 1; // Wrapping add to handle overflow
+        if (self.cache_version == 0) self.cache_version = 1; // Skip 0 (uninitialized)
+    }
+
+    /// Flush the inline cache completely (clears all entries)
+    /// Use invalidateInlineCache() for better performance
     pub fn flushInlineCache(self: *Interpreter) void {
+        self.invalidateInlineCache();
         for (&self.inline_cache) |*entry| {
             entry.method_ptr = 0;
             entry.bytecode_offset = 0;
             entry.cached_class = Value.nil;
             entry.cached_method = null;
             entry.cached_holder = Value.nil;
+            entry.cached_version = 0;
         }
     }
 
@@ -2007,9 +2021,11 @@ pub const Interpreter = struct {
         const ic_entry = &self.inline_cache[ic_index];
 
         // Fast path: check if this exact callsite has a cached lookup
+        // Also check cache version to handle method dictionary changes
         if (!is_super and ic_entry.method_ptr == method_ptr and
             ic_entry.bytecode_offset == @as(u16, @intCast(bytecode_offset)) and
-            ic_entry.cached_class.bits == receiver_class.bits)
+            ic_entry.cached_class.bits == receiver_class.bits and
+            ic_entry.cached_version == self.cache_version)
         {
             // Inline cache HIT - use cached method directly
             self.inline_cache_hits += 1;
@@ -2091,6 +2107,7 @@ pub const Interpreter = struct {
                     .cached_class = receiver_class,
                     .cached_method = method_lookup.method,
                     .cached_holder = method_lookup.holder,
+                    .cached_version = self.cache_version,
                 };
             }
             const found_method = method_lookup.method;
