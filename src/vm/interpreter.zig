@@ -52,6 +52,8 @@ pub const ExceptionHandler = struct {
 };
 
 /// Execution context for a method activation
+/// Optimized to remove unused fields (num_args, num_temps, outer_context, closure)
+/// Size reduced from ~104 bytes to ~72 bytes for better cache performance
 pub const Context = struct {
     method: *CompiledMethod,
     method_class: Value,
@@ -61,11 +63,6 @@ pub const Context = struct {
     temp_base: usize, // Base index in stack for temps/args
     outer_temp_base: usize, // Base index for outer temps (for blocks) - level 1
     home_temp_base: usize, // Base index for home method temps - level >= 2
-    num_args: usize,
-    num_temps: usize,
-    // For block closures
-    outer_context: ?*Context,
-    closure: ?Value, // The BlockClosure object if this is a block
     // Heap-allocated context for closure variable capture
     heap_context: Value,
     // Home method's heap context (for nested blocks)
@@ -386,9 +383,6 @@ pub const Interpreter = struct {
                 .temp_base = ctx.temp_base,
                 .outer_temp_base = ctx.outer_temp_base,
                 .home_temp_base = ctx.home_temp_base,
-                .num_args = ctx.num_args,
-                .num_temps = ctx.num_temps,
-                .closure = ctx.closure,
                 .heap_context = ctx.heap_context,
                 .home_heap_context = ctx.home_heap_context,
             };
@@ -449,10 +443,6 @@ pub const Interpreter = struct {
                 .temp_base = saved_ctx.temp_base,
                 .outer_temp_base = saved_ctx.outer_temp_base,
                 .home_temp_base = saved_ctx.home_temp_base,
-                .num_args = saved_ctx.num_args,
-                .num_temps = saved_ctx.num_temps,
-                .outer_context = null, // Will be rebuilt if needed
-                .closure = saved_ctx.closure,
                 .heap_context = saved_ctx.heap_context,
                 .home_heap_context = saved_ctx.home_heap_context,
             };
@@ -2060,10 +2050,6 @@ pub const Interpreter = struct {
                     .temp_base = self.temp_base,
                     .outer_temp_base = self.outer_temp_base,
                     .home_temp_base = self.home_temp_base,
-                    .num_args = 0,
-                    .num_temps = 0,
-                    .outer_context = null,
-                    .closure = null,
                     .heap_context = self.heap_context,
                     .home_heap_context = self.home_heap_context,
                 };
@@ -2180,10 +2166,6 @@ pub const Interpreter = struct {
                     .temp_base = self.temp_base,
                     .outer_temp_base = self.outer_temp_base,
                     .home_temp_base = self.home_temp_base,
-                    .num_args = 0, // We don't track this for the current context
-                    .num_temps = 0,
-                    .outer_context = null,
-                    .closure = null,
                     .heap_context = self.heap_context,
                     .home_heap_context = self.home_heap_context,
                 };
@@ -2293,10 +2275,6 @@ pub const Interpreter = struct {
                     .temp_base = self.temp_base,
                     .outer_temp_base = self.outer_temp_base,
                     .home_temp_base = self.home_temp_base,
-                    .num_args = 0,
-                    .num_temps = 0,
-                    .outer_context = null,
-                    .closure = null,
                     .heap_context = self.heap_context,
                     .home_heap_context = self.home_heap_context,
                 };
@@ -2749,10 +2727,6 @@ pub const Interpreter = struct {
                     .temp_base = self.temp_base,
                     .outer_temp_base = self.outer_temp_base,
                     .home_temp_base = self.home_temp_base,
-                    .num_args = 0,
-                    .num_temps = 0,
-                    .outer_context = null,
-                    .closure = null,
                     .heap_context = self.heap_context,
                     .home_heap_context = self.home_heap_context,
                 };
@@ -2892,10 +2866,6 @@ pub const Interpreter = struct {
                 .temp_base = self.temp_base,
                 .outer_temp_base = self.outer_temp_base,
                 .home_temp_base = self.home_temp_base,
-                .num_args = 0,
-                .num_temps = 0,
-                .outer_context = null,
-                .closure = null,
                 .heap_context = self.heap_context,
                 .home_heap_context = self.home_heap_context,
             };

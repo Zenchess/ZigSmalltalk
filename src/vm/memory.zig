@@ -490,8 +490,12 @@ pub const Heap = struct {
             for (interp.contexts[0..interp.context_ptr]) |*ctx| {
                 ctx.receiver = try self.copyObject(ctx.receiver);
                 ctx.method_class = try self.copyObject(ctx.method_class);
-                if (ctx.closure) |closure| {
-                    ctx.closure = try self.copyObject(closure);
+                // Trace heap contexts for closures
+                if (!ctx.heap_context.isNil()) {
+                    ctx.heap_context = try self.copyObject(ctx.heap_context);
+                }
+                if (!ctx.home_heap_context.isNil()) {
+                    ctx.home_heap_context = try self.copyObject(ctx.home_heap_context);
                 }
                 // Trace context method - always copy as it's a heap object
                 const ctx_method_val = Value.fromObject(@ptrCast(@alignCast(ctx.method)));

@@ -96,6 +96,7 @@ pub const Process = struct {
 };
 
 /// Saved context entry (mirrors interpreter.Context but with Values that survive GC)
+/// Optimized to remove unused fields (num_args, num_temps, closure)
 pub const SavedContextEntry = struct {
     method: ?*CompiledMethod = null,
     method_class: Value = Value.nil,
@@ -104,9 +105,6 @@ pub const SavedContextEntry = struct {
     temp_base: usize = 0,
     outer_temp_base: usize = 0,
     home_temp_base: usize = 0,
-    num_args: usize = 0,
-    num_temps: usize = 0,
-    closure: ?Value = null,
     // Heap-allocated context for closure variable capture
     heap_context: Value = Value.nil,
     // Home method's heap context
@@ -415,9 +413,6 @@ pub const Scheduler = struct {
             for (proc.saved_contexts[0..proc.saved_context.context_ptr]) |*ctx| {
                 ctx.method_class = try copyFn(ctx.method_class);
                 ctx.receiver = try copyFn(ctx.receiver);
-                if (ctx.closure) |closure| {
-                    ctx.closure = try copyFn(closure);
-                }
                 if (!ctx.heap_context.isNil()) {
                     ctx.heap_context = try copyFn(ctx.heap_context);
                 }

@@ -2857,10 +2857,6 @@ fn primPerform(interp: *Interpreter) InterpreterError!Value {
             .temp_base = interp.temp_base,
             .outer_temp_base = interp.outer_temp_base,
             .home_temp_base = interp.home_temp_base,
-            .num_args = 0,
-            .num_temps = 0,
-            .outer_context = null,
-            .closure = null,
             .heap_context = interp.heap_context,
             .home_heap_context = interp.home_heap_context,
         };
@@ -2982,10 +2978,6 @@ fn primPerformWithArgs(interp: *Interpreter) InterpreterError!Value {
             .temp_base = interp.temp_base,
             .outer_temp_base = interp.outer_temp_base,
             .home_temp_base = interp.home_temp_base,
-            .num_args = 0,
-            .num_temps = 0,
-            .outer_context = null,
-            .closure = null,
             .heap_context = interp.heap_context,
             .home_heap_context = interp.home_heap_context,
         };
