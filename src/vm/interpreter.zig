@@ -1535,6 +1535,33 @@ pub const Interpreter = struct {
         return self.stack[self.sp];
     }
 
+    // Unchecked stack operations for hot paths (caller must ensure bounds)
+    inline fn pushUnchecked(self: *Interpreter, value: Value) void {
+        self.stack[self.sp] = value;
+        self.sp += 1;
+    }
+
+    inline fn popUnchecked(self: *Interpreter) Value {
+        self.sp -= 1;
+        return self.stack[self.sp];
+    }
+
+    inline fn peekUnchecked(self: *Interpreter) Value {
+        return self.stack[self.sp - 1];
+    }
+
+    // Replace top of stack without push/pop (for binary operations)
+    inline fn replaceTop(self: *Interpreter, value: Value) void {
+        self.stack[self.sp - 1] = value;
+    }
+
+    // Pop N values and push result (for N-ary operations returning 1 value)
+    inline fn popNPush1(self: *Interpreter, n: usize, value: Value) void {
+        self.sp -= n;
+        self.stack[self.sp] = value;
+        self.sp += 1;
+    }
+
     pub fn peek(self: *Interpreter) Value {
         if (self.sp == 0) return Value.nil;
         return self.stack[self.sp - 1];

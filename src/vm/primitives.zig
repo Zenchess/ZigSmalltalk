@@ -1112,18 +1112,13 @@ fn primBetweenAnd(interp: *Interpreter) InterpreterError!Value {
     return InterpreterError.PrimitiveFailed;
 }
 
+// Integer >> timesRepeat: - optimized version
+// OPTIMIZED: Saves interpreter state once, evaluates block inline
 fn primTimesRepeat(interp: *Interpreter) InterpreterError!Value {
     const block = try interp.pop();
     const count = try interp.pop();
 
-    if (!count.isSmallInt() or !block.isObject()) {
-        try interp.push(count);
-        try interp.push(block);
-        return InterpreterError.PrimitiveFailed;
-    }
-
-    const block_obj = block.asObject();
-    if (block_obj.header.class_index != Heap.CLASS_BLOCK_CLOSURE) {
+    if (!count.isSmallInt()) {
         try interp.push(count);
         try interp.push(block);
         return InterpreterError.PrimitiveFailed;
@@ -1134,54 +1129,62 @@ fn primTimesRepeat(interp: *Interpreter) InterpreterError!Value {
         return Value.nil;
     }
 
-    // Get block data: [outerTempBase, startPC, numArgs, method, receiver]
-    const start_pc = block_obj.getField(1, 6);
-    const num_args_val = block_obj.getField(2, 6);
-    const method_val = block_obj.getField(3, 6);
-
-    if (!start_pc.isSmallInt() or !num_args_val.isSmallInt() or !method_val.isObject()) {
+    // Extract block info once (validates block too)
+    const block_info = extractBlockInfo(interp, block) orelse {
         try interp.push(count);
         try interp.push(block);
         return InterpreterError.PrimitiveFailed;
-    }
+    };
 
-    const expected_args = num_args_val.asSmallInt();
-    if (expected_args != 0) {
-        // timesRepeat: block should take no arguments
-        try interp.push(count);
-        try interp.push(block);
-        return InterpreterError.PrimitiveFailed;
-    }
+    // Save interpreter state ONCE at start
+    const saved_ip = interp.ip;
+    const saved_method = interp.method;
+    const saved_sp = interp.sp;
+    const saved_temp_base = interp.temp_base;
+    const saved_outer_temp_base = interp.outer_temp_base;
+    const saved_home_temp_base = interp.home_temp_base;
+    const saved_receiver = interp.receiver;
+    const saved_context_ptr = interp.context_ptr;
+    const saved_heap_context = interp.heap_context;
+    const saved_home_heap_context = interp.home_heap_context;
 
-    // Loop n times
+    // Set up for primitive block execution
+    interp.primitive_block_bases[interp.primitive_block_depth] = interp.context_ptr;
+    interp.primitive_block_depth += 1;
+
+    // Loop n times with inline block evaluation
     var i: i61 = 0;
     while (i < n) : (i += 1) {
-        const saved_ip = interp.ip;
-        const saved_method = interp.method;
-        const saved_context_ptr = interp.context_ptr;
-        
-        interp.method = @ptrCast(@alignCast(method_val.asObject()));
-        interp.ip = @intCast(start_pc.asSmallInt());
-        if (interp.primitive_block_depth >= interp.primitive_block_bases.len) {
-            return InterpreterError.StackOverflow;
-        }
-        interp.primitive_block_bases[interp.primitive_block_depth] = interp.context_ptr;
-        interp.primitive_block_depth += 1;
-
-        // Execute the block (result is discarded)
-        _ = interp.interpretLoop() catch |err| {
+        // Evaluate block (inline, result discarded)
+        _ = evaluateBlockFast(interp, &block_info, saved_sp) catch |err| {
+            // Restore state on error
             interp.primitive_block_depth -= 1;
-                        interp.ip = saved_ip;
+            interp.ip = saved_ip;
             interp.method = saved_method;
+            interp.sp = saved_sp;
+            interp.temp_base = saved_temp_base;
+            interp.outer_temp_base = saved_outer_temp_base;
+            interp.home_temp_base = saved_home_temp_base;
+            interp.receiver = saved_receiver;
             interp.context_ptr = saved_context_ptr;
+            interp.heap_context = saved_heap_context;
+            interp.home_heap_context = saved_home_heap_context;
             return err;
         };
-
-        interp.primitive_block_depth -= 1;
-                interp.ip = saved_ip;
-        interp.method = saved_method;
-        interp.context_ptr = saved_context_ptr;
     }
+
+    // Restore state ONCE at end
+    interp.primitive_block_depth -= 1;
+    interp.ip = saved_ip;
+    interp.method = saved_method;
+    interp.sp = saved_sp;
+    interp.temp_base = saved_temp_base;
+    interp.outer_temp_base = saved_outer_temp_base;
+    interp.home_temp_base = saved_home_temp_base;
+    interp.receiver = saved_receiver;
+    interp.context_ptr = saved_context_ptr;
+    interp.heap_context = saved_heap_context;
+    interp.home_heap_context = saved_home_heap_context;
 
     return Value.nil;
 }
