@@ -660,5 +660,9 @@ pub const Primitive = enum(u16) {
     global_at = 910, // Smalltalk >> at:
     global_at_ifAbsent = 911, // Smalltalk >> at:ifAbsent:
 
+    // UI Process primitives
+    ui_process_iteration = 920, // UIProcess >> processOneIteration
+    ui_is_running = 921, // UIProcess >> isRunning
+
     _,
 };

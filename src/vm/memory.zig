@@ -109,7 +109,8 @@ pub const Heap = struct {
     pub const BLOCK_FIELD_METHOD: usize = 3; // CompiledMethod containing block's bytecodes
     pub const BLOCK_FIELD_RECEIVER: usize = 4; // Receiver when block was created
     pub const BLOCK_FIELD_HOME_CONTEXT: usize = 5; // Home context for non-local returns
-    pub const BLOCK_NUM_FIELDS: usize = 6;
+    pub const BLOCK_FIELD_NUM_TEMPS: usize = 6; // SmallInteger - number of block-local temps
+    pub const BLOCK_NUM_FIELDS: usize = 7;
 
     // Dolphin Behavior instanceSpec masks (kept here so VM can synthesize instanceSpec values)
     pub const INSTSPEC_SIZE_MASK: i61 = 0xFF;

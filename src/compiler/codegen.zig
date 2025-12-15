@@ -543,16 +543,18 @@ pub const CodeGenerator = struct {
                 // Create a BlockClosure
                 // For now, we compile blocks inline and wrap in a closure structure
                 // The closure bytecode format is:
-                //   push_closure <num_args> <bytecode_length_hi> <bytecode_length_lo>
+                //   push_closure <num_args> <num_temps> <bytecode_length_hi> <bytecode_length_lo>
                 //   <block bytecodes>
                 //   <after block>
 
                 const num_args: u8 = @intCast(node.data.block.parameters.len);
+                const num_temps: u8 = @intCast(node.data.block.temporaries.len);
 
                 // Save current position to patch later
                 try self.emit(.push_closure);
                 const patch_pos = self.bytecodes_buf.items.len;
                 try self.emitByte(num_args);
+                try self.emitByte(num_temps);
                 try self.emitByte(0); // Placeholder for bytecode length hi
                 try self.emitByte(0); // Placeholder for bytecode length lo
 
@@ -674,9 +676,9 @@ pub const CodeGenerator = struct {
                 const block_end = self.bytecodes_buf.items.len;
                 const block_size: u16 = @intCast(block_end - block_start);
 
-                // Patch the bytecode length
-                self.bytecodes_buf.items[patch_pos + 1] = @intCast(block_size >> 8);
-                self.bytecodes_buf.items[patch_pos + 2] = @intCast(block_size & 0xFF);
+                // Patch the bytecode length (after num_args and num_temps)
+                self.bytecodes_buf.items[patch_pos + 2] = @intCast(block_size >> 8);
+                self.bytecodes_buf.items[patch_pos + 3] = @intCast(block_size & 0xFF);
             },
 
             .return_statement => {

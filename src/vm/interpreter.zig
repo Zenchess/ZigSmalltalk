@@ -393,13 +393,14 @@ pub const Interpreter = struct {
         const block_obj = suspended_frame.asObject();
         if (block_obj.header.class_index != Heap.CLASS_BLOCK_CLOSURE) return false;
 
-        // Get block data: [outerContext, startPC, numArgs, method, receiver, homeContext]
-        const outer_context_val = block_obj.getField(Heap.BLOCK_FIELD_OUTER_CONTEXT, 6);
-        const start_pc = block_obj.getField(Heap.BLOCK_FIELD_START_PC, 6);
-        const num_args_val = block_obj.getField(Heap.BLOCK_FIELD_NUM_ARGS, 6);
-        const method_val = block_obj.getField(Heap.BLOCK_FIELD_METHOD, 6);
-        const block_receiver = block_obj.getField(Heap.BLOCK_FIELD_RECEIVER, 6);
-        const home_context_val = block_obj.getField(Heap.BLOCK_FIELD_HOME_CONTEXT, 6);
+        // Get block data: [outerContext, startPC, numArgs, method, receiver, homeContext, numTemps]
+        const outer_context_val = block_obj.getField(Heap.BLOCK_FIELD_OUTER_CONTEXT, Heap.BLOCK_NUM_FIELDS);
+        const start_pc = block_obj.getField(Heap.BLOCK_FIELD_START_PC, Heap.BLOCK_NUM_FIELDS);
+        const num_args_val = block_obj.getField(Heap.BLOCK_FIELD_NUM_ARGS, Heap.BLOCK_NUM_FIELDS);
+        const method_val = block_obj.getField(Heap.BLOCK_FIELD_METHOD, Heap.BLOCK_NUM_FIELDS);
+        const block_receiver = block_obj.getField(Heap.BLOCK_FIELD_RECEIVER, Heap.BLOCK_NUM_FIELDS);
+        const home_context_val = block_obj.getField(Heap.BLOCK_FIELD_HOME_CONTEXT, Heap.BLOCK_NUM_FIELDS);
+        const num_temps_val = block_obj.getField(Heap.BLOCK_FIELD_NUM_TEMPS, Heap.BLOCK_NUM_FIELDS);
 
         if (!start_pc.isSmallInt() or !method_val.isObject()) return false;
 
@@ -418,7 +419,11 @@ pub const Interpreter = struct {
         self.method = @ptrCast(@alignCast(method_val.asObject()));
         self.ip = @intCast(start_pc.asSmallInt());
         self.receiver = block_receiver;
-        self.temp_base = self.sp;
+
+        // Push a placeholder for the receiver slot (like primBlockValue does)
+        // This ensures temp_base + 1 + index correctly addresses temps
+        self.push(block_receiver) catch return false;
+        self.temp_base = self.sp - 1; // temp_base points to receiver slot
 
         // Restore heap contexts from block for cross-process variable access
         // This is the key to allowing captured variables to work across processes
@@ -435,6 +440,31 @@ pub const Interpreter = struct {
             self.home_temp_base = 0;
             self.heap_context = Value.nil;
             self.home_heap_context = Value.nil;
+        }
+
+        // Allocate space for block temporaries by pushing nil values
+        const num_temps: usize = if (num_temps_val.isSmallInt() and num_temps_val.asSmallInt() > 0)
+            @intCast(num_temps_val.asSmallInt())
+        else
+            0;
+        var ti: usize = 0;
+        while (ti < num_temps) : (ti += 1) {
+            self.push(Value.nil) catch return false;
+        }
+
+        // If the forked block has temps, ALWAYS create a new heap context for them.
+        // This is critical for nested blocks to access the forked block's temps via push_outer_temp.
+        // The outer context (from OUTER_CONTEXT field) is kept in home_heap_context for level >= 2 access.
+        if (num_temps > 0) {
+            // Save outer context for home access
+            const outer_ctx = self.heap_context;
+            // Create new context for this block's temps
+            const heap_ctx = self.createHeapContext(num_temps) catch return false;
+            self.heap_context = Value.fromObject(heap_ctx);
+            // Keep home context pointing to outer for level >= 2 access
+            if (self.home_heap_context.isNil()) {
+                self.home_heap_context = outer_ctx;
+            }
         }
 
         return true;
@@ -520,6 +550,24 @@ pub const Interpreter = struct {
         for (semaphores) |sem| {
             self.signalSemaphore(sem);
         }
+    }
+
+    /// Run pending background processes for a time slice.
+    /// Call this from the main event loop to give background processes time to run.
+    /// Returns true if any process made progress.
+    pub fn runPendingProcesses(self: *Interpreter, max_instructions: u32) bool {
+        _ = max_instructions;
+        // Check for completed overlapped calls
+        self.processCompletedOverlappedCalls();
+
+        // Check for timer expiration
+        if (self.process_scheduler.checkTimer()) |sem| {
+            self.signalSemaphore(sem);
+        }
+
+        // Note: Full process switching is not implemented in this stub
+        // For now, just return false indicating no process ran
+        return false;
     }
 
     /// Submit an overlapped FFI call that runs on a native thread
@@ -1145,15 +1193,16 @@ pub const Interpreter = struct {
 
                 .push_closure => {
                     // Create a BlockClosure object
-                    // Format: push_closure <num_args> <size_hi> <size_lo> <bytecodes...>
+                    // Format: push_closure <num_args> <num_temps> <size_hi> <size_lo> <bytecodes...>
                     const block_num_args = self.fetchByte();
+                    const block_num_temps = self.fetchByte();
                     const size_hi: u16 = self.fetchByte();
                     const size_lo: u16 = self.fetchByte();
                     const bytecode_size: usize = @intCast((size_hi << 8) | size_lo);
 
                     if (DEBUG_VERBOSE) {
                         const prim_ctx_base = if (self.primitive_block_depth > 0) self.primitive_block_bases[self.primitive_block_depth - 1] else 0;
-                        std.debug.print("DEBUG push_closure: temp_base={} home_temp_base={} ctx_ptr={} prim_ctx_base={} prim_depth={}\n", .{ self.temp_base, self.home_temp_base, self.context_ptr, prim_ctx_base, self.primitive_block_depth });
+                        std.debug.print("DEBUG push_closure: temp_base={} home_temp_base={} ctx_ptr={} prim_ctx_base={} prim_depth={} block_temps={}\n", .{ self.temp_base, self.home_temp_base, self.context_ptr, prim_ctx_base, self.primitive_block_depth, block_num_temps });
                     }
 
                     // Lazily create heap context for closure variable capture
@@ -1177,20 +1226,21 @@ pub const Interpreter = struct {
                     }
 
                     // Create BlockClosure object
-                    // Fields: outerContext, startPC, numArgs, method, receiver, homeContext
-                    const closure = self.heap.allocateObject(Heap.CLASS_BLOCK_CLOSURE, 6, .normal) catch {
+                    // Fields: outerContext, startPC, numArgs, method, receiver, homeContext, numTemps
+                    const closure = self.heap.allocateObject(Heap.CLASS_BLOCK_CLOSURE, Heap.BLOCK_NUM_FIELDS, .normal) catch {
                         return InterpreterError.OutOfMemory;
                     };
 
                     // Store heap context references for cross-process variable access
                     // OUTER_CONTEXT: immediate enclosing context (for level 1 access)
                     // HOME_CONTEXT: home method's context (for level >= 2 access and non-local returns)
-                    closure.setField(Heap.BLOCK_FIELD_OUTER_CONTEXT, self.heap_context, 6);
-                    closure.setField(Heap.BLOCK_FIELD_START_PC, Value.fromSmallInt(@intCast(self.ip)), 6);
-                    closure.setField(Heap.BLOCK_FIELD_NUM_ARGS, Value.fromSmallInt(block_num_args), 6);
-                    closure.setField(Heap.BLOCK_FIELD_METHOD, Value.fromObject(@ptrCast(@alignCast(self.method))), 6);
-                    closure.setField(Heap.BLOCK_FIELD_RECEIVER, self.receiver, 6);
-                    closure.setField(Heap.BLOCK_FIELD_HOME_CONTEXT, self.home_heap_context, 6);
+                    closure.setField(Heap.BLOCK_FIELD_OUTER_CONTEXT, self.heap_context, Heap.BLOCK_NUM_FIELDS);
+                    closure.setField(Heap.BLOCK_FIELD_START_PC, Value.fromSmallInt(@intCast(self.ip)), Heap.BLOCK_NUM_FIELDS);
+                    closure.setField(Heap.BLOCK_FIELD_NUM_ARGS, Value.fromSmallInt(block_num_args), Heap.BLOCK_NUM_FIELDS);
+                    closure.setField(Heap.BLOCK_FIELD_METHOD, Value.fromObject(@ptrCast(@alignCast(self.method))), Heap.BLOCK_NUM_FIELDS);
+                    closure.setField(Heap.BLOCK_FIELD_RECEIVER, self.receiver, Heap.BLOCK_NUM_FIELDS);
+                    closure.setField(Heap.BLOCK_FIELD_HOME_CONTEXT, self.home_heap_context, Heap.BLOCK_NUM_FIELDS);
+                    closure.setField(Heap.BLOCK_FIELD_NUM_TEMPS, Value.fromSmallInt(block_num_temps), Heap.BLOCK_NUM_FIELDS);
 
                     try self.push(Value.fromObject(closure));
 
@@ -1277,6 +1327,10 @@ pub const Interpreter = struct {
                             // Store to temporary
                             // temp_base points to receiver slot, temps start at temp_base + 1
                             self.stack[self.temp_base + 1 + index] = val;
+                            // Also update heap context if present (for cross-process/nested block access)
+                            if (!self.heap_context.isNil()) {
+                                setHeapContextTemp(self.heap_context.asObject(), index, val);
+                            }
                         },
                         1 => {
                             // Store to instance variable
@@ -1432,6 +1486,14 @@ pub const Interpreter = struct {
     }
 
     fn pushTemporary(self: *Interpreter, index: u8) InterpreterError!void {
+        // Read from heap context if present (this allows inner blocks to update outer temps
+        // via store_outer_temp and have the outer block see the updated value)
+        if (!self.heap_context.isNil()) {
+            const val = getHeapContextTemp(self.heap_context.asObject(), index);
+            try self.push(val);
+            return;
+        }
+        // Fall back to stack access
         // temp_base points to receiver slot, temps start at temp_base + 1
         const stack_index = self.temp_base + 1 + index;
         if (stack_index < self.sp) {
@@ -1468,6 +1530,10 @@ pub const Interpreter = struct {
         const stack_index = self.temp_base + 1 + index;
         if (stack_index < self.sp) {
             self.stack[stack_index] = val;
+        }
+        // Also update heap context if present (for cross-process/nested block access)
+        if (!self.heap_context.isNil()) {
+            setHeapContextTemp(self.heap_context.asObject(), index, val);
         }
     }
 
@@ -1755,6 +1821,9 @@ pub const Interpreter = struct {
             self.temp_base = self.sp;
             self.outer_temp_base = self.temp_base;
             self.home_temp_base = self.temp_base; // Blocks in this method return to this context
+            // Clear heap contexts - method has its own fresh temps, not shared with calling block
+            self.heap_context = Value.nil;
+            self.home_heap_context = Value.nil;
 
             // Push receiver (at temp_base, but NOT accessible as temp - receiver is accessed via self.receiver)
             try self.push(recv);
@@ -1863,6 +1932,9 @@ pub const Interpreter = struct {
                 self.temp_base = self.sp;
                 self.outer_temp_base = self.temp_base;
                 self.home_temp_base = self.temp_base;
+                // Clear heap contexts - method has its own fresh temps, not shared with calling block
+                self.heap_context = Value.nil;
+                self.home_heap_context = Value.nil;
 
                 // Push receiver and message argument
                 try self.push(recv);
@@ -2292,6 +2364,9 @@ pub const Interpreter = struct {
                 self.temp_base = self.sp;
                 self.outer_temp_base = self.temp_base;
                 self.home_temp_base = self.temp_base;
+                // Clear heap contexts - method has its own fresh temps, not shared with calling block
+                self.heap_context = Value.nil;
+                self.home_heap_context = Value.nil;
 
                 // Push receiver and argument
                 try self.push(recv);
@@ -2428,6 +2503,9 @@ pub const Interpreter = struct {
             self.temp_base = self.sp;
             self.outer_temp_base = self.temp_base;
             self.home_temp_base = self.temp_base;
+            // Clear heap contexts - method has its own fresh temps, not shared with calling block
+            self.heap_context = Value.nil;
+            self.home_heap_context = Value.nil;
 
             // Push receiver (no arguments for unary)
             try self.push(recv);

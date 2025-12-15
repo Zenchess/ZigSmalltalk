@@ -9,6 +9,7 @@ const ffi_autogen = if (build_options.ffi_enabled) @import("ffi_autogen.zig") el
 const ffi_runtime = if (build_options.ffi_enabled) @import("ffi_runtime.zig") else undefined;
 const ffi_generated = if (build_options.ffi_enabled) @import("ffi_generated.zig") else undefined;
 const filein = @import("../image/filein.zig");
+const app_mod = @import("../tui/app.zig");
 const obj_loader = @import("obj_loader.zig");
 
 const Value = object.Value;
@@ -378,6 +379,10 @@ pub fn executePrimitive(interp: *Interpreter, prim_index: u16) InterpreterError!
         .subclass_create => primSubclassCreate(interp),
         .compile_method => primCompileMethod(interp),
         .load_obj_file => primLoadOBJFile(interp),
+
+        // UI Process primitives (920-921)
+        .ui_process_iteration => primUIProcessIteration(interp),
+        .ui_is_running => primUIIsRunning(interp),
 
         else => InterpreterError.PrimitiveFailed,
     };
@@ -1151,6 +1156,9 @@ fn primTimesRepeat(interp: *Interpreter) InterpreterError!Value {
         
         interp.method = @ptrCast(@alignCast(method_val.asObject()));
         interp.ip = @intCast(start_pc.asSmallInt());
+        if (interp.primitive_block_depth >= interp.primitive_block_bases.len) {
+            return InterpreterError.StackOverflow;
+        }
         interp.primitive_block_bases[interp.primitive_block_depth] = interp.context_ptr;
         interp.primitive_block_depth += 1;
 
@@ -1933,14 +1941,15 @@ pub fn primBlockValue(interp: *Interpreter) InterpreterError!Value {
         return InterpreterError.PrimitiveFailed;
     }
 
-    // Get block data: [outerContext, startPC, numArgs, method, receiver, homeContext]
+    // Get block data: [outerContext, startPC, numArgs, method, receiver, homeContext, numTemps]
     // Field 0/5 can be either heap context (Object) or stack index (SmallInt) for backwards compatibility
-    const outer_context_val = block_obj.getField(Heap.BLOCK_FIELD_OUTER_CONTEXT, 6);
-    const start_pc = block_obj.getField(Heap.BLOCK_FIELD_START_PC, 6);
-    const num_args_val = block_obj.getField(Heap.BLOCK_FIELD_NUM_ARGS, 6);
-    const method_val = block_obj.getField(Heap.BLOCK_FIELD_METHOD, 6);
-    const block_receiver = block_obj.getField(Heap.BLOCK_FIELD_RECEIVER, 6);
-    const home_context_val = block_obj.getField(Heap.BLOCK_FIELD_HOME_CONTEXT, 6);
+    const outer_context_val = block_obj.getField(Heap.BLOCK_FIELD_OUTER_CONTEXT, Heap.BLOCK_NUM_FIELDS);
+    const start_pc = block_obj.getField(Heap.BLOCK_FIELD_START_PC, Heap.BLOCK_NUM_FIELDS);
+    const num_args_val = block_obj.getField(Heap.BLOCK_FIELD_NUM_ARGS, Heap.BLOCK_NUM_FIELDS);
+    const method_val = block_obj.getField(Heap.BLOCK_FIELD_METHOD, Heap.BLOCK_NUM_FIELDS);
+    const block_receiver = block_obj.getField(Heap.BLOCK_FIELD_RECEIVER, Heap.BLOCK_NUM_FIELDS);
+    const home_context_val = block_obj.getField(Heap.BLOCK_FIELD_HOME_CONTEXT, Heap.BLOCK_NUM_FIELDS);
+    const num_temps_val = block_obj.getField(Heap.BLOCK_FIELD_NUM_TEMPS, Heap.BLOCK_NUM_FIELDS);
 
     if (!start_pc.isSmallInt() or !num_args_val.isSmallInt() or !method_val.isObject()) {
         try interp.push(block);
@@ -1969,7 +1978,11 @@ pub fn primBlockValue(interp: *Interpreter) InterpreterError!Value {
     interp.method = @ptrCast(@alignCast(method_val.asObject()));
     interp.ip = @intCast(start_pc.asSmallInt());
     interp.receiver = block_receiver; // Restore the receiver from when the block was created
-    interp.temp_base = interp.sp; // Block gets its own stack frame starting at current sp
+
+    // Push a placeholder for the receiver slot (like primBlockValue1 does implicitly)
+    // This ensures temp_base + 1 + index correctly addresses temps
+    try interp.push(block_receiver);
+    interp.temp_base = interp.sp - 1; // temp_base points to receiver slot
 
     // Restore heap contexts from block for cross-process variable access
     // Check if block has heap contexts (new format) or stack indices (old format)
@@ -1994,6 +2007,34 @@ pub fn primBlockValue(interp: *Interpreter) InterpreterError!Value {
         interp.home_heap_context = Value.nil;
     }
 
+    // Allocate space for block temporaries by pushing nil values
+    const num_temps: usize = if (num_temps_val.isSmallInt() and num_temps_val.asSmallInt() > 0)
+        @intCast(num_temps_val.asSmallInt())
+    else
+        0;
+    var i: usize = 0;
+    while (i < num_temps) : (i += 1) {
+        try interp.push(Value.nil);
+    }
+
+    // If the block has temps, create a new heap context for them.
+    // This is critical for nested blocks to access this block's temps via push_outer_temp.
+    if (num_temps > 0) {
+        // Save outer context for home access
+        const outer_ctx = interp.heap_context;
+        // Create new context for this block's temps
+        const heap_ctx = try interp.createHeapContext(num_temps);
+        interp.heap_context = Value.fromObject(heap_ctx);
+        // Keep home context pointing to outer for level >= 2 access
+        if (interp.home_heap_context.isNil()) {
+            interp.home_heap_context = outer_ctx;
+        }
+    }
+
+    // Check for recursion limit
+    if (interp.primitive_block_depth >= interp.primitive_block_bases.len) {
+        return InterpreterError.StackOverflow;
+    }
     interp.primitive_block_bases[interp.primitive_block_depth] = interp.context_ptr;
     interp.primitive_block_depth += 1;
 
@@ -2049,15 +2090,16 @@ fn primBlockValue1(interp: *Interpreter) InterpreterError!Value {
         return InterpreterError.PrimitiveFailed;
     }
 
-    // Get block data: [outerTempBase, startPC, numArgs, method, receiver, homeTempBase]
-    const outer_temp_base_val = block_obj.getField(0, 6);
-    const start_pc = block_obj.getField(1, 6);
-    const num_args_val = block_obj.getField(2, 6);
-    const method_val = block_obj.getField(3, 6);
-    const block_receiver = block_obj.getField(4, 6);
-    const home_temp_base_val = block_obj.getField(5, 6);
+    // Get block data: [outerContext, startPC, numArgs, method, receiver, homeContext, numTemps]
+    const outer_context_val = block_obj.getField(Heap.BLOCK_FIELD_OUTER_CONTEXT, Heap.BLOCK_NUM_FIELDS);
+    const start_pc = block_obj.getField(Heap.BLOCK_FIELD_START_PC, Heap.BLOCK_NUM_FIELDS);
+    const num_args_val = block_obj.getField(Heap.BLOCK_FIELD_NUM_ARGS, Heap.BLOCK_NUM_FIELDS);
+    const method_val = block_obj.getField(Heap.BLOCK_FIELD_METHOD, Heap.BLOCK_NUM_FIELDS);
+    const block_receiver = block_obj.getField(Heap.BLOCK_FIELD_RECEIVER, Heap.BLOCK_NUM_FIELDS);
+    const home_context_val = block_obj.getField(Heap.BLOCK_FIELD_HOME_CONTEXT, Heap.BLOCK_NUM_FIELDS);
+    const num_temps_val = block_obj.getField(Heap.BLOCK_FIELD_NUM_TEMPS, Heap.BLOCK_NUM_FIELDS);
 
-    if (!outer_temp_base_val.isSmallInt() or !start_pc.isSmallInt() or !num_args_val.isSmallInt() or !method_val.isObject()) {
+    if (!start_pc.isSmallInt() or !num_args_val.isSmallInt() or !method_val.isObject()) {
         try interp.push(block);
         try interp.push(arg);
         return InterpreterError.PrimitiveFailed;
@@ -2079,13 +2121,30 @@ fn primBlockValue1(interp: *Interpreter) InterpreterError!Value {
     const saved_home_temp_base = interp.home_temp_base;
     const saved_receiver = interp.receiver;
     const saved_context_ptr = interp.context_ptr;
-    
+    const saved_heap_context = interp.heap_context;
+    const saved_home_heap_context = interp.home_heap_context;
+
     interp.method = @ptrCast(@alignCast(method_val.asObject()));
     interp.ip = @intCast(start_pc.asSmallInt());
     interp.receiver = block_receiver; // Restore the receiver from when the block was created
-    interp.outer_temp_base = @intCast(outer_temp_base_val.asSmallInt()); // Set outer temp base for closure access
-    // Set home_temp_base from block's stored value - this is critical for NLR
-    interp.home_temp_base = if (home_temp_base_val.isSmallInt()) @intCast(home_temp_base_val.asSmallInt()) else interp.temp_base;
+
+    // Handle heap contexts or stack indices
+    if (outer_context_val.isObject() and outer_context_val.asObject().header.class_index == Heap.CLASS_METHOD_CONTEXT) {
+        interp.heap_context = outer_context_val;
+        interp.home_heap_context = home_context_val;
+        interp.outer_temp_base = interp.sp - 1;
+        interp.home_temp_base = interp.sp - 1;
+    } else if (outer_context_val.isSmallInt()) {
+        interp.outer_temp_base = @intCast(outer_context_val.asSmallInt());
+        interp.home_temp_base = if (home_context_val.isSmallInt()) @intCast(home_context_val.asSmallInt()) else interp.sp - 1;
+        interp.heap_context = Value.nil;
+        interp.home_heap_context = Value.nil;
+    } else {
+        interp.outer_temp_base = interp.sp - 1;
+        interp.home_temp_base = interp.sp - 1;
+        interp.heap_context = Value.nil;
+        interp.home_heap_context = Value.nil;
+    }
 
     // Set temp_base so that temp_base + 1 + 0 points to the first argument
     // Arguments will be pushed starting at current sp
@@ -2096,11 +2155,32 @@ fn primBlockValue1(interp: *Interpreter) InterpreterError!Value {
     // Push the argument
     try interp.push(arg);
 
-    if (DEBUG_VERBOSE) std.debug.print("DEBUG primBlockValue1: saved_temp_base={} block_stored_home={} interp.home_temp_base={}\n", .{ saved_temp_base, if (home_temp_base_val.isSmallInt()) home_temp_base_val.asSmallInt() else -999, interp.home_temp_base });
+    // Allocate space for block temporaries by pushing nil values
+    const num_temps: usize = if (num_temps_val.isSmallInt() and num_temps_val.asSmallInt() > 0)
+        @intCast(num_temps_val.asSmallInt())
+    else
+        0;
+    var ti: usize = 0;
+    while (ti < num_temps) : (ti += 1) {
+        try interp.push(Value.nil);
+    }
+
+    // If the block has temps, create a new heap context for them.
+    // The context needs slots for BOTH args and temps since bytecode indices are absolute
+    if (num_temps > 0) {
+        const outer_ctx = interp.heap_context;
+        const heap_ctx = try interp.createHeapContext(1 + num_temps); // 1 arg + temps
+        interp.heap_context = Value.fromObject(heap_ctx);
+        if (interp.home_heap_context.isNil()) {
+            interp.home_heap_context = outer_ctx;
+        }
+    }
+
+    if (DEBUG_VERBOSE) std.debug.print("DEBUG primBlockValue1: saved_temp_base={} interp.home_temp_base={}\n", .{ saved_temp_base, interp.home_temp_base });
 
     const result = interp.interpretLoop() catch |err| {
         interp.primitive_block_depth -= 1;
-                interp.ip = saved_ip;
+        interp.ip = saved_ip;
         interp.method = saved_method;
 
         // For BlockNonLocalReturn, always propagate - let the .send bytecode handler intercept it
@@ -2112,11 +2192,13 @@ fn primBlockValue1(interp: *Interpreter) InterpreterError!Value {
         interp.home_temp_base = saved_home_temp_base;
         interp.receiver = saved_receiver;
         interp.context_ptr = saved_context_ptr;
+        interp.heap_context = saved_heap_context;
+        interp.home_heap_context = saved_home_heap_context;
         return err;
     };
 
     interp.primitive_block_depth -= 1;
-        interp.ip = saved_ip;
+    interp.ip = saved_ip;
     interp.method = saved_method;
     interp.sp = saved_sp;
     interp.temp_base = saved_temp_base;
@@ -2124,6 +2206,8 @@ fn primBlockValue1(interp: *Interpreter) InterpreterError!Value {
     interp.home_temp_base = saved_home_temp_base;
     interp.receiver = saved_receiver;
     interp.context_ptr = saved_context_ptr;
+    interp.heap_context = saved_heap_context;
+    interp.home_heap_context = saved_home_heap_context;
 
     return result;
 }
@@ -2148,14 +2232,16 @@ fn primBlockValue2(interp: *Interpreter) InterpreterError!Value {
         return InterpreterError.PrimitiveFailed;
     }
 
-    // Get block data: [outerTempBase, startPC, numArgs, method, receiver]
-    const outer_temp_base_val = block_obj.getField(0, 6);
-    const start_pc = block_obj.getField(1, 6);
-    const num_args_val = block_obj.getField(2, 6);
-    const method_val = block_obj.getField(3, 6);
-    const block_receiver = block_obj.getField(4, 6);
+    // Get block data: [outerContext, startPC, numArgs, method, receiver, homeContext, numTemps]
+    const outer_context_val = block_obj.getField(Heap.BLOCK_FIELD_OUTER_CONTEXT, Heap.BLOCK_NUM_FIELDS);
+    const start_pc = block_obj.getField(Heap.BLOCK_FIELD_START_PC, Heap.BLOCK_NUM_FIELDS);
+    const num_args_val = block_obj.getField(Heap.BLOCK_FIELD_NUM_ARGS, Heap.BLOCK_NUM_FIELDS);
+    const method_val = block_obj.getField(Heap.BLOCK_FIELD_METHOD, Heap.BLOCK_NUM_FIELDS);
+    const block_receiver = block_obj.getField(Heap.BLOCK_FIELD_RECEIVER, Heap.BLOCK_NUM_FIELDS);
+    const home_context_val = block_obj.getField(Heap.BLOCK_FIELD_HOME_CONTEXT, Heap.BLOCK_NUM_FIELDS);
+    const num_temps_val = block_obj.getField(Heap.BLOCK_FIELD_NUM_TEMPS, Heap.BLOCK_NUM_FIELDS);
 
-    if (!outer_temp_base_val.isSmallInt() or !start_pc.isSmallInt() or !num_args_val.isSmallInt() or !method_val.isObject()) {
+    if (!start_pc.isSmallInt() or !num_args_val.isSmallInt() or !method_val.isObject()) {
         try interp.push(block);
         try interp.push(arg1);
         try interp.push(arg2);
@@ -2175,13 +2261,33 @@ fn primBlockValue2(interp: *Interpreter) InterpreterError!Value {
     const saved_sp = interp.sp;
     const saved_temp_base = interp.temp_base;
     const saved_outer_temp_base = interp.outer_temp_base;
+    const saved_home_temp_base = interp.home_temp_base;
     const saved_receiver = interp.receiver;
     const saved_context_ptr = interp.context_ptr;
-    
+    const saved_heap_context = interp.heap_context;
+    const saved_home_heap_context = interp.home_heap_context;
+
     interp.method = @ptrCast(@alignCast(method_val.asObject()));
     interp.ip = @intCast(start_pc.asSmallInt());
     interp.receiver = block_receiver; // Restore the receiver from when the block was created
-    interp.outer_temp_base = @intCast(outer_temp_base_val.asSmallInt());
+
+    // Handle heap contexts or stack indices
+    if (outer_context_val.isObject() and outer_context_val.asObject().header.class_index == Heap.CLASS_METHOD_CONTEXT) {
+        interp.heap_context = outer_context_val;
+        interp.home_heap_context = home_context_val;
+        interp.outer_temp_base = interp.sp - 1;
+        interp.home_temp_base = interp.sp - 1;
+    } else if (outer_context_val.isSmallInt()) {
+        interp.outer_temp_base = @intCast(outer_context_val.asSmallInt());
+        interp.home_temp_base = if (home_context_val.isSmallInt()) @intCast(home_context_val.asSmallInt()) else interp.sp - 1;
+        interp.heap_context = Value.nil;
+        interp.home_heap_context = Value.nil;
+    } else {
+        interp.outer_temp_base = interp.sp - 1;
+        interp.home_temp_base = interp.sp - 1;
+        interp.heap_context = Value.nil;
+        interp.home_heap_context = Value.nil;
+    }
 
     // Set temp_base so that temp_base + 1 + 0 points to the first argument
     interp.temp_base = interp.sp - 1;
@@ -2192,9 +2298,30 @@ fn primBlockValue2(interp: *Interpreter) InterpreterError!Value {
     try interp.push(arg1);
     try interp.push(arg2);
 
+    // Allocate space for block temporaries
+    const num_temps: usize = if (num_temps_val.isSmallInt() and num_temps_val.asSmallInt() > 0)
+        @intCast(num_temps_val.asSmallInt())
+    else
+        0;
+    var ti: usize = 0;
+    while (ti < num_temps) : (ti += 1) {
+        try interp.push(Value.nil);
+    }
+
+    // If the block has temps, create a new heap context for them.
+    // The context needs slots for BOTH args and temps since bytecode indices are absolute
+    if (num_temps > 0) {
+        const outer_ctx = interp.heap_context;
+        const heap_ctx = try interp.createHeapContext(2 + num_temps); // 2 args + temps
+        interp.heap_context = Value.fromObject(heap_ctx);
+        if (interp.home_heap_context.isNil()) {
+            interp.home_heap_context = outer_ctx;
+        }
+    }
+
     const result = interp.interpretLoop() catch |err| {
         interp.primitive_block_depth -= 1;
-                interp.ip = saved_ip;
+        interp.ip = saved_ip;
         interp.method = saved_method;
 
         // For BlockNonLocalReturn, always propagate - let the .send bytecode handler intercept it
@@ -2203,19 +2330,25 @@ fn primBlockValue2(interp: *Interpreter) InterpreterError!Value {
         }
         interp.temp_base = saved_temp_base;
         interp.outer_temp_base = saved_outer_temp_base;
+        interp.home_temp_base = saved_home_temp_base;
         interp.receiver = saved_receiver;
         interp.context_ptr = saved_context_ptr;
+        interp.heap_context = saved_heap_context;
+        interp.home_heap_context = saved_home_heap_context;
         return err;
     };
 
     interp.primitive_block_depth -= 1;
-        interp.ip = saved_ip;
+    interp.ip = saved_ip;
     interp.method = saved_method;
     interp.sp = saved_sp;
     interp.temp_base = saved_temp_base;
     interp.outer_temp_base = saved_outer_temp_base;
+    interp.home_temp_base = saved_home_temp_base;
     interp.receiver = saved_receiver;
     interp.context_ptr = saved_context_ptr;
+    interp.heap_context = saved_heap_context;
+    interp.home_heap_context = saved_home_heap_context;
 
     return result;
 }
@@ -2243,14 +2376,16 @@ fn primBlockValue3(interp: *Interpreter) InterpreterError!Value {
         return InterpreterError.PrimitiveFailed;
     }
 
-    // Get block data: [outerTempBase, startPC, numArgs, method, receiver]
-    const outer_temp_base_val = block_obj.getField(0, 6);
-    const start_pc = block_obj.getField(1, 6);
-    const num_args_val = block_obj.getField(2, 6);
-    const method_val = block_obj.getField(3, 6);
-    const block_receiver = block_obj.getField(4, 6);
+    // Get block data: [outerContext, startPC, numArgs, method, receiver, homeContext, numTemps]
+    const outer_context_val = block_obj.getField(Heap.BLOCK_FIELD_OUTER_CONTEXT, Heap.BLOCK_NUM_FIELDS);
+    const start_pc = block_obj.getField(Heap.BLOCK_FIELD_START_PC, Heap.BLOCK_NUM_FIELDS);
+    const num_args_val = block_obj.getField(Heap.BLOCK_FIELD_NUM_ARGS, Heap.BLOCK_NUM_FIELDS);
+    const method_val = block_obj.getField(Heap.BLOCK_FIELD_METHOD, Heap.BLOCK_NUM_FIELDS);
+    const block_receiver = block_obj.getField(Heap.BLOCK_FIELD_RECEIVER, Heap.BLOCK_NUM_FIELDS);
+    const home_context_val = block_obj.getField(Heap.BLOCK_FIELD_HOME_CONTEXT, Heap.BLOCK_NUM_FIELDS);
+    const num_temps_val = block_obj.getField(Heap.BLOCK_FIELD_NUM_TEMPS, Heap.BLOCK_NUM_FIELDS);
 
-    if (!outer_temp_base_val.isSmallInt() or !start_pc.isSmallInt() or !num_args_val.isSmallInt() or !method_val.isObject()) {
+    if (!start_pc.isSmallInt() or !num_args_val.isSmallInt() or !method_val.isObject()) {
         try interp.push(block);
         try interp.push(arg1);
         try interp.push(arg2);
@@ -2272,13 +2407,33 @@ fn primBlockValue3(interp: *Interpreter) InterpreterError!Value {
     const saved_sp = interp.sp;
     const saved_temp_base = interp.temp_base;
     const saved_outer_temp_base = interp.outer_temp_base;
+    const saved_home_temp_base = interp.home_temp_base;
     const saved_receiver = interp.receiver;
     const saved_context_ptr = interp.context_ptr;
-    
+    const saved_heap_context = interp.heap_context;
+    const saved_home_heap_context = interp.home_heap_context;
+
     interp.method = @ptrCast(@alignCast(method_val.asObject()));
     interp.ip = @intCast(start_pc.asSmallInt());
     interp.receiver = block_receiver; // Restore the receiver from when the block was created
-    interp.outer_temp_base = @intCast(outer_temp_base_val.asSmallInt());
+
+    // Handle heap contexts or stack indices
+    if (outer_context_val.isObject() and outer_context_val.asObject().header.class_index == Heap.CLASS_METHOD_CONTEXT) {
+        interp.heap_context = outer_context_val;
+        interp.home_heap_context = home_context_val;
+        interp.outer_temp_base = interp.sp - 1;
+        interp.home_temp_base = interp.sp - 1;
+    } else if (outer_context_val.isSmallInt()) {
+        interp.outer_temp_base = @intCast(outer_context_val.asSmallInt());
+        interp.home_temp_base = if (home_context_val.isSmallInt()) @intCast(home_context_val.asSmallInt()) else interp.sp - 1;
+        interp.heap_context = Value.nil;
+        interp.home_heap_context = Value.nil;
+    } else {
+        interp.outer_temp_base = interp.sp - 1;
+        interp.home_temp_base = interp.sp - 1;
+        interp.heap_context = Value.nil;
+        interp.home_heap_context = Value.nil;
+    }
 
     // Set temp_base so that temp_base + 1 + 0 points to the first argument
     interp.temp_base = interp.sp - 1;
@@ -2289,9 +2444,30 @@ fn primBlockValue3(interp: *Interpreter) InterpreterError!Value {
     try interp.push(arg2);
     try interp.push(arg3);
 
+    // Allocate space for block temporaries
+    const num_temps: usize = if (num_temps_val.isSmallInt() and num_temps_val.asSmallInt() > 0)
+        @intCast(num_temps_val.asSmallInt())
+    else
+        0;
+    var ti: usize = 0;
+    while (ti < num_temps) : (ti += 1) {
+        try interp.push(Value.nil);
+    }
+
+    // If the block has temps, create a new heap context for them.
+    // The context needs slots for BOTH args and temps since bytecode indices are absolute
+    if (num_temps > 0) {
+        const outer_ctx = interp.heap_context;
+        const heap_ctx = try interp.createHeapContext(3 + num_temps); // 3 args + temps
+        interp.heap_context = Value.fromObject(heap_ctx);
+        if (interp.home_heap_context.isNil()) {
+            interp.home_heap_context = outer_ctx;
+        }
+    }
+
     const result = interp.interpretLoop() catch |err| {
         interp.primitive_block_depth -= 1;
-                interp.ip = saved_ip;
+        interp.ip = saved_ip;
         interp.method = saved_method;
 
         // For BlockNonLocalReturn, always propagate - let the .send bytecode handler intercept it
@@ -2300,19 +2476,25 @@ fn primBlockValue3(interp: *Interpreter) InterpreterError!Value {
         }
         interp.temp_base = saved_temp_base;
         interp.outer_temp_base = saved_outer_temp_base;
+        interp.home_temp_base = saved_home_temp_base;
         interp.receiver = saved_receiver;
         interp.context_ptr = saved_context_ptr;
+        interp.heap_context = saved_heap_context;
+        interp.home_heap_context = saved_home_heap_context;
         return err;
     };
 
     interp.primitive_block_depth -= 1;
-        interp.ip = saved_ip;
+    interp.ip = saved_ip;
     interp.method = saved_method;
     interp.sp = saved_sp;
     interp.temp_base = saved_temp_base;
     interp.outer_temp_base = saved_outer_temp_base;
+    interp.home_temp_base = saved_home_temp_base;
     interp.receiver = saved_receiver;
     interp.context_ptr = saved_context_ptr;
+    interp.heap_context = saved_heap_context;
+    interp.home_heap_context = saved_home_heap_context;
 
     return result;
 }
@@ -2343,14 +2525,16 @@ fn primBlockValue4(interp: *Interpreter) InterpreterError!Value {
         return InterpreterError.PrimitiveFailed;
     }
 
-    // Get block data: [outerTempBase, startPC, numArgs, method, receiver]
-    const outer_temp_base_val = block_obj.getField(0, 6);
-    const start_pc = block_obj.getField(1, 6);
-    const num_args_val = block_obj.getField(2, 6);
-    const method_val = block_obj.getField(3, 6);
-    const block_receiver = block_obj.getField(4, 6);
+    // Get block data: [outerContext, startPC, numArgs, method, receiver, homeContext, numTemps]
+    const outer_context_val = block_obj.getField(Heap.BLOCK_FIELD_OUTER_CONTEXT, Heap.BLOCK_NUM_FIELDS);
+    const start_pc = block_obj.getField(Heap.BLOCK_FIELD_START_PC, Heap.BLOCK_NUM_FIELDS);
+    const num_args_val = block_obj.getField(Heap.BLOCK_FIELD_NUM_ARGS, Heap.BLOCK_NUM_FIELDS);
+    const method_val = block_obj.getField(Heap.BLOCK_FIELD_METHOD, Heap.BLOCK_NUM_FIELDS);
+    const block_receiver = block_obj.getField(Heap.BLOCK_FIELD_RECEIVER, Heap.BLOCK_NUM_FIELDS);
+    const home_context_val = block_obj.getField(Heap.BLOCK_FIELD_HOME_CONTEXT, Heap.BLOCK_NUM_FIELDS);
+    const num_temps_val = block_obj.getField(Heap.BLOCK_FIELD_NUM_TEMPS, Heap.BLOCK_NUM_FIELDS);
 
-    if (!outer_temp_base_val.isSmallInt() or !start_pc.isSmallInt() or !num_args_val.isSmallInt() or !method_val.isObject()) {
+    if (!start_pc.isSmallInt() or !num_args_val.isSmallInt() or !method_val.isObject()) {
         try interp.push(block);
         try interp.push(arg1);
         try interp.push(arg2);
@@ -2374,13 +2558,33 @@ fn primBlockValue4(interp: *Interpreter) InterpreterError!Value {
     const saved_sp = interp.sp;
     const saved_temp_base = interp.temp_base;
     const saved_outer_temp_base = interp.outer_temp_base;
+    const saved_home_temp_base = interp.home_temp_base;
     const saved_receiver = interp.receiver;
     const saved_context_ptr = interp.context_ptr;
-    
+    const saved_heap_context = interp.heap_context;
+    const saved_home_heap_context = interp.home_heap_context;
+
     interp.method = @ptrCast(@alignCast(method_val.asObject()));
     interp.ip = @intCast(start_pc.asSmallInt());
     interp.receiver = block_receiver; // Restore the receiver from when the block was created
-    interp.outer_temp_base = @intCast(outer_temp_base_val.asSmallInt());
+
+    // Handle heap contexts or stack indices
+    if (outer_context_val.isObject() and outer_context_val.asObject().header.class_index == Heap.CLASS_METHOD_CONTEXT) {
+        interp.heap_context = outer_context_val;
+        interp.home_heap_context = home_context_val;
+        interp.outer_temp_base = interp.sp - 1;
+        interp.home_temp_base = interp.sp - 1;
+    } else if (outer_context_val.isSmallInt()) {
+        interp.outer_temp_base = @intCast(outer_context_val.asSmallInt());
+        interp.home_temp_base = if (home_context_val.isSmallInt()) @intCast(home_context_val.asSmallInt()) else interp.sp - 1;
+        interp.heap_context = Value.nil;
+        interp.home_heap_context = Value.nil;
+    } else {
+        interp.outer_temp_base = interp.sp - 1;
+        interp.home_temp_base = interp.sp - 1;
+        interp.heap_context = Value.nil;
+        interp.home_heap_context = Value.nil;
+    }
 
     // Set temp_base so that temp_base + 1 + 0 points to the first argument
     interp.temp_base = interp.sp - 1;
@@ -2392,9 +2596,30 @@ fn primBlockValue4(interp: *Interpreter) InterpreterError!Value {
     try interp.push(arg3);
     try interp.push(arg4);
 
+    // Allocate space for block temporaries
+    const num_temps: usize = if (num_temps_val.isSmallInt() and num_temps_val.asSmallInt() > 0)
+        @intCast(num_temps_val.asSmallInt())
+    else
+        0;
+    var ti: usize = 0;
+    while (ti < num_temps) : (ti += 1) {
+        try interp.push(Value.nil);
+    }
+
+    // If the block has temps, create a new heap context for them.
+    // The context needs slots for BOTH args and temps since bytecode indices are absolute
+    if (num_temps > 0) {
+        const outer_ctx = interp.heap_context;
+        const heap_ctx = try interp.createHeapContext(4 + num_temps); // 4 args + temps
+        interp.heap_context = Value.fromObject(heap_ctx);
+        if (interp.home_heap_context.isNil()) {
+            interp.home_heap_context = outer_ctx;
+        }
+    }
+
     const result = interp.interpretLoop() catch |err| {
         interp.primitive_block_depth -= 1;
-                interp.ip = saved_ip;
+        interp.ip = saved_ip;
         interp.method = saved_method;
 
         // For BlockNonLocalReturn, always propagate - let the .send bytecode handler intercept it
@@ -2403,19 +2628,25 @@ fn primBlockValue4(interp: *Interpreter) InterpreterError!Value {
         }
         interp.temp_base = saved_temp_base;
         interp.outer_temp_base = saved_outer_temp_base;
+        interp.home_temp_base = saved_home_temp_base;
         interp.receiver = saved_receiver;
         interp.context_ptr = saved_context_ptr;
+        interp.heap_context = saved_heap_context;
+        interp.home_heap_context = saved_home_heap_context;
         return err;
     };
 
     interp.primitive_block_depth -= 1;
-        interp.ip = saved_ip;
+    interp.ip = saved_ip;
     interp.method = saved_method;
     interp.sp = saved_sp;
     interp.temp_base = saved_temp_base;
     interp.outer_temp_base = saved_outer_temp_base;
+    interp.home_temp_base = saved_home_temp_base;
     interp.receiver = saved_receiver;
     interp.context_ptr = saved_context_ptr;
+    interp.heap_context = saved_heap_context;
+    interp.home_heap_context = saved_home_heap_context;
 
     return result;
 }
@@ -2438,14 +2669,16 @@ fn primBlockValueWithArgs(interp: *Interpreter) InterpreterError!Value {
         return InterpreterError.PrimitiveFailed;
     }
 
-    // Get block data: [outerTempBase, startPC, numArgs, method, receiver]
-    const outer_temp_base_val = block_obj.getField(0, 6);
-    const start_pc = block_obj.getField(1, 6);
-    const num_args_val = block_obj.getField(2, 6);
-    const method_val = block_obj.getField(3, 6);
-    const block_receiver = block_obj.getField(4, 6);
+    // Get block data: [outerContext, startPC, numArgs, method, receiver, homeContext, numTemps]
+    const outer_context_val = block_obj.getField(Heap.BLOCK_FIELD_OUTER_CONTEXT, Heap.BLOCK_NUM_FIELDS);
+    const start_pc = block_obj.getField(Heap.BLOCK_FIELD_START_PC, Heap.BLOCK_NUM_FIELDS);
+    const num_args_val = block_obj.getField(Heap.BLOCK_FIELD_NUM_ARGS, Heap.BLOCK_NUM_FIELDS);
+    const method_val = block_obj.getField(Heap.BLOCK_FIELD_METHOD, Heap.BLOCK_NUM_FIELDS);
+    const block_receiver = block_obj.getField(Heap.BLOCK_FIELD_RECEIVER, Heap.BLOCK_NUM_FIELDS);
+    const home_context_val = block_obj.getField(Heap.BLOCK_FIELD_HOME_CONTEXT, Heap.BLOCK_NUM_FIELDS);
+    const num_temps_val = block_obj.getField(Heap.BLOCK_FIELD_NUM_TEMPS, Heap.BLOCK_NUM_FIELDS);
 
-    if (!outer_temp_base_val.isSmallInt() or !start_pc.isSmallInt() or !num_args_val.isSmallInt() or !method_val.isObject()) {
+    if (!start_pc.isSmallInt() or !num_args_val.isSmallInt() or !method_val.isObject()) {
         try interp.push(block);
         try interp.push(args);
         return InterpreterError.PrimitiveFailed;
@@ -2467,13 +2700,33 @@ fn primBlockValueWithArgs(interp: *Interpreter) InterpreterError!Value {
     const saved_sp = interp.sp;
     const saved_temp_base = interp.temp_base;
     const saved_outer_temp_base = interp.outer_temp_base;
+    const saved_home_temp_base = interp.home_temp_base;
     const saved_receiver = interp.receiver;
     const saved_context_ptr = interp.context_ptr;
-    
+    const saved_heap_context = interp.heap_context;
+    const saved_home_heap_context = interp.home_heap_context;
+
     interp.method = @ptrCast(@alignCast(method_val.asObject()));
     interp.ip = @intCast(start_pc.asSmallInt());
     interp.receiver = block_receiver; // Restore the receiver from when the block was created
-    interp.outer_temp_base = @intCast(outer_temp_base_val.asSmallInt());
+
+    // Handle heap contexts or stack indices
+    if (outer_context_val.isObject() and outer_context_val.asObject().header.class_index == Heap.CLASS_METHOD_CONTEXT) {
+        interp.heap_context = outer_context_val;
+        interp.home_heap_context = home_context_val;
+        interp.outer_temp_base = interp.sp - 1;
+        interp.home_temp_base = interp.sp - 1;
+    } else if (outer_context_val.isSmallInt()) {
+        interp.outer_temp_base = @intCast(outer_context_val.asSmallInt());
+        interp.home_temp_base = if (home_context_val.isSmallInt()) @intCast(home_context_val.asSmallInt()) else interp.sp - 1;
+        interp.heap_context = Value.nil;
+        interp.home_heap_context = Value.nil;
+    } else {
+        interp.outer_temp_base = interp.sp - 1;
+        interp.home_temp_base = interp.sp - 1;
+        interp.heap_context = Value.nil;
+        interp.home_heap_context = Value.nil;
+    }
 
     // Set temp_base so that temp_base + 1 + 0 points to the first argument
     interp.temp_base = interp.sp - 1;
@@ -2487,9 +2740,30 @@ fn primBlockValueWithArgs(interp: *Interpreter) InterpreterError!Value {
         try interp.push(arg);
     }
 
+    // Allocate space for block temporaries
+    const num_temps: usize = if (num_temps_val.isSmallInt() and num_temps_val.asSmallInt() > 0)
+        @intCast(num_temps_val.asSmallInt())
+    else
+        0;
+    var ti: usize = 0;
+    while (ti < num_temps) : (ti += 1) {
+        try interp.push(Value.nil);
+    }
+
+    // If the block has temps, create a new heap context for them.
+    // The context needs slots for BOTH args and temps since bytecode indices are absolute
+    if (num_temps > 0) {
+        const outer_ctx = interp.heap_context;
+        const heap_ctx = try interp.createHeapContext(array_size + num_temps); // args + temps
+        interp.heap_context = Value.fromObject(heap_ctx);
+        if (interp.home_heap_context.isNil()) {
+            interp.home_heap_context = outer_ctx;
+        }
+    }
+
     const result = interp.interpretLoop() catch |err| {
         interp.primitive_block_depth -= 1;
-                interp.ip = saved_ip;
+        interp.ip = saved_ip;
         interp.method = saved_method;
 
         // For BlockNonLocalReturn, always propagate - let the .send bytecode handler intercept it
@@ -2498,19 +2772,25 @@ fn primBlockValueWithArgs(interp: *Interpreter) InterpreterError!Value {
         }
         interp.temp_base = saved_temp_base;
         interp.outer_temp_base = saved_outer_temp_base;
+        interp.home_temp_base = saved_home_temp_base;
         interp.receiver = saved_receiver;
         interp.context_ptr = saved_context_ptr;
+        interp.heap_context = saved_heap_context;
+        interp.home_heap_context = saved_home_heap_context;
         return err;
     };
 
     interp.primitive_block_depth -= 1;
-        interp.ip = saved_ip;
+    interp.ip = saved_ip;
     interp.method = saved_method;
     interp.sp = saved_sp;
     interp.temp_base = saved_temp_base;
     interp.outer_temp_base = saved_outer_temp_base;
+    interp.home_temp_base = saved_home_temp_base;
     interp.receiver = saved_receiver;
     interp.context_ptr = saved_context_ptr;
+    interp.heap_context = saved_heap_context;
+    interp.home_heap_context = saved_home_heap_context;
 
     return result;
 }
@@ -2755,11 +3035,13 @@ fn primPerformWithArgs(interp: *Interpreter) InterpreterError!Value {
 /// Helper to evaluate a block (shared by control flow primitives)
 fn evaluateBlock(interp: *Interpreter, block: Value) InterpreterError!Value {
     if (!block.isObject()) {
+        std.debug.print("DEBUG evaluateBlock: block is not object\n", .{});
         return InterpreterError.PrimitiveFailed;
     }
 
     const block_obj = block.asObject();
     if (block_obj.header.class_index != Heap.CLASS_BLOCK_CLOSURE) {
+        std.debug.print("DEBUG evaluateBlock: block class_idx={} not BlockClosure\n", .{block_obj.header.class_index});
         return InterpreterError.PrimitiveFailed;
     }
 
@@ -2771,7 +3053,16 @@ fn evaluateBlock(interp: *Interpreter, block: Value) InterpreterError!Value {
     const block_receiver = block_obj.getField(4, 6);
     const home_temp_base_val = block_obj.getField(5, 6);
 
-    if (!outer_temp_base_val.isSmallInt() or !start_pc.isSmallInt() or !num_args_val.isSmallInt() or !method_val.isObject()) {
+    // Check if outer_temp_base is a heap context (MethodContext object) or stack index (SmallInt)
+    const uses_heap_context = outer_temp_base_val.isObject() and
+        outer_temp_base_val.asObject().header.class_index == Heap.CLASS_METHOD_CONTEXT;
+
+    // Validate required fields
+    if (!start_pc.isSmallInt() or !num_args_val.isSmallInt() or !method_val.isObject()) {
+        return InterpreterError.PrimitiveFailed;
+    }
+    // outer_temp_base must be either SmallInt or MethodContext
+    if (!outer_temp_base_val.isSmallInt() and !uses_heap_context) {
         return InterpreterError.PrimitiveFailed;
     }
 
@@ -2789,12 +3080,26 @@ fn evaluateBlock(interp: *Interpreter, block: Value) InterpreterError!Value {
     const saved_home_temp_base = interp.home_temp_base;
     const saved_receiver = interp.receiver;
     const saved_context_ptr = interp.context_ptr;
-    
+    const saved_heap_context = interp.heap_context;
+    const saved_home_heap_context = interp.home_heap_context;
+
     const block_method_ptr: *CompiledMethod = @ptrCast(@alignCast(method_val.asObject()));
     interp.method = block_method_ptr;
     interp.ip = @intCast(start_pc.asSmallInt());
-    interp.outer_temp_base = @intCast(outer_temp_base_val.asSmallInt());
-    interp.home_temp_base = if (home_temp_base_val.isSmallInt()) @intCast(home_temp_base_val.asSmallInt()) else interp.temp_base;
+
+    // Set up context based on format (heap context vs stack-based)
+    if (uses_heap_context) {
+        // Heap context format - for closure variable capture
+        interp.heap_context = outer_temp_base_val;
+        interp.home_heap_context = home_temp_base_val;
+        // Stack indices aren't used with heap contexts
+        interp.outer_temp_base = interp.sp;
+        interp.home_temp_base = interp.sp;
+    } else {
+        // Stack-based format
+        interp.outer_temp_base = @intCast(outer_temp_base_val.asSmallInt());
+        interp.home_temp_base = if (home_temp_base_val.isSmallInt()) @intCast(home_temp_base_val.asSmallInt()) else interp.temp_base;
+    }
     interp.receiver = block_receiver;
     interp.temp_base = interp.sp;
     // Push receiver and allocate locals (no args for these control-flow helpers)
@@ -2810,7 +3115,7 @@ fn evaluateBlock(interp: *Interpreter, block: Value) InterpreterError!Value {
 
     const result = interp.interpretLoop() catch |err| {
         interp.primitive_block_depth -= 1;
-                interp.ip = saved_ip;
+        interp.ip = saved_ip;
         interp.method = saved_method;
 
         // For BlockNonLocalReturn, always propagate - let the .send bytecode handler intercept it
@@ -2822,11 +3127,13 @@ fn evaluateBlock(interp: *Interpreter, block: Value) InterpreterError!Value {
         interp.home_temp_base = saved_home_temp_base;
         interp.receiver = saved_receiver;
         interp.context_ptr = saved_context_ptr;
+        interp.heap_context = saved_heap_context;
+        interp.home_heap_context = saved_home_heap_context;
         return err;
     };
 
     interp.primitive_block_depth -= 1;
-        interp.ip = saved_ip;
+    interp.ip = saved_ip;
     interp.method = saved_method;
     interp.sp = saved_sp;
     interp.temp_base = saved_temp_base;
@@ -2834,6 +3141,8 @@ fn evaluateBlock(interp: *Interpreter, block: Value) InterpreterError!Value {
     interp.home_temp_base = saved_home_temp_base;
     interp.receiver = saved_receiver;
     interp.context_ptr = saved_context_ptr;
+    interp.heap_context = saved_heap_context;
+    interp.home_heap_context = saved_home_heap_context;
 
     return result;
 }
@@ -9682,4 +9991,35 @@ fn primLoadOBJFile(interp: *Interpreter) InterpreterError!Value {
     fields[3] = Value.fromSmallInt(@intCast(mesh.indices.len));
 
     return result;
+}
+
+// ============================================================================
+// UI Process Primitives
+// ============================================================================
+
+/// Primitive 920: UIProcess >> processOneIteration
+/// Process one iteration of the UI loop (input, rendering, transcript flush).
+/// Returns true if UI should continue running, false if quit was requested.
+fn primUIProcessIteration(interp: *Interpreter) InterpreterError!Value {
+    _ = try interp.pop(); // receiver (UIProcess)
+
+    if (app_mod.g_app) |app| {
+        const should_continue = app.processOneIteration();
+        return Value.fromBool(should_continue);
+    } else {
+        // No TUI running - always return true (keep going)
+        return Value.@"true";
+    }
+}
+
+/// Primitive 921: UIProcess >> isRunning
+/// Returns true if the TUI is currently running, false otherwise.
+fn primUIIsRunning(interp: *Interpreter) InterpreterError!Value {
+    _ = try interp.pop(); // receiver (UIProcess)
+
+    if (app_mod.g_app) |app| {
+        return Value.fromBool(app.isRunning());
+    } else {
+        return Value.@"false";
+    }
 }
