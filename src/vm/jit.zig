@@ -575,7 +575,7 @@ pub const JIT = struct {
     }
 
     /// Compile a method to native code
-    fn compile(self: *JIT, method: *CompiledMethod) !*CompiledCode {
+    pub fn compile(self: *JIT, method: *CompiledMethod) !*CompiledCode {
         var buffer = try CodeBuffer.init(self.allocator, 4096);
         defer buffer.deinit();
 

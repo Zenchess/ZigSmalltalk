@@ -389,7 +389,8 @@ pub fn main() !void {
             if (trimmed_line.len == 0) continue;
             if (trimmed_line[0] == '#') continue;
 
-            var file_in = filein.FileIn.init(allocator, heap);
+            // Use main interpreter for JIT stats tracking
+            var file_in = filein.FileIn.initWithInterpreter(allocator, heap, &interp);
             defer file_in.deinit();
 
             file_in.loadFile(trimmed_line) catch |err| {
@@ -416,19 +417,20 @@ pub fn main() !void {
         }
         // Skip flags
         if (arg.len > 0 and arg[0] == '-') {
-            if (std.mem.eql(u8, arg, "--image") or std.mem.eql(u8, arg, "--load-order")) {
+            if (std.mem.eql(u8, arg, "--image") or std.mem.eql(u8, arg, "--load-order") or std.mem.eql(u8, arg, "--load-ansi")) {
                 // Skip the following path (already handled in the earlier loop)
                 skip_next = true;
                 continue;
             }
-            if (std.mem.eql(u8, arg, "--tui") or std.mem.eql(u8, arg, "--no-repl")) {
+            if (std.mem.eql(u8, arg, "--tui") or std.mem.eql(u8, arg, "--no-repl") or std.mem.eql(u8, arg, "--jit")) {
                 continue;
             }
+            // Unknown flag - skip it
             continue;
         }
 
-        // Load file (silently for TUI mode)
-        var file_in = filein.FileIn.init(allocator, heap);
+        // Load file - use main interpreter for JIT stats tracking
+        var file_in = filein.FileIn.initWithInterpreter(allocator, heap, &interp);
         defer file_in.deinit();
 
         file_in.loadFile(arg) catch |err| {
@@ -451,6 +453,10 @@ pub fn main() !void {
     heap.interpreter = &interp;
 
     if (!repl_mode) {
+        // Print JIT stats if JIT was enabled
+        if (interp.jit_enabled) {
+            std.debug.print("JIT Stats: {d} compiled calls, {d} interpreted calls\n", .{ interp.jit_compiled_calls, interp.jit_interpreted_calls });
+        }
         return;
     }
 
@@ -513,6 +519,10 @@ pub fn main() !void {
 
         // Check for special commands
         if (std.mem.eql(u8, trimmed, "quit") or std.mem.eql(u8, trimmed, "exit")) {
+            // Print JIT stats if JIT was enabled
+            if (interp.jit_enabled) {
+                std.debug.print("JIT Stats: {d} compiled calls, {d} interpreted calls\n", .{ interp.jit_compiled_calls, interp.jit_interpreted_calls });
+            }
             _ = try stdout.write("Goodbye!\n");
             break;
         }

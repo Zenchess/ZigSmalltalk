@@ -2220,17 +2220,28 @@ pub const Interpreter = struct {
             // ========================================================================
             // JIT Execution Path
             // ========================================================================
-            // If JIT is enabled and method is compiled, execute native code
+            // If JIT is enabled, try to execute compiled code or compile on first call
             if (self.jit_enabled) {
                 if (self.jit_compiler) |jit_ptr| {
-                    if (jit_ptr.getCompiled(found_method)) |compiled| {
+                    // Check if method is already compiled
+                    var compiled = jit_ptr.getCompiled(found_method);
+
+                    // If not compiled, try to compile it now (on-demand JIT)
+                    if (compiled == null) {
+                        if (JIT.isJitEligible(found_method)) {
+                            _ = jit_ptr.compile(found_method) catch null;
+                            compiled = jit_ptr.getCompiled(found_method);
+                        }
+                    }
+
+                    if (compiled) |code| {
                         // Set up receiver for JIT code
                         self.receiver = recv;
                         // Receiver and args are already on stack at recv_pos
                         // JIT code will access them via interpreter's stack
 
                         // Call the JIT-compiled code
-                        const result = compiled.entry(self);
+                        const result = code.entry(self);
 
                         // Pop receiver+args from stack
                         self.sp = recv_pos;

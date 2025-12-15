@@ -309,6 +309,8 @@ pub const FileIn = struct {
     errors: std.ArrayListUnmanaged([]const u8),
     /// Interpreter for evaluating expressions (optional, lazily initialized)
     interp: ?*interpreter.Interpreter,
+    /// If true, interp is owned externally and should not be destroyed
+    external_interp: bool,
 
     pub fn init(allocator: std.mem.Allocator, heap: *Heap) FileIn {
         return .{
@@ -322,13 +324,34 @@ pub const FileIn = struct {
             .expressions_evaluated = 0,
             .errors = .{},
             .interp = null,
+            .external_interp = false,
+        };
+    }
+
+    /// Create FileIn with an external interpreter (for JIT stats tracking)
+    pub fn initWithInterpreter(allocator: std.mem.Allocator, heap: *Heap, interp_ptr: *interpreter.Interpreter) FileIn {
+        return .{
+            .allocator = allocator,
+            .heap = heap,
+            .current_class = null,
+            .current_is_class_side = false,
+            .in_categories_section = false,
+            .methods_loaded = 0,
+            .classes_defined = 0,
+            .expressions_evaluated = 0,
+            .errors = .{},
+            .interp = interp_ptr,
+            .external_interp = true,
         };
     }
 
     pub fn deinit(self: *FileIn) void {
         self.errors.deinit(self.allocator);
-        if (self.interp) |interp_ptr| {
-            self.allocator.destroy(interp_ptr);
+        // Only destroy interpreter if we created it (not external)
+        if (!self.external_interp) {
+            if (self.interp) |interp_ptr| {
+                self.allocator.destroy(interp_ptr);
+            }
         }
     }
 
