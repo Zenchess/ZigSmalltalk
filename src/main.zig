@@ -429,6 +429,26 @@ pub fn main() !void {
         return;
     }
 
+    // REPL mode: Auto-load TranscriptShell and process scheduling for full environment
+    {
+        var file_in = filein.FileIn.init(allocator, heap);
+        defer file_in.deinit();
+
+        // Load TranscriptShell so Transcript works
+        file_in.loadFile("src/image/transcript-shell.st") catch {
+            // Try relative to executable location or current directory
+            file_in.loadFile("transcript-shell.st") catch {};
+        };
+
+        // Initialize TranscriptShell (sets Transcript global)
+        _ = compileAndExecute(allocator, &interp, "TranscriptShell create") catch {};
+
+        // Load process scheduling classes (Process, Semaphore, Delay, etc.)
+        file_in.loadFile("src/smalltalk/process-scheduling.st") catch {
+            file_in.loadFile("process-scheduling.st") catch {};
+        };
+    }
+
     // Print banner
     _ = try stdout.write(banner);
 
@@ -477,6 +497,24 @@ pub fn main() !void {
                 _ = try stdout.write("GC error\n");
             };
             _ = try stdout.write("Done.\n");
+            continue;
+        }
+
+        if (std.mem.eql(u8, trimmed, "yield")) {
+            // Run background processes explicitly
+            var runs: u32 = 0;
+            while (interp.runPendingProcesses(10000) and runs < 1000) {
+                runs += 1;
+            }
+            if (runs > 0) {
+                _ = try stdout.write("Ran ");
+                var buf: [32]u8 = undefined;
+                const s = std.fmt.bufPrint(&buf, "{d}", .{runs}) catch "?";
+                _ = try stdout.write(s);
+                _ = try stdout.write(" process cycles.\n");
+            } else {
+                _ = try stdout.write("No pending processes.\n");
+            }
             continue;
         }
 
@@ -597,6 +635,17 @@ pub fn main() !void {
         // Print result
         try printValue(stdout, heap, result);
         _ = try stdout.write("\n");
+
+        // Clear the main process so we don't try to save/restore invalid state
+        // The main process's execution is complete at this point
+        interp.process_scheduler.active_process = null;
+
+        // Run pending background processes (give them time to execute)
+        // This allows forked processes to run in the REPL
+        var pending_runs: u32 = 0;
+        while (interp.runPendingProcesses(1000) and pending_runs < 100) {
+            pending_runs += 1;
+        }
     }
 }
 
@@ -696,6 +745,7 @@ fn printHelp(file: std.fs.File) !void {
         \\  quit, exit    - Exit the REPL
         \\  help          - Show this help
         \\  gc            - Run garbage collection
+        \\  yield         - Run pending background processes
         \\  debug         - Toggle debugger (step-by-step execution)
         \\  saveimage <path> - Save image snapshot
         \\  filein <path> - Load Smalltalk source file
@@ -703,11 +753,13 @@ fn printHelp(file: std.fs.File) !void {
         \\Expression Examples:
         \\  3 + 4           - Arithmetic
         \\  'Hello'         - String literal
-        \\  #symbol         - Symbol literal
-        \\  true            - Boolean
-        \\  nil             - Nil object
-        \\  1 < 2           - Comparison (returns true/false)
-        \\  5 * (3 + 2)     - Parenthesized expression
+        \\  Transcript show: 'Hello'; cr  - Output to transcript
+        \\  [1 + 1] fork    - Fork a process
+        \\  (Delay forSeconds: 1) wait  - Wait 1 second
+        \\
+        \\Process Scheduling:
+        \\  TranscriptShell and process scheduling are auto-loaded.
+        \\  Use 'yield' to run background processes between commands.
         \\
         \\
     );

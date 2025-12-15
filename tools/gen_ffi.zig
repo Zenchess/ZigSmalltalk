@@ -1,16 +1,64 @@
 //! FFI Binding Generator
 //!
-//! Reads ffi-config.json and generates src/vm/ffi_generated.zig
+//! Reads ffi-config.json and generates ffi_generated.zig
 //! with the appropriate @cImport statements and function lists.
 //!
-//! Run with: zig build gen-ffi
+//! This generator checks if headers exist before including libraries,
+//! allowing graceful handling of missing optional dependencies.
+//!
+//! Usage:
+//!   zig build gen-ffi                    # Manual generation to src/vm/ffi_generated.zig
+//!   gen-ffi <target> <output_dir>        # Build-time generation with target awareness
 
 const std = @import("std");
+const builtin = @import("builtin");
+
+// Global state for target platform (set from command line or defaults to build host)
+var g_target_is_windows: bool = builtin.os.tag == .windows;
+
+/// Escape backslashes for Zig string literals (Windows paths need \\ instead of \)
+fn escapeBackslashes(path: []const u8, buf: *[1024]u8) []const u8 {
+    var pos: usize = 0;
+    for (path) |c| {
+        if (pos >= buf.len - 2) break;
+        if (c == '\\') {
+            buf[pos] = '\\';
+            pos += 1;
+            buf[pos] = '\\';
+            pos += 1;
+        } else {
+            buf[pos] = c;
+            pos += 1;
+        }
+    }
+    return buf[0..pos];
+}
+
+// Global output path (set from command line or defaults to src/vm)
+var g_output_path: []const u8 = "src/vm/ffi_generated.zig";
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    // Use arena allocator to avoid tracking individual allocations
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // Parse command line arguments
+    const args = try std.process.argsAlloc(allocator);
+
+    if (args.len >= 3) {
+        // Build-time invocation: gen-ffi <target> <output_dir>
+        const target_str = args[1];
+        const output_dir = args[2];
+
+        // Set target platform from argument
+        g_target_is_windows = std.mem.indexOf(u8, target_str, "windows") != null;
+
+        // Build output path
+        g_output_path = try std.fs.path.join(allocator, &.{ output_dir, "ffi_generated.zig" });
+
+        std.debug.print("gen-ffi: Target={s}, Output={s}\n", .{ target_str, g_output_path });
+    }
 
     // Read config file
     const config_content = std.fs.cwd().readFileAlloc(allocator, "ffi-config.json", 1024 * 1024) catch |err| {
@@ -43,7 +91,7 @@ pub fn main() !void {
         return error.InvalidFormat;
     }
 
-    // Collect enabled libraries
+    // Collect enabled libraries (with header availability check)
     var libraries: std.ArrayList(Library) = .empty;
     defer {
         for (libraries.items) |lib| {
@@ -67,11 +115,27 @@ pub fn main() !void {
 
         if (name_val != .string or headers_val != .array) continue;
 
+        // Collect headers and check if they exist
         var headers: std.ArrayList([]u8) = .empty;
+        var all_headers_found = true;
         for (headers_val.array.items) |h| {
             if (h == .string) {
                 try headers.append(allocator, try allocator.dupe(u8, h.string));
+                // Check if header exists on this system
+                if (!headerExists(h.string)) {
+                    all_headers_found = false;
+                }
             }
+        }
+
+        // Skip libraries whose headers are not available
+        // Exception: standard C library headers (stdio.h, stdlib.h, etc.) are always available
+        const is_standard_lib = std.mem.eql(u8, name_val.string, "LibC") or std.mem.eql(u8, name_val.string, "LibMath");
+        if (!is_standard_lib and !all_headers_found) {
+            std.debug.print("gen-ffi: Skipping {s} (headers not found)\n", .{name_val.string});
+            for (headers.items) |h| allocator.free(h);
+            headers.deinit(allocator);
+            continue;
         }
 
         // Parse functions array (if empty or missing, use auto-discovery)
@@ -96,6 +160,7 @@ pub fn main() !void {
             }
         }
 
+        std.debug.print("gen-ffi: Including {s}\n", .{name_val.string});
         try libraries.append(allocator, .{
             .name = try allocator.dupe(u8, name_val.string),
             .headers = try headers.toOwnedSlice(allocator),
@@ -123,10 +188,103 @@ const Library = struct {
     glew: bool, // If true, add GLEW helper functions
 };
 
+/// Check if a header file exists and is compatible with target platform
+fn headerExists(header: []const u8) bool {
+    // Check if header path is compatible with target platform
+    const is_windows_path = isWindowsPath(header);
+    const is_unix_path = header.len > 0 and header[0] == '/';
+
+    // Skip paths that are incompatible with target
+    if (is_windows_path and !g_target_is_windows) {
+        std.debug.print("gen-ffi: Skipping Windows path '{s}' for non-Windows target\n", .{header});
+        return false;
+    }
+    if (is_unix_path and g_target_is_windows) {
+        std.debug.print("gen-ffi: Skipping Unix path '{s}' for Windows target\n", .{header});
+        return false;
+    }
+
+    // For build-time generation, we trust that the config is correct
+    // since we can't actually check paths on a different platform
+    if (isFullPath(header)) {
+        // If running on the same platform as target, check if file exists
+        const host_is_windows = builtin.os.tag == .windows;
+        if (host_is_windows == g_target_is_windows) {
+            if (std.fs.cwd().access(header, .{})) |_| {
+                return true;
+            } else |_| {
+                return false;
+            }
+        }
+        // Cross-platform: trust that full paths in config are valid
+        return true;
+    }
+
+    // Otherwise search in standard include paths (only on matching platform)
+    const host_is_windows = builtin.os.tag == .windows;
+    if (host_is_windows != g_target_is_windows) {
+        // Can't check include paths on different platform, assume standard headers exist
+        return true;
+    }
+
+    if (g_target_is_windows) {
+        // Windows include paths (MSYS2/MinGW, vcpkg, etc.)
+        const windows_paths = [_][]const u8{
+            "C:\\msys64\\mingw64\\include\\",
+            "C:\\msys64\\ucrt64\\include\\",
+            "C:\\vcpkg\\installed\\x64-windows\\include\\",
+            "C:\\Program Files (x86)\\Windows Kits\\10\\Include\\",
+        };
+        for (windows_paths) |prefix| {
+            var path_buf: [512]u8 = undefined;
+            const path = std.fmt.bufPrint(&path_buf, "{s}{s}", .{ prefix, header }) catch continue;
+            if (std.fs.cwd().access(path, .{})) |_| {
+                return true;
+            } else |_| {}
+        }
+        return false;
+    } else {
+        // Unix/Linux include paths
+        const unix_paths = [_][]const u8{
+            "/usr/include/",
+            "/usr/local/include/",
+            "/opt/homebrew/include/",
+        };
+        for (unix_paths) |prefix| {
+            var path_buf: [512]u8 = undefined;
+            const path = std.fmt.bufPrint(&path_buf, "{s}{s}", .{ prefix, header }) catch continue;
+            if (std.fs.cwd().access(path, .{})) |_| {
+                return true;
+            } else |_| {}
+        }
+        return false;
+    }
+}
+
+/// Check if a path is a Windows path (has drive letter)
+fn isWindowsPath(path: []const u8) bool {
+    if (path.len >= 3 and path[1] == ':' and (path[2] == '\\' or path[2] == '/')) return true;
+    return false;
+}
+
+/// Check if a string looks like a full file path
+fn isFullPath(path: []const u8) bool {
+    if (path.len == 0) return false;
+    // Unix absolute path
+    if (path[0] == '/') return true;
+    // Windows absolute path (e.g., C:\...)
+    if (path.len >= 3 and path[1] == ':' and (path[2] == '\\' or path[2] == '/')) return true;
+    return false;
+}
+
 fn generateDefault(allocator: std.mem.Allocator) !void {
     _ = allocator;
 
-    var file = try std.fs.cwd().createFile("src/vm/ffi_generated.zig", .{});
+    // Ensure output directory exists
+    if (std.fs.path.dirname(g_output_path)) |dir| {
+        std.fs.cwd().makePath(dir) catch {};
+    }
+    var file = try std.fs.cwd().createFile(g_output_path, .{});
     defer file.close();
 
     try file.writeAll(
@@ -187,7 +345,11 @@ fn generateDefault(allocator: std.mem.Allocator) !void {
 fn generateFile(allocator: std.mem.Allocator, libraries: []const Library) !void {
     _ = allocator;
 
-    var file = try std.fs.cwd().createFile("src/vm/ffi_generated.zig", .{});
+    // Ensure output directory exists
+    if (std.fs.path.dirname(g_output_path)) |dir| {
+        std.fs.cwd().makePath(dir) catch {};
+    }
+    var file = try std.fs.cwd().createFile(g_output_path, .{});
     defer file.close();
 
     // Write header
@@ -217,7 +379,9 @@ fn generateFile(allocator: std.mem.Allocator, libraries: []const Library) !void 
         try file.writeAll(len);
 
         for (lib.headers) |header| {
-            len = std.fmt.bufPrint(&buf, "    @cInclude(\"{s}\");\n", .{header}) catch continue;
+            var escape_buf: [1024]u8 = undefined;
+            const escaped_header = escapeBackslashes(header, &escape_buf);
+            len = std.fmt.bufPrint(&buf, "    @cInclude(\"{s}\");\n", .{escaped_header}) catch continue;
             try file.writeAll(len);
         }
         try file.writeAll("});\n\n");
@@ -229,13 +393,24 @@ fn generateFile(allocator: std.mem.Allocator, libraries: []const Library) !void 
     }
 
     // Generate combined 'c' import for backwards compatibility (excluding GLEW to avoid conflicts)
-    try file.writeAll("/// Combined C imports (for backwards compatibility)\npub const c = @cImport({\n");
+    // Always include standard C headers for malloc, free, math functions, etc.
+    try file.writeAll(
+        \\/// Combined C imports (for backwards compatibility)
+        \\pub const c = @cImport({
+        \\    @cInclude("stdio.h");
+        \\    @cInclude("stdlib.h");
+        \\    @cInclude("string.h");
+        \\    @cInclude("math.h");
+        \\
+    );
     for (libraries) |lib| {
         // Skip GLEW libraries since they conflict with other GL includes
         if (lib.glew) continue;
         for (lib.headers) |header| {
             var buf: [256]u8 = undefined;
-            const len = std.fmt.bufPrint(&buf, "    @cInclude(\"{s}\");\n", .{header}) catch continue;
+            var escape_buf: [1024]u8 = undefined;
+            const escaped_header = escapeBackslashes(header, &escape_buf);
+            const len = std.fmt.bufPrint(&buf, "    @cInclude(\"{s}\");\n", .{escaped_header}) catch continue;
             try file.writeAll(len);
         }
     }
@@ -329,9 +504,22 @@ fn generateFile(allocator: std.mem.Allocator, libraries: []const Library) !void 
     }
     try file.writeAll("    return null;\n}\n\n");
 
+    // Check if any library supports struct introspection
+    var has_struct_support = false;
+    for (libraries) |lib| {
+        if (lib.auto_discover and !lib.glew) {
+            has_struct_support = true;
+            break;
+        }
+    }
+
     // Generate getLibraryStructNames dispatch (only for auto-discover libraries without glew)
     try file.writeAll("/// Get struct names for a library\n");
-    try file.writeAll("pub fn getLibraryStructNames(library: []const u8) ?[]const []const u8 {\n");
+    if (has_struct_support) {
+        try file.writeAll("pub fn getLibraryStructNames(library: []const u8) ?[]const []const u8 {\n");
+    } else {
+        try file.writeAll("pub fn getLibraryStructNames(_: []const u8) ?[]const []const u8 {\n");
+    }
     for (libraries) |lib| {
         if (lib.auto_discover and !lib.glew) {
             var buf: [256]u8 = undefined;
@@ -343,7 +531,11 @@ fn generateFile(allocator: std.mem.Allocator, libraries: []const Library) !void 
 
     // Generate getStructInfo dispatch
     try file.writeAll("/// Get struct info by name\n");
-    try file.writeAll("pub fn getStructInfo(library: []const u8, struct_name: []const u8) ?ffi_autogen.StructInfo {\n");
+    if (has_struct_support) {
+        try file.writeAll("pub fn getStructInfo(library: []const u8, struct_name: []const u8) ?ffi_autogen.StructInfo {\n");
+    } else {
+        try file.writeAll("pub fn getStructInfo(_: []const u8, _: []const u8) ?ffi_autogen.StructInfo {\n");
+    }
     for (libraries) |lib| {
         if (lib.auto_discover and !lib.glew) {
             var buf: [256]u8 = undefined;
@@ -355,7 +547,11 @@ fn generateFile(allocator: std.mem.Allocator, libraries: []const Library) !void 
 
     // Generate generateStructCode dispatch
     try file.writeAll("/// Generate Smalltalk code for all structs in a library\n");
-    try file.writeAll("pub fn generateStructCode(library: []const u8, writer: anytype) !bool {\n");
+    if (has_struct_support) {
+        try file.writeAll("pub fn generateStructCode(library: []const u8, writer: anytype) !bool {\n");
+    } else {
+        try file.writeAll("pub fn generateStructCode(_: []const u8, _: anytype) !bool {\n");
+    }
     for (libraries) |lib| {
         if (lib.auto_discover and !lib.glew) {
             var buf: [256]u8 = undefined;
