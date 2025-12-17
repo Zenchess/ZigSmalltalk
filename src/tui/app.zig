@@ -806,8 +806,17 @@ pub const App = struct {
                 }
             }
 
-            // Add class to the package from its category field
-            self.package_registry.addClassToPackage(category_name, name) catch {};
+            // Add class to the package - use SystemPackageDefinitions if category is Unpackaged
+            if (std.mem.eql(u8, category_name, "Unpackaged")) {
+                // Check if this class belongs to a defined package
+                if (packages_mod.SystemPackageDefinitions.getPackageForClass(name)) |pkg_name| {
+                    self.package_registry.addClassToPackage(pkg_name, name) catch {};
+                } else {
+                    self.package_registry.addClassToPackage(category_name, name) catch {};
+                }
+            } else {
+                self.package_registry.addClassToPackage(category_name, name) catch {};
+            }
         }
 
         // Sync any new packages from class categories to the browser's package list

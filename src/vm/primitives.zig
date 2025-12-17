@@ -271,6 +271,12 @@ pub fn executePrimitive(interp: *Interpreter, prim_index: u16) InterpreterError!
         .string_split => primStringSplit(interp),
         .as_number => primAsNumber(interp),
 
+        // Dynamic library loading primitives
+        .dll_load => primDllLoad(interp),
+        .dll_get_proc => primDllGetProc(interp),
+        .dll_free => primDllFree(interp),
+        .dll_call_ptr => primDllCallPtr(interp),
+
         // File I/O primitives
         .file_open => primFileOpen(interp),
         .file_close => primFileClose(interp),
@@ -9386,19 +9392,6 @@ fn primFFIGenericCall(interp: *Interpreter) InterpreterError!Value {
     const func_name_val = try interp.pop(); // #sin - first keyword arg
     const receiver = try interp.pop();      // 'LibMath' - receiver
 
-    // Debug output
-    std.debug.print("DEBUG primFFIGenericCall: receiver.bits=0x{x} func.bits=0x{x} args.bits=0x{x}\n", .{ receiver.bits, func_name_val.bits, args_val.bits });
-    if (getStringFromValue(interp.heap, receiver)) |lib| {
-        std.debug.print("  lib_name='{s}'\n", .{lib});
-    } else {
-        std.debug.print("  lib_name=<not a string>\n", .{});
-    }
-    if (getStringFromValue(interp.heap, func_name_val)) |func| {
-        std.debug.print("  func_name='{s}'\n", .{func});
-    } else {
-        std.debug.print("  func_name=<not a string>\n", .{});
-    }
-
     if (!ffi_enabled) {
         try interp.push(receiver);
         try interp.push(func_name_val);
@@ -10812,4 +10805,116 @@ fn getDirectory(path: []const u8) []const u8 {
         return path[0..sep];
     }
     return ".";
+}
+
+// ============================================================================
+// Dynamic Library Loading Primitives (870-873)
+// ============================================================================
+
+// Global storage for loaded libraries (simple approach - max 16 libs)
+var loaded_libs: [16]?std.DynLib = [_]?std.DynLib{null} ** 16;
+var loaded_lib_count: usize = 0;
+
+/// Primitive 870: Load a dynamic library
+/// Stack: receiver, libraryName (String)
+/// Returns: handle as Integer (index + 1), or nil on failure
+fn primDllLoad(interp: *Interpreter) InterpreterError!Value {
+    const name_val = try interp.pop();
+    _ = try interp.pop(); // receiver
+
+    const lib_name = getStringFromValue(interp.heap, name_val) orelse {
+        return Value.nil;
+    };
+
+    // Find free slot
+    var slot: ?usize = null;
+    for (loaded_libs, 0..) |lib, i| {
+        if (lib == null) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot == null) return Value.nil; // No free slots
+
+    // Null-terminate the string for C API
+    var name_buf: [512]u8 = undefined;
+    if (lib_name.len >= name_buf.len) return Value.nil;
+    @memcpy(name_buf[0..lib_name.len], lib_name);
+    name_buf[lib_name.len] = 0;
+
+    const handle = std.DynLib.open(name_buf[0..lib_name.len :0]) catch {
+        return Value.nil;
+    };
+
+    loaded_libs[slot.?] = handle;
+    loaded_lib_count += 1;
+
+    // Return handle as index + 1 (so 0 means invalid)
+    return Value.fromSmallInt(@intCast(slot.? + 1));
+}
+
+/// Primitive 871: Get procedure address from a loaded library
+/// Stack: receiver, funcName (String), handle (Integer)
+/// Returns: function pointer as Integer, or nil on failure
+fn primDllGetProc(interp: *Interpreter) InterpreterError!Value {
+    const handle_val = try interp.pop();
+    const name_val = try interp.pop();
+    _ = try interp.pop(); // receiver
+
+    const func_name = getStringFromValue(interp.heap, name_val) orelse {
+        return Value.nil;
+    };
+
+    if (!handle_val.isSmallInt()) return Value.nil;
+    const handle_idx = handle_val.asSmallInt();
+    if (handle_idx <= 0 or handle_idx > 16) return Value.nil;
+
+    // Get library from slot
+    const lib_ptr = &loaded_libs[@intCast(handle_idx - 1)];
+    if (lib_ptr.* == null) return Value.nil;
+
+    // Null-terminate the string
+    var name_buf: [256]u8 = undefined;
+    if (func_name.len >= name_buf.len) return Value.nil;
+    @memcpy(name_buf[0..func_name.len], func_name);
+    name_buf[func_name.len] = 0;
+
+    const ptr = lib_ptr.*.?.lookup(*const anyopaque, name_buf[0..func_name.len :0]) orelse {
+        return Value.nil;
+    };
+
+    // Store pointer address - use upper bits for high addresses
+    const ptr_addr = @intFromPtr(ptr);
+    return Value.fromSmallInt(@intCast(@as(i61, @truncate(@as(i64, @bitCast(ptr_addr))))));
+}
+
+/// Primitive 872: Free a loaded dynamic library
+/// Stack: receiver, handle (Integer)
+/// Returns: receiver
+fn primDllFree(interp: *Interpreter) InterpreterError!Value {
+    const handle_val = try interp.pop();
+    const receiver = try interp.pop();
+
+    if (!handle_val.isSmallInt()) return receiver;
+    const handle_idx = handle_val.asSmallInt();
+    if (handle_idx <= 0 or handle_idx > 16) return receiver;
+
+    // Close and clear the slot
+    const idx: usize = @intCast(handle_idx - 1);
+    if (loaded_libs[idx]) |*lib| {
+        lib.close();
+        loaded_libs[idx] = null;
+        loaded_lib_count -= 1;
+    }
+
+    return receiver;
+}
+
+/// Primitive 873: Call a function pointer with signature and arguments
+/// Stack: receiver (function pointer as Integer), signature (String), args (Array)
+/// Signature format: "returnType(argType1,argType2,...)"
+/// This is similar to primitive 793 but takes an explicit function pointer
+fn primDllCallPtr(interp: *Interpreter) InterpreterError!Value {
+    // This delegates to the existing runtime FFI call mechanism
+    return primFFIRuntimeCall(interp);
 }

@@ -1,0 +1,31 @@
+{
+  "name": "ChessScene3D",
+  "version": "1.0.0",
+  "description": "Full Featured OpenGL Chess Demo with PBR rendering, shadow mapping, and cinematic lighting",
+  "author": "ZigSmalltalk",
+  "license": "MIT",
+  "classes": [
+    "GLConstants",
+    "OBJLoader", 
+    "ChessScene3D"
+  ],
+  "dependencies": [
+    "external-structure.st",
+    "src/image/ffi.st"
+  ],
+  "entry_point": "ChessScene3D demo",
+  "features": [
+    "PBR (Physically Based Rendering) shaders",
+    "Shadow mapping with 7x7 PCF soft shadows",
+    "8x MSAA anti-aliasing",
+    "Cinematic 3-point lighting",
+    "OBJ model loading",
+    "8K PBR texture support",
+    "Vignette and color grading effects"
+  ],
+  "requirements": {
+    "opengl": "3.3+",
+    "glfw": "3.4+",
+    "raylib": "for texture loading"
+  }
+}

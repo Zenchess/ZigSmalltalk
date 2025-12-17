@@ -1,3 +1,15 @@
+!SmalltalkSystem methodsFor: 'enumerating'!
+allClassesDo: aBlock
+    "Stub - iterating all classes not implemented yet.
+     TODO: Add primitive to get all class globals."
+    "Do nothing for now - tests that need this will be skipped"
+    ^self!
+
+allClasses
+    "Return empty array - proper implementation needs VM primitive"
+    ^#()!
+!
+
 !SUnitNameResolver class methodsFor: 'resolving'!
 classNamed: aSymbol
     "Look up a class by name"

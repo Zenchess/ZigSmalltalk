@@ -433,6 +433,14 @@ pub const Primitive = enum(u16) {
     as_number = 867, // String >> asNumber
 
     // ========================================================================
+    // Dynamic library loading (870-875)
+    // ========================================================================
+    dll_load = 870, // ExternalLibrary >> load: 'library.dll' - returns handle
+    dll_get_proc = 871, // ExternalLibrary >> getProcAddress: 'funcName' from: handle
+    dll_free = 872, // ExternalLibrary >> free: handle
+    dll_call_ptr = 873, // Call function pointer with signature and args
+
+    // ========================================================================
     // Object system (Dolphin: 100-119)
     // ========================================================================
     basic_resize = 101, // Object >> basicResize:

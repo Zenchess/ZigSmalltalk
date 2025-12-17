@@ -944,6 +944,10 @@ pub fn installCoreMethods(heap: *Heap) !void {
     try installMethod(heap, string_class, "copyFrom:to:", try createPrimitiveMethod(heap, 2, @intFromEnum(Primitive.string_copy_from_to)));
     try installMethod(heap, string_class, "ffiCall:with:", try createPrimitiveMethod(heap, 2, @intFromEnum(Primitive.ffi_call_with_struct))); // 792
 
+    // Symbol methods - Symbol is used as receiver in FFI calls (e.g., #Raylib ffiCall:with:)
+    const symbol_class = heap.getClass(Heap.CLASS_SYMBOL).asObject();
+    try installMethod(heap, symbol_class, "ffiCall:with:", try createPrimitiveMethod(heap, 2, @intFromEnum(Primitive.ffi_call_with_struct))); // 792
+
     // Array methods - Dolphin compatible
     const array_class = heap.getClass(Heap.CLASS_ARRAY).asObject();
     try installMethod(heap, array_class, "size", try createPrimitiveMethod(heap, 0, @intFromEnum(Primitive.size))); // 62

@@ -1,5 +1,30 @@
 "Filed out stub support for SUnit in Zig Smalltalk"!
 
+"Simple doesNotUnderstand: to prevent infinite recursion during exception handling"
+!Object methodsFor!
+doesNotUnderstand: aMessage
+    "Minimal handler - print error and return nil to prevent infinite recursion.
+     The ANSI Object.cls version tries to signal MessageNotUnderstood which can
+     cause infinite recursion if the exception handling itself triggers DNU."
+    Transcript show: 'Message not understood: '; show: aMessage selector; cr.
+    ^nil!
+!
+
+"FFI methods for String - must be loaded after ANSI String class"
+!String methodsFor!
+ffiCall: functionName with: args
+    "Call an FFI function by name with arguments.
+     The receiver is the library name (e.g., 'Raylib', 'LibMath').
+     Uses primitive 700 for FFI dispatch."
+    <primitive: 700>
+    ^self primitiveFailed!
+
+ffiFunctions
+    "Return an Array of function names available in this FFI library."
+    <primitive: 761>
+    ^#()!
+!
+
 Object subclass: #Delay
     instanceVariableNames: 'duration'
     classVariableNames: ''

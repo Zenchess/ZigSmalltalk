@@ -905,13 +905,33 @@ pub const FileIn = struct {
         }
 
         // Parse the method source to extract selector and body
+        // Skip leading comments and whitespace to find the method signature
+        var method_start: usize = 0;
+        while (method_start < chunk.len) {
+            // Skip whitespace
+            while (method_start < chunk.len and (chunk[method_start] == ' ' or chunk[method_start] == '\t' or chunk[method_start] == '\r' or chunk[method_start] == '\n')) {
+                method_start += 1;
+            }
+            if (method_start >= chunk.len) break;
+            // Skip comments (strings starting with ")
+            if (chunk[method_start] == '"') {
+                method_start += 1;
+                while (method_start < chunk.len and chunk[method_start] != '"') {
+                    method_start += 1;
+                }
+                if (method_start < chunk.len) method_start += 1; // Skip closing "
+            } else {
+                break; // Found start of method signature
+            }
+        }
+
         // First line is the method signature
-        var first_line_end: usize = 0;
+        var first_line_end: usize = method_start;
         while (first_line_end < chunk.len and chunk[first_line_end] != '\n' and chunk[first_line_end] != '\r') {
             first_line_end += 1;
         }
 
-        const signature = std.mem.trim(u8, chunk[0..first_line_end], " \t");
+        const signature = std.mem.trim(u8, chunk[method_start..first_line_end], " \t");
 
         // Extract selector from signature
         const selector = extractSelector(signature) orelse {

@@ -4,11 +4,13 @@ const input = @import("../input.zig");
 const style = @import("../style.zig");
 const widget = @import("widget.zig");
 const clipboard = @import("../clipboard.zig");
+const syntax = @import("../syntax.zig");
 
 const Key = input.Key;
 const Style = style.Style;
 const Rect = widget.Rect;
 const EventResult = widget.EventResult;
+const SmalltalkHighlighter = syntax.SmalltalkHighlighter;
 
 pub const TextArea = struct {
     allocator: std.mem.Allocator,
@@ -790,6 +792,18 @@ pub const TextArea = struct {
 
             const line = self.lines.items[line_idx].items;
 
+            // Syntax highlighting for this line
+            var highlight_tokens: []syntax.TokenType = &[_]syntax.TokenType{};
+            var highlight_result: ?syntax.HighlightResult = null;
+            if (self.syntax_highlight and line.len > 0) {
+                // TODO: Track multi-line comment/string state properly
+                highlight_result = SmalltalkHighlighter.highlightLine(self.allocator, line, false, false) catch null;
+                if (highlight_result) |*hr| {
+                    highlight_tokens = hr.tokens;
+                }
+            }
+            defer if (highlight_result) |*hr| hr.deinit(self.allocator);
+
             // Iterate through UTF-8 codepoints, tracking both byte position and display column
             var byte_idx: usize = 0;
             var display_col: usize = 0;
@@ -829,6 +843,11 @@ pub const TextArea = struct {
                 }
 
                 var char_style = style.styles.normal;
+
+                // Apply syntax highlighting if enabled
+                if (self.syntax_highlight and byte_idx < highlight_tokens.len) {
+                    char_style = syntax.styleForToken(highlight_tokens[byte_idx]);
+                }
 
                 // Check if character is selected (using display column for selection)
                 if (self.normalizedSelection()) |sel| {

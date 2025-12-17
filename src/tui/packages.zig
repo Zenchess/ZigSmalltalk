@@ -108,10 +108,14 @@ pub const SystemPackageDefinitions = struct {
         "TestRunner", "SUnitTest",
     };
 
+    pub const ChessScene3D = [_][]const u8{
+        "GLConstants", "OBJLoader", "ChessScene3D",
+    };
+
     /// Get all system package names
     pub fn getPackageNames() []const []const u8 {
         return &[_][]const u8{
-            "Kernel", "Collections", "Magnitude", "Streams", "Exceptions", "FFI", "Testing",
+            "Kernel", "Collections", "Magnitude", "Streams", "Exceptions", "FFI", "Testing", "ChessScene3D",
         };
     }
 
@@ -137,6 +141,9 @@ pub const SystemPackageDefinitions = struct {
         }
         for (Testing) |name| {
             if (std.mem.eql(u8, name, class_name)) return "Testing";
+        }
+        for (ChessScene3D) |name| {
+            if (std.mem.eql(u8, name, class_name)) return "ChessScene3D";
         }
         return null;
     }

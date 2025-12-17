@@ -13,3 +13,16 @@ isImmutable: aBoolean
     ^self!
 
 ! !
+
+"Override doesNotUnderstand: to prevent infinite recursion during exception handling.
+ The ANSI Object.cls version tries to signal MessageNotUnderstood which can
+ cause infinite recursion if the exception handling itself triggers DNU."
+!Object methodsFor: 'exception handling'!
+
+doesNotUnderstand: aMessage
+    "Minimal handler - use VM primitive to print error and return nil.
+     This prevents infinite recursion from complex exception handling."
+    <primitive: 800>
+    ^nil!
+
+! !

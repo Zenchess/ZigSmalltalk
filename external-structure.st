@@ -66,6 +66,16 @@ float64At: offset
     <primitive: 777>
     ^self primitiveFailed!
 
+uint64At: offset
+    "Read unsigned 64-bit value at 0-based byte offset (little-endian)"
+    <primitive: 778>
+    ^self primitiveFailed!
+
+int64At: offset
+    "Read signed 64-bit value at 0-based byte offset (little-endian)"
+    <primitive: 779>
+    ^self primitiveFailed!
+
 uint8At: offset put: value
     "Write unsigned 8-bit value at 0-based byte offset"
     <primitive: 780>

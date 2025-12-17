@@ -1,0 +1,133 @@
+# Core Object hierarchy - load first
+ansi-tests/ProtoObject.cls
+ansi-tests/Object.cls
+ansi-tests/Object-stubs.st
+ansi-tests/Processor-stub.st
+ansi-tests/Delay-stub.st
+
+# Core Class hierarchy
+ansi-tests/Behavior.cls
+ansi-tests/ClassDescription.cls
+ansi-tests/Class.cls
+ansi-tests/Metaclass.cls
+
+# Core Magnitude hierarchy
+ansi-tests/Magnitude.cls
+ansi-tests/Association.cls
+ansi-tests/Character.cls
+ansi-tests/ArithmeticValue.cls
+ansi-tests/Number.cls
+ansi-tests/Integer.cls
+ansi-tests/SmallInteger.cls
+ansi-tests/Float.cls
+ansi-tests/Fraction.cls
+ansi-tests/Duration.cls
+
+# Core Collection hierarchy
+ansi-tests/Collection.cls
+ansi-tests/SequenceableCollection.cls
+ansi-tests/ArrayedCollection.cls
+ansi-tests/SequencedGrowableCollection.cls
+ansi-tests/OrderedCollection.cls
+ansi-tests/SortedCollection.cls
+ansi-tests/Set.cls
+ansi-tests/IdentitySet.cls
+ansi-tests/Dictionary.cls
+ansi-tests/LookupTable.cls
+ansi-tests/IdentityDictionary.cls
+ansi-tests/Bag.cls
+ansi-tests/Interval.cls
+
+# Core String hierarchy
+ansi-tests/String.cls
+ansi-tests/UtfEncodedString.cls
+ansi-tests/Utf8String.cls
+ansi-tests/Symbol.cls
+
+# Core Array hierarchy
+ansi-tests/Array.cls
+ansi-tests/ByteArray.cls
+
+# Core Boolean hierarchy
+ansi-tests/Boolean.cls
+ansi-tests/True.cls
+ansi-tests/False.cls
+
+# Core UndefinedObject
+ansi-tests/UndefinedObject.cls
+
+# Core Stream hierarchy
+ansi-tests/Stream.cls
+ansi-tests/SequencedStream.cls
+ansi-tests/PositionableStream.cls
+ansi-tests/ReadStream.cls
+ansi-tests/WriteStream.cls
+ansi-tests/ReadWriteStream.cls
+
+# Core Message and Exception hierarchy
+ansi-tests/Message.cls
+ansi-tests/Exception.cls
+ansi-tests/Error.cls
+ansi-tests/MessageNotUnderstood.cls
+ansi-tests/Notification.cls
+ansi-tests/Warning.cls
+
+# Block closure support
+ansi-tests/BlockClosure-multi-on.st
+
+# Smalltalk global - needed by SUnitNameResolver
+ansi-tests/Smalltalk-early.st
+
+# SUnitNameResolver - needed by test framework
+ansi-tests/SUnitNameResolver.cls
+
+# Test framework - load after core classes
+ansi-tests/TestCase.cls
+ansi-tests/TestSuite.cls
+ansi-tests/TestResult.cls
+ansi-tests/TestCaseResult.cls
+ansi-tests/TestResource.cls
+ansi-tests/TestFailure.cls
+ansi-tests/ResumableTestFailure.cls
+ansi-tests/SUnit_TestSkip.cls
+
+# Protocol specifications - load before test classes
+ansi-tests/ProtocolANYSpec.cls
+ansi-tests/MsgParmSpec.cls
+ansi-tests/MsgReturnSpec.cls
+ansi-tests/MsgReturnRuleSpec.cls
+ansi-tests/ProtocolMsgSpec.cls
+
+# Helper classes - load before test classes
+ansi-tests/TestCaseHelper.cls
+ansi-tests/ObjectHelper.cls
+ansi-tests/CollectionHelper.cls
+ansi-tests/CollectionStreamHelper.cls
+ansi-tests/ExtensibleCollectionHelper.cls
+ansi-tests/SequencedCollectionHelper.cls
+ansi-tests/SequencedContractibleCollectionHelper.cls
+ansi-tests/SequencedReadableCollectionHelper.cls
+ansi-tests/ReadableStringHelper.cls
+ansi-tests/SequencedStreamHelper.cls
+ansi-tests/PuttableStreamHelper.cls
+ansi-tests/GettableStreamHelper.cls
+ansi-tests/ReadStreamHelper.cls
+ansi-tests/WriteStreamHelper.cls
+
+# Main test case - load before other test classes
+ansi-tests/MainTestCase.cls
+
+# Smalltalk system stubs - load after all test framework classes
+ansi-tests/SmalltalkSystem-stubs.st
+
+# Test classes - load after all dependencies
+ansi-tests/CollectionTest.cls
+ansi-tests/SequencedReadableCollectionTest.cls
+ansi-tests/SequencedStreamTest.cls
+
+# Patches and initialization
+
+# Include TranscriptShell
+src/image/transcript-shell.st
+
+# Test runner

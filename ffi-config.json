@@ -17,6 +17,12 @@
       "headers": ["c:/raylib/include/raylib.h"],
       "link": "c:/raylib/lib/raylib.dll",
       "enabled": true
+    },
+    {
+      "name": "GLFW",
+      "headers": ["c:/glfw/include/GLFW/glfw3_nogl.h"],
+      "link": "c:/glfw/lib/glfw3.dll",
+      "enabled": true
     }
   ]
 }
