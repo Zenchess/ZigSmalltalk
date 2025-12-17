@@ -1,0 +1,20 @@
+.{
+    .name = .zig_smalltalk,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.15.0",
+    .fingerprint = 0x394106265321d1da,
+    .dependencies = .{
+        .libffi = .{
+            .url = "https://github.com/libffi/libffi/releases/download/v3.4.6/libffi-3.4.6.tar.gz",
+            .hash = "N-V-__8AABz2UwCyNZND_JDqrL-8blAmFHc_7SMDseI5Dv2d",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "tools",
+        "dolphin-core",
+        "vendor",
+    },
+}
