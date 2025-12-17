@@ -1,6 +1,28 @@
 "Widget classes for Smalltalk TUI"
 
-"Add do: method to OrderedCollection"
+"Add methods to OrderedCollection"
+!OrderedCollection class methodsFor: 'instance creation'!
+new
+    "Create a new empty OrderedCollection"
+    ^self new: 10
+!
+
+new: capacity
+    "Create a new OrderedCollection with given capacity"
+    | inst |
+    inst := super new.
+    inst initializeWithCapacity: capacity.
+    ^inst
+! !
+
+!OrderedCollection methodsFor: 'initialization'!
+initializeWithCapacity: capacity
+    "Initialize with an array of given capacity"
+    self instVarAt: 1 put: (Array new: capacity).  "array"
+    self instVarAt: 2 put: 1.                       "firstIndex"
+    self instVarAt: 3 put: 1.                       "lastIndex (empty = firstIndex)"
+! !
+
 !OrderedCollection methodsFor: 'enumerating'!
 do: aBlock
     "Evaluate aBlock for each element in the collection"
@@ -8,10 +30,62 @@ do: aBlock
     array := self instVarAt: 1.
     firstIndex := self instVarAt: 2.
     lastIndex := self instVarAt: 3.
-    array isNil ifTrue: [^self].
+    (array isNil or: [firstIndex isNil or: [lastIndex isNil]]) ifTrue: [^self].
     firstIndex to: lastIndex - 1 do: [:i |
         aBlock value: (array at: i)
     ]
+! !
+
+!OrderedCollection methodsFor: 'adding'!
+add: anObject
+    "Add anObject to the end of the collection"
+    | array lastIndex |
+    array := self instVarAt: 1.
+    lastIndex := self instVarAt: 3.
+    array isNil ifTrue: [
+        self initializeWithCapacity: 10.
+        array := self instVarAt: 1.
+        lastIndex := self instVarAt: 3.
+    ].
+    "Grow array if needed"
+    lastIndex > array size ifTrue: [
+        | newArray |
+        newArray := Array new: array size * 2.
+        1 to: array size do: [:i | newArray at: i put: (array at: i)].
+        array := newArray.
+        self instVarAt: 1 put: array.
+    ].
+    array at: lastIndex put: anObject.
+    self instVarAt: 3 put: lastIndex + 1.
+    ^anObject
+! !
+
+!OrderedCollection methodsFor: 'accessing'!
+size
+    "Return the number of elements"
+    | firstIndex lastIndex |
+    firstIndex := self instVarAt: 2.
+    lastIndex := self instVarAt: 3.
+    firstIndex isNil ifTrue: [^0].
+    lastIndex isNil ifTrue: [^0].
+    ^lastIndex - firstIndex
+!
+
+at: index
+    "Return element at index (1-based)"
+    | array firstIndex |
+    array := self instVarAt: 1.
+    firstIndex := self instVarAt: 2.
+    ^array at: firstIndex + index - 1
+!
+
+at: index put: anObject
+    "Set element at index (1-based)"
+    | array firstIndex |
+    array := self instVarAt: 1.
+    firstIndex := self instVarAt: 2.
+    array at: firstIndex + index - 1 put: anObject.
+    ^anObject
 ! !
 
 Object subclass: #Widget
