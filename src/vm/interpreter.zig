@@ -293,6 +293,8 @@ pub const Interpreter = struct {
             jit_ptr.* = JIT.init(self.allocator);
             self.jit_compiler = jit_ptr;
         }
+        // Initialize SmallInteger class bits for inline cache checks
+        jit.initSmallIntClass(self.heap);
         self.jit_enabled = true;
     }
 
@@ -2207,18 +2209,66 @@ pub const Interpreter = struct {
             if (ic_entry.cached_method) |found_method| {
                 const method_holder = ic_entry.cached_holder;
 
-                // Fast JIT path - use cached JIT code if available (no HashMap lookup!)
-                if (ic_entry.cached_jit_code) |code| {
+                // Fast JIT path - DISABLED to debug: force JIT through jit_runtime_send
+                if (false) {
+                    const code = ic_entry.cached_jit_code.?;
+                    // Inline the logic from runCachedJitMethod for InlineCacheEntry
+                    const saved_method = self.method;
+                    const saved_method_class = self.method_class;
+                    const saved_receiver = self.receiver;
+                    const saved_ip = self.ip;
+                    const saved_temp_base = self.temp_base;
+                    const saved_outer_temp_base = self.outer_temp_base;
+                    const saved_home_temp_base = self.home_temp_base;
+                    const saved_heap_context = self.heap_context;
+                    const saved_home_heap_context = self.home_heap_context;
+                    const saved_sp = self.sp;
+
+                    // Initialize callee frame metadata
+                    self.method = found_method;
+                    self.method_class = method_holder;
                     self.receiver = recv;
+                    self.ip = 0;
+                    self.temp_base = recv_pos;
+                    self.outer_temp_base = recv_pos;
+                    self.home_temp_base = recv_pos;
+                    self.heap_context = Value.nil;
+                    self.home_heap_context = Value.nil;
+
+                    // Stack layout: [...recv args...]. Set sp to end of args then add temps.
+                    const base_sp = recv_pos + 1 + @as(usize, num_args);
+                    self.sp = base_sp;
+                    const total_temps: usize = found_method.header.num_temps;
+                    const local_temps = if (total_temps > num_args) total_temps - @as(usize, num_args) else 0;
+                    var k: usize = 0;
+                    while (k < local_temps and self.sp < self.stack.len) : (k += 1) {
+                        self.stack[self.sp] = Value.nil;
+                        self.sp += 1;
+                    }
+
                     const result = code.entry(self);
+
+                    // Restore caller state
+                    self.method = saved_method;
+                    self.method_class = saved_method_class;
+                    self.receiver = saved_receiver;
+                    self.ip = saved_ip;
+                    self.temp_base = saved_temp_base;
+                    self.outer_temp_base = saved_outer_temp_base;
+                    self.home_temp_base = saved_home_temp_base;
+                    self.heap_context = saved_heap_context;
+                    self.home_heap_context = saved_home_heap_context;
+                    self.sp = saved_sp;
+
+                    // Push result at receiver position
                     self.sp = recv_pos;
                     try self.push(result);
                     self.jit_compiled_calls += 1;
                     return;
                 }
 
-                // Slow JIT path - lookup and cache for next time
-                if (self.jit_enabled) {
+                // Slow JIT path - DISABLED to debug
+                if (false) {
                     if (self.jit_compiler) |jit_ptr| {
                         var compiled = jit_ptr.getCompiled(found_method);
                         if (compiled == null and JIT.isJitEligible(found_method)) {
@@ -2228,8 +2278,56 @@ pub const Interpreter = struct {
                         if (compiled) |code| {
                             // Cache JIT code in inline cache for next hit
                             ic_entry.cached_jit_code = code;
+
+                            // Save all caller state
+                            const saved_method = self.method;
+                            const saved_method_class = self.method_class;
+                            const saved_receiver = self.receiver;
+                            const saved_ip = self.ip;
+                            const saved_temp_base = self.temp_base;
+                            const saved_outer_temp_base = self.outer_temp_base;
+                            const saved_home_temp_base = self.home_temp_base;
+                            const saved_heap_context = self.heap_context;
+                            const saved_home_heap_context = self.home_heap_context;
+                            const saved_sp = self.sp;
+
+                            // Set up callee frame
+                            self.method = found_method;
+                            self.method_class = method_holder;
                             self.receiver = recv;
+                            self.ip = 0;
+                            self.temp_base = recv_pos;
+                            self.outer_temp_base = recv_pos;
+                            self.home_temp_base = recv_pos;
+                            self.heap_context = Value.nil;
+                            self.home_heap_context = Value.nil;
+
+                            // Set sp past receiver and args, then initialize local temps
+                            const base_sp = recv_pos + 1 + @as(usize, num_args);
+                            self.sp = base_sp;
+                            const total_temps: usize = found_method.header.num_temps;
+                            const local_temps = if (total_temps > num_args) total_temps - @as(usize, num_args) else 0;
+                            var k: usize = 0;
+                            while (k < local_temps and self.sp < self.stack.len) : (k += 1) {
+                                self.stack[self.sp] = Value.nil;
+                                self.sp += 1;
+                            }
+
                             const result = code.entry(self);
+
+                            // Restore caller state
+                            self.method = saved_method;
+                            self.method_class = saved_method_class;
+                            self.receiver = saved_receiver;
+                            self.ip = saved_ip;
+                            self.temp_base = saved_temp_base;
+                            self.outer_temp_base = saved_outer_temp_base;
+                            self.home_temp_base = saved_home_temp_base;
+                            self.heap_context = saved_heap_context;
+                            self.home_heap_context = saved_home_heap_context;
+                            self.sp = saved_sp;
+
+                            // Replace receiver+args with result
                             self.sp = recv_pos;
                             try self.push(result);
                             self.jit_compiled_calls += 1;

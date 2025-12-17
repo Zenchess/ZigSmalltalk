@@ -13,6 +13,7 @@ const object = @import("object.zig");
 const bytecodes = @import("bytecodes.zig");
 const Interpreter = @import("interpreter.zig").Interpreter;
 const InterpreterError = @import("interpreter.zig").InterpreterError;
+const Heap = @import("memory.zig").Heap;
 
 const Value = object.Value;
 const CompiledMethod = object.CompiledMethod;
@@ -120,7 +121,7 @@ fn jitRuntimeSendCommon(
     return result;
 }
 
-fn runCachedJitMethod(
+pub fn runCachedJitMethod(
     interp: *Interpreter,
     cache: *CallSiteCache,
     recv: Value,
@@ -229,8 +230,6 @@ pub export fn jit_runtime_push_closure(
     block_num_temps: u8,
     block_start_ip: usize, // IP of the block's first bytecode
 ) callconv(.c) Value {
-    const Heap = @import("memory.zig").Heap;
-
     // Lazily create heap context for closure variable capture
     if (interp.heap_context.isNil()) {
         const method_num_temps = interp.method.header.num_temps;
@@ -417,6 +416,96 @@ pub export fn jit_runtime_special_binary(
 
         return Value.nil;
     }
+}
+
+/// Global storage for SmallInteger class bits (for inline cache checks)
+/// This is set once during JIT initialization and used by inline cache code.
+var smallint_class_bits: u64 = 0;
+
+/// Initialize the SmallInteger class bits for inline cache checks.
+/// Must be called after heap is initialized with class table.
+pub fn initSmallIntClass(heap: *@import("memory.zig").Heap) void {
+    smallint_class_bits = heap.getClass(@import("memory.zig").Heap.CLASS_SMALL_INTEGER).bits;
+}
+
+/// Get the address of the SmallInteger class bits (for embedding in JIT code)
+pub fn getSmallIntClassBitsAddr() usize {
+    return @intFromPtr(&smallint_class_bits);
+}
+
+/// Runtime helper for inline cache hit - calls cached JIT code with proper setup.
+/// This is a simplified fast path that skips method lookup.
+pub export fn jit_runtime_cached_send(
+    interp: *Interpreter,
+    cache: *CallSiteCache,
+    num_args: u8,
+) callconv(.c) Value {
+    // Get receiver position and value
+    const recv_pos = interp.sp - @as(usize, num_args) - 1;
+    const recv = interp.stack[recv_pos];
+
+    // Call the cached JIT code with proper setup
+    const result = runCachedJitMethod(interp, cache, recv, recv_pos, num_args);
+
+    // Adjust stack: pop receiver/args, caller will push result
+    interp.sp = recv_pos;
+    return result;
+}
+
+/// Runtime helper for at: primitive - slow path for non-Array or bounds errors.
+/// Stack: [receiver, index] with sp pointing past index.
+/// Returns element or nil on error.
+pub export fn jit_runtime_at(interp: *Interpreter) callconv(.c) Value {
+    if (interp.sp < 2) return Value.nil;
+
+    const index = interp.stack[interp.sp - 1];
+    const recv = interp.stack[interp.sp - 2];
+
+    // Pop receiver and index
+    interp.sp -= 2;
+
+    if (!recv.isObject()) return Value.nil;
+    if (!index.isSmallInt()) return Value.nil;
+
+    const obj = recv.asObject();
+    const idx_raw = index.asSmallInt();
+    if (idx_raw < 1) return Value.nil;
+
+    const idx: usize = @intCast(idx_raw - 1); // Convert to 0-based
+    const obj_size = obj.header.size;
+
+    if (idx >= obj_size) return Value.nil;
+
+    return obj.fields(obj_size)[idx];
+}
+
+/// Runtime helper for at:put: primitive - slow path.
+/// Stack: [receiver, index, value] with sp pointing past value.
+/// Returns receiver.
+pub export fn jit_runtime_at_put(interp: *Interpreter) callconv(.c) Value {
+    if (interp.sp < 3) return Value.nil;
+
+    const val = interp.stack[interp.sp - 1];
+    const index = interp.stack[interp.sp - 2];
+    const recv = interp.stack[interp.sp - 3];
+
+    // Pop receiver, index, and value
+    interp.sp -= 3;
+
+    if (!recv.isObject()) return Value.nil;
+    if (!index.isSmallInt()) return Value.nil;
+
+    const obj = recv.asObject();
+    const idx_raw = index.asSmallInt();
+    if (idx_raw < 1) return Value.nil;
+
+    const idx: usize = @intCast(idx_raw - 1); // Convert to 0-based
+    const obj_size = obj.header.size;
+
+    if (idx >= obj_size) return Value.nil;
+
+    obj.fields(obj_size)[idx] = val;
+    return recv; // at:put: returns receiver
 }
 
 /// Runtime helper that uses per-callsite cache to dispatch sends.
@@ -953,6 +1042,13 @@ pub const JIT = struct {
     const INTERP_SP_OFFSET = @offsetOf(Interpreter, "sp");
     const INTERP_TEMP_BASE_OFFSET = @offsetOf(Interpreter, "temp_base");
     const INTERP_RECEIVER_OFFSET = @offsetOf(Interpreter, "receiver");
+    const INTERP_CACHE_VERSION_OFFSET = @offsetOf(Interpreter, "cache_version");
+    const INTERP_HEAP_OFFSET = @offsetOf(Interpreter, "heap");
+
+    // Offsets into CallSiteCache struct
+    const CACHE_EXPECTED_CLASS_OFFSET = @offsetOf(CallSiteCache, "expected_class");
+    const CACHE_VERSION_OFFSET = @offsetOf(CallSiteCache, "version");
+    const CACHE_JIT_CODE_OFFSET = @offsetOf(CallSiteCache, "cached_jit_code");
 
     pub fn init(allocator: std.mem.Allocator) JIT {
         return JIT{
@@ -1019,6 +1115,12 @@ pub const JIT = struct {
     /// Check if a method can be JIT compiled
     /// Returns false for methods with blocks, jumps, or other complex ops
     pub fn isJitEligible(method: *CompiledMethod) bool {
+        // Primitive methods should not be JIT compiled - the primitive must be tried first
+        // and the bytecodes are only fallback code for when the primitive fails
+        if (method.header.primitive_index != 0) {
+            return false;
+        }
+
         // Temporaries beyond arguments currently require more frame setup; skip for safety
         if (method.header.num_temps > 0) {
             // std.debug.print("JIT ineligible: has {} temps\n", .{method.header.num_temps});
@@ -1052,7 +1154,8 @@ pub const JIT = struct {
 
                 // Sends - OK (we have runtime send support)
                 .send => ip += 2,
-                .super_send => ip += 2,
+                // super_send is temporarily disabled due to stack overflow bug
+                .super_send => return false,
 
                 // Specialized binary sends - OK (no operands)
                 .send_plus, .send_minus, .send_times, .send_divide,
@@ -1853,6 +1956,186 @@ pub const JIT = struct {
         self.emitSend(buf, selector_idx, num_args, bytecode_offset, cache, true);
     }
 
+    /// Emit an inline send with fast-path cache check for SmallIntegers
+    /// This checks the receiver tag inline and only calls runtime on miss
+    fn emitSendInline(
+        self: *JIT,
+        buf: *CodeBuffer,
+        selector_idx: u8,
+        num_args: u8,
+        bytecode_offset: usize,
+        cache: *CallSiteCache,
+        is_super: bool,
+    ) void {
+        _ = self;
+        const send_fn_ptr = @intFromPtr(&jit_runtime_send_with_cache);
+        const cached_send_fn_ptr = @intFromPtr(&jit_runtime_cached_send);
+        const super_flag: u64 = if (is_super) 1 else 0;
+        const cache_ptr = @intFromPtr(cache);
+        const smallint_class_addr = getSmallIntClassBitsAddr();
+
+        // SAFEPOINT: Write back r12 to interpreter.sp before any calls
+        buf.movMemReg(.rbx, INTERP_SP_OFFSET, .r12);
+
+        // === FAST PATH: Inline SmallInt cache check ===
+
+        // Load receiver from stack: rax = stack[sp - num_args - 1]
+        const recv_disp: i8 = -@as(i8, @intCast((@as(u16, num_args) + 1) * 8));
+        buf.rex(true, false, true, true);
+        buf.emit8(0x8B);
+        buf.emit8(0x44);
+        buf.emit8(0xE5);
+        buf.emit8(@bitCast(recv_disp));
+
+        // Check if receiver is SmallInt: (rax & 7) == 1
+        buf.movRegReg(.rcx, .rax);
+        buf.andRegImm8(.rcx, 7);
+        buf.cmpRegImm8(.rcx, 1);
+
+        // jne slow_path (not a SmallInt)
+        buf.emit8(0x0F);
+        buf.emit8(0x85);
+        const patch_jne_not_smallint = buf.currentPos();
+        buf.emit32(0);
+
+        // Receiver is SmallInt - compare cache.expected_class with SmallInteger class
+        // Load SmallInteger class bits from global
+        buf.movRegImm64(.rax, smallint_class_addr);
+        buf.rex(true, false, false, false);
+        buf.emit8(0x8B);
+        buf.emit8(0x00); // mov rax, [rax]
+
+        // Load cache.expected_class into rcx
+        buf.movRegImm64(.rcx, cache_ptr + CACHE_EXPECTED_CLASS_OFFSET);
+        buf.rex(true, false, false, false);
+        buf.emit8(0x8B);
+        buf.emit8(0x09);
+
+        // cmp rax, rcx
+        buf.cmpRegReg(.rax, .rcx);
+
+        // jne slow_path
+        buf.emit8(0x0F);
+        buf.emit8(0x85);
+        const patch_jne_class = buf.currentPos();
+        buf.emit32(0);
+
+        // Check cache.version with interp.cache_version
+        buf.movRegImm64(.rcx, cache_ptr + CACHE_VERSION_OFFSET);
+        buf.emit8(0x8B);
+        buf.emit8(0x11); // mov edx, [rcx]
+
+        buf.rex(false, false, false, false);
+        buf.emit8(0x8B);
+        buf.emit8(0x83);
+        buf.emit32(@as(u32, INTERP_CACHE_VERSION_OFFSET)); // mov eax, [rbx + offset]
+
+        buf.emit8(0x39);
+        buf.emit8(0xC2); // cmp edx, eax
+
+        buf.emit8(0x0F);
+        buf.emit8(0x85);
+        const patch_jne_version = buf.currentPos();
+        buf.emit32(0);
+
+        // Check cache.cached_jit_code != null
+        buf.movRegImm64(.rcx, cache_ptr + CACHE_JIT_CODE_OFFSET);
+        buf.rex(true, false, false, false);
+        buf.emit8(0x8B);
+        buf.emit8(0x09);
+
+        buf.rex(true, false, false, false);
+        buf.emit8(0x85);
+        buf.emit8(0xC9); // test rcx, rcx
+
+        buf.emit8(0x0F);
+        buf.emit8(0x84);
+        const patch_je_null = buf.currentPos();
+        buf.emit32(0);
+
+        // === CACHE HIT: Call cached_send helper ===
+        if (builtin.os.tag == .windows) {
+            buf.subRegImm32(.rsp, 40);
+            buf.movRegImm64(.r8, @as(u64, num_args));
+            buf.movRegImm64(.rdx, cache_ptr);
+            buf.movRegReg(.rcx, .rbx);
+            buf.movRegImm64(.r10, cached_send_fn_ptr);
+            buf.callReg(.r10);
+            buf.addRegImm32(.rsp, 40);
+        } else {
+            buf.movRegImm64(.rdx, @as(u64, num_args));
+            buf.movRegImm64(.rsi, cache_ptr);
+            buf.movRegReg(.rdi, .rbx);
+            buf.movRegImm64(.r10, cached_send_fn_ptr);
+            buf.callReg(.r10);
+        }
+
+        buf.movRegMem(.r12, .rbx, INTERP_SP_OFFSET);
+        buf.rex(true, false, true, true);
+        buf.emit8(0x89);
+        buf.emit8(0x44);
+        buf.emit8(0xE5);
+        buf.emit8(0x00);
+        buf.addRegImm32(.r12, 1);
+
+        // Jump to end
+        buf.emit8(0xE9);
+        const patch_jmp_end = buf.currentPos();
+        buf.emit32(0);
+
+        // === SLOW PATH ===
+        const slow_path_pos = buf.currentPos();
+        buf.patchRel32(patch_jne_not_smallint, @intCast(@as(isize, @intCast(slow_path_pos)) - @as(isize, @intCast(patch_jne_not_smallint)) - 4));
+        buf.patchRel32(patch_jne_class, @intCast(@as(isize, @intCast(slow_path_pos)) - @as(isize, @intCast(patch_jne_class)) - 4));
+        buf.patchRel32(patch_jne_version, @intCast(@as(isize, @intCast(slow_path_pos)) - @as(isize, @intCast(patch_jne_version)) - 4));
+        buf.patchRel32(patch_je_null, @intCast(@as(isize, @intCast(slow_path_pos)) - @as(isize, @intCast(patch_je_null)) - 4));
+
+        // Call full runtime send
+        if (builtin.os.tag == .windows) {
+            buf.subRegImm32(.rsp, 56);
+            buf.movRegImm64(.rax, super_flag);
+            buf.rex(true, false, false, false);
+            buf.emit8(0x89);
+            buf.emit8(0x44);
+            buf.emit8(0x24);
+            buf.emit8(40);
+            buf.movRegImm64(.rax, @as(u64, bytecode_offset));
+            buf.rex(true, false, false, false);
+            buf.emit8(0x89);
+            buf.emit8(0x44);
+            buf.emit8(0x24);
+            buf.emit8(32);
+            buf.movRegImm64(.r9, @as(u64, num_args));
+            buf.movRegImm64(.r8, @as(u64, selector_idx));
+            buf.movRegImm64(.rdx, cache_ptr);
+            buf.movRegReg(.rcx, .rbx);
+            buf.movRegImm64(.r10, send_fn_ptr);
+            buf.callReg(.r10);
+            buf.addRegImm32(.rsp, 56);
+        } else {
+            buf.movRegReg(.rdi, .rbx);
+            buf.movRegImm64(.rsi, cache_ptr);
+            buf.movRegImm64(.rdx, @as(u64, selector_idx));
+            buf.movRegImm64(.rcx, @as(u64, num_args));
+            buf.movRegImm64(.r8, @as(u64, bytecode_offset));
+            buf.movRegImm64(.r9, super_flag);
+            buf.movRegImm64(.r10, send_fn_ptr);
+            buf.callReg(.r10);
+        }
+
+        buf.movRegMem(.r12, .rbx, INTERP_SP_OFFSET);
+        buf.rex(true, false, true, true);
+        buf.emit8(0x89);
+        buf.emit8(0x44);
+        buf.emit8(0xE5);
+        buf.emit8(0x00);
+        buf.addRegImm32(.r12, 1);
+
+        // === END ===
+        const end_pos = buf.currentPos();
+        buf.patchRel32(patch_jmp_end, @intCast(@as(isize, @intCast(end_pos)) - @as(isize, @intCast(patch_jmp_end)) - 4));
+    }
+
     /// Emit code to create a BlockClosure (uses cached r12=sp, r13=stack base)
     fn emitPushClosure(
         self: *JIT,
@@ -2272,6 +2555,68 @@ pub const JIT = struct {
             },
             else => unreachable,
         }
+    }
+
+    /// Emit inline code for at: with fast path for Arrays
+    fn emitAtInline(self: *JIT, buf: *CodeBuffer) void {
+        _ = self;
+        const runtime_fn_ptr = @intFromPtr(&jit_runtime_at);
+
+        // For now, always use runtime helper until inline code is debugged
+        // SAFEPOINT: Write back r12 to interpreter.sp before call
+        buf.movMemReg(.rbx, INTERP_SP_OFFSET, .r12);
+
+        // Call runtime helper: jit_runtime_at(interp)
+        if (builtin.os.tag == .windows) {
+            buf.subRegImm32(.rsp, 40); // shadow space + alignment
+            buf.movRegReg(.rcx, .rbx); // interp pointer
+            buf.movRegImm64(.r10, runtime_fn_ptr);
+            buf.callReg(.r10);
+            buf.addRegImm32(.rsp, 40);
+        } else {
+            buf.movRegReg(.rdi, .rbx);
+            buf.movRegImm64(.r10, runtime_fn_ptr);
+            buf.callReg(.r10);
+        }
+
+        // Reload sp and push result
+        buf.movRegMem(.r12, .rbx, INTERP_SP_OFFSET);
+        buf.rex(true, false, true, true);
+        buf.emit8(0x89);
+        buf.emit8(0x44);
+        buf.emit8(0xE5);
+        buf.emit8(0x00);
+        buf.addRegImm32(.r12, 1);
+    }
+
+    /// Emit inline code for at:put: with fast path for Arrays
+    fn emitAtPutInline(self: *JIT, buf: *CodeBuffer) void {
+        _ = self;
+        const runtime_fn_ptr = @intFromPtr(&jit_runtime_at_put);
+
+        // For now, always use runtime helper until inline code is debugged
+        // SAFEPOINT: Write back r12 to interpreter.sp before call
+        buf.movMemReg(.rbx, INTERP_SP_OFFSET, .r12);
+
+        if (builtin.os.tag == .windows) {
+            buf.subRegImm32(.rsp, 40);
+            buf.movRegReg(.rcx, .rbx);
+            buf.movRegImm64(.r10, runtime_fn_ptr);
+            buf.callReg(.r10);
+            buf.addRegImm32(.rsp, 40);
+        } else {
+            buf.movRegReg(.rdi, .rbx);
+            buf.movRegImm64(.r10, runtime_fn_ptr);
+            buf.callReg(.r10);
+        }
+
+        buf.movRegMem(.r12, .rbx, INTERP_SP_OFFSET);
+        buf.rex(true, false, true, true);
+        buf.emit8(0x89);
+        buf.emit8(0x44);
+        buf.emit8(0xE5);
+        buf.emit8(0x00);
+        buf.addRegImm32(.r12, 1);
     }
 
     /// Emit specialized binary operation - dispatches to inline or runtime version

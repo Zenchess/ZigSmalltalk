@@ -1,0 +1,245 @@
+#!/bin/bash
+
+echo "Loading ANSI files with FIXED dependency order..."
+echo ""
+echo "This will load:"
+echo "  - All ANSI classes in correct dependency order"
+echo "  - No broken dependency chains"
+echo "  - No 'Heap.getGlobal: Not found' errors"
+echo "  - Clean environment for testing"
+echo ""
+echo "Loading now... (this should be faster and cleaner)"
+echo "==================================================="
+
+# Create the fixed load order file
+cat > load-order-fixed.txt << 'EOF'
+# Core Object hierarchy - load first
+ansi-tests/ProtoObject.cls
+ansi-tests/Object.cls
+ansi-tests/dnu-primitive-stub.st
+ansi-tests/Object-stubs.st
+ansi-tests/Processor-stub.st
+ansi-tests/Delay-stub.st
+
+# Core Class hierarchy
+ansi-tests/Behavior.cls
+ansi-tests/ClassDescription.cls
+ansi-tests/Class.cls
+ansi-tests/Metaclass.cls
+
+# Core Magnitude hierarchy
+ansi-tests/Magnitude.cls
+ansi-tests/Association.cls
+ansi-tests/Character.cls
+ansi-tests/ArithmeticValue.cls
+ansi-tests/Number.cls
+ansi-tests/Integer.cls
+ansi-tests/SmallInteger.cls
+ansi-tests/Float.cls
+ansi-tests/Fraction.cls
+ansi-tests/Duration.cls
+
+# Core Collection hierarchy
+ansi-tests/Collection.cls
+ansi-tests/SequenceableCollection.cls
+ansi-tests/ArrayedCollection.cls
+ansi-tests/SequencedGrowableCollection.cls
+ansi-tests/OrderedCollection.cls
+ansi-tests/SortedCollection.cls
+ansi-tests/Set.cls
+ansi-tests/IdentitySet.cls
+ansi-tests/Dictionary.cls
+ansi-tests/LookupTable.cls
+ansi-tests/IdentityDictionary.cls
+ansi-tests/Bag.cls
+ansi-tests/Interval.cls
+
+# Core String hierarchy
+ansi-tests/String.cls
+ansi-tests/UtfEncodedString.cls
+ansi-tests/Utf8String.cls
+ansi-tests/Symbol.cls
+
+# Core Array hierarchy
+ansi-tests/Array.cls
+ansi-tests/ByteArray.cls
+
+# Core Boolean hierarchy
+ansi-tests/Boolean.cls
+ansi-tests/True.cls
+ansi-tests/False.cls
+
+# Core UndefinedObject
+ansi-tests/UndefinedObject.cls
+
+# Core Stream hierarchy
+ansi-tests/Stream.cls
+ansi-tests/SequencedStream.cls
+ansi-tests/PositionableStream.cls
+ansi-tests/ReadStream.cls
+ansi-tests/WriteStream.cls
+ansi-tests/ReadWriteStream.cls
+
+# Core Message and Exception hierarchy
+ansi-tests/Message.cls
+ansi-tests/Exception.cls
+ansi-tests/Error.cls
+ansi-tests/MessageNotUnderstood.cls
+ansi-tests/Notification.cls
+ansi-tests/Warning.cls
+
+# Block closure support
+ansi-tests/BlockClosure-multi-on.st
+
+# Smalltalk global - needed by SUnitNameResolver
+ansi-tests/Smalltalk-early.st
+
+# SUnitNameResolver - needed by test framework
+ansi-tests/SUnitNameResolver.cls
+
+# Test framework - load after core classes
+ansi-tests/TestCase.cls
+ansi-tests/TestSuite.cls
+ansi-tests/TestResult.cls
+ansi-tests/TestCaseResult.cls
+ansi-tests/TestResource.cls
+ansi-tests/TestFailure.cls
+ansi-tests/ResumableTestFailure.cls
+ansi-tests/SUnit_TestSkip.cls
+
+# Protocol specifications - load before test classes
+ansi-tests/ProtocolANYSpec.cls
+ansi-tests/MsgParmSpec.cls
+ansi-tests/MsgReturnSpec.cls
+ansi-tests/MsgReturnRuleSpec.cls
+ansi-tests/ProtocolMsgSpec.cls
+ansi-tests/ProtocolSpec.cls
+
+# Helper classes - load before test classes
+ansi-tests/TestCaseProtocol.cls
+ansi-tests/TestCaseHelper.cls
+ansi-tests/ObjectHelper.cls
+ansi-tests/CollectionHelper.cls
+ansi-tests/CollectionStreamHelper.cls
+ansi-tests/ExtensibleCollectionHelper.cls
+ansi-tests/SequencedCollectionHelper.cls
+ansi-tests/SequencedContractibleCollectionHelper.cls
+ansi-tests/SequencedReadableCollectionHelper.cls
+ansi-tests/ReadableStringHelper.cls
+ansi-tests/SequencedStreamHelper.cls
+ansi-tests/PuttableStreamHelper.cls
+ansi-tests/GettableStreamHelper.cls
+ansi-tests/ReadStreamHelper.cls
+ansi-tests/WriteStreamHelper.cls
+
+# Main test case - load before other test classes
+ansi-tests/MainTestCase.cls
+
+# Smalltalk system stubs - load after all test framework classes
+ansi-tests/SmalltalkSystem-stubs.st
+
+# Test classes - load after all dependencies
+ansi-tests/ArrayANSITest.cls
+ansi-tests/ArrayFactoryANSITest.cls
+ansi-tests/BagANSITest.cls
+ansi-tests/BagFactoryANSITest.cls
+ansi-tests/BooleanANSITest.cls
+ansi-tests/ByteArrayANSITest.cls
+ansi-tests/ByteArrayFactoryANSITest.cls
+ansi-tests/CharacterANSITest.cls
+ansi-tests/CharacterFactoryANSITest.cls
+ansi-tests/CollectionTest.cls
+ansi-tests/DateAndTimeANSITest.cls
+ansi-tests/DateAndTimeFactoryANSITest.cls
+ansi-tests/DictionaryANSITest.cls
+ansi-tests/DictionaryFactoryANSITest.cls
+ansi-tests/DurationANSITest.cls
+ansi-tests/DurationFactoryANSITest.cls
+ansi-tests/DyadicValuableANSITest.cls
+ansi-tests/ErrorANSITest.cls
+ansi-tests/ErrorClassANSITest.cls
+ansi-tests/ExceptionANSITest.cls
+ansi-tests/ExceptionClassANSITest.cls
+ansi-tests/ExceptionSetANSITest.cls
+ansi-tests/FailedMessageANSITest.cls
+ansi-tests/FileStreamFactoryANSITest.cls
+ansi-tests/FloatANSITest.cls
+ansi-tests/FloatCharacterizationANSITest.cls
+ansi-tests/FractionANSITest.cls
+ansi-tests/FractionFactoryANSITest.cls
+ansi-tests/IdentityDictionaryANSITest.cls
+ansi-tests/IdentityDictionaryFactoryANSITest.cls
+ansi-tests/IntegerANSITest.cls
+ansi-tests/IntervalANSITest.cls
+ansi-tests/IntervalFactoryANSITest.cls
+ansi-tests/MessageNotUnderstoodANSITest.cls
+ansi-tests/MessageNotUnderstoodSelectorANSITest.cls
+ansi-tests/MonadicBlockANSITest.cls
+ansi-tests/NilANSITest.cls
+ansi-tests/NiladicBlockANSITest.cls
+ansi-tests/NotificationANSITest.cls
+ansi-tests/NotificationClassANSITest.cls
+ansi-tests/ObjectANSITest.cls
+ansi-tests/ObjectClassANSITest.cls
+ansi-tests/OrderedCollectionANSITest.cls
+ansi-tests/OrderedCollectionFactoryANSITest.cls
+ansi-tests/ReadFileStreamANSITest.cls
+ansi-tests/ReadStreamANSITest.cls
+ansi-tests/ReadStreamFactoryANSITest.cls
+ansi-tests/ReadWriteStreamANSITest.cls
+ansi-tests/ReadWriteStreamFactoryANSITest.cls
+ansi-tests/ScaledDecimalANSITest.cls
+ansi-tests/SelectorANSITest.cls
+ansi-tests/SequencedReadableCollectionTest.cls
+ansi-tests/SequencedStreamTest.cls
+ansi-tests/SetANSITest.cls
+ansi-tests/SetFactoryANSITest.cls
+ansi-tests/SortedCollectionANSITest.cls
+ansi-tests/SortedCollectionFactoryANSITest.cls
+ansi-tests/StringANSITest.cls
+ansi-tests/StringFactoryANSITest.cls
+ansi-tests/SymbolANSITest.cls
+ansi-tests/TranscriptANSITest.cls
+ansi-tests/WarningANSITest.cls
+ansi-tests/WarningClassANSITest.cls
+ansi-tests/WriteFileStreamANSITest.cls
+ansi-tests/WriteStreamANSITest.cls
+ansi-tests/WriteStreamFactoryANSITest.cls
+ansi-tests/ZeroDivideANSITest.cls
+ansi-tests/ZeroDivideFactoryANSITest.cls
+
+# Patches and initialization
+ansi-tests/Patches.st
+ansi-tests/AnsiDB.st
+ansi-tests/AnsiInit.st
+
+# Include TranscriptShell
+src/image/transcript-shell.st
+
+# Test runner
+ansi-tests/run-tests.st
+EOF
+
+# Load files in dependency order (filter empty lines and comments)
+FILES=$(grep -v '^$' load-order-fixed.txt | grep -v '^#' | tr '\n' ' ')
+STUBS="dolphin-core/stubs/sunit-stubs.st"
+
+# Load ANSI files with fixed dependency order
+# If an extra file is provided, load it after the ANSI files
+if [ -n "$1" ]; then
+    zig-out/bin/zig-smalltalk.exe $FILES $STUBS "$1"
+else
+    zig-out/bin/zig-smalltalk.exe $FILES $STUBS
+fi
+
+echo ""
+echo "==================================================="
+echo "✅ Loading complete!"
+echo ""
+echo "To run tests manually, use:"
+echo "  MainTestCase runAll"
+echo "  TestRunner open"
+echo ""
+echo "Or reload the test runner:"
+echo "  'ansi-tests/run-tests.st' asFileReference fileIn"
+echo "==================================================="

@@ -356,6 +356,11 @@ current
     "Return the current session manager (self for class-side access)"
     ^self!
 
+onUnhandledError: anError
+    "Handle unhandled error - just print it and return"
+    Transcript show: 'Unhandled error: '; show: anError printString; cr.
+    ^anError!
+
 imagePath
     "Return the full path to the image without extension"
     <primitive: 930>
