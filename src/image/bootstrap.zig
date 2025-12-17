@@ -991,6 +991,8 @@ pub fn installCoreMethods(heap: *Heap) !void {
     // Reflection methods
     try installMethod(heap, object_class, "perform:", try createPrimitiveMethod(heap, 1, @intFromEnum(Primitive.perform)));
     try installMethod(heap, object_class, "perform:withArguments:", try createPrimitiveMethod(heap, 2, @intFromEnum(Primitive.perform_with_args)));
+    try installMethod(heap, object_class, "instVarAt:", try createPrimitiveMethod(heap, 1, @intFromEnum(Primitive.inst_var_at)));
+    try installMethod(heap, object_class, "instVarAt:put:", try createPrimitiveMethod(heap, 2, @intFromEnum(Primitive.inst_var_at_put)));
 
     // Class reflection methods (on Object class which is a metaclass)
     const behavior_class = heap.getClass(Heap.CLASS_CLASS).asObject(); // Behavior is approximated by Class

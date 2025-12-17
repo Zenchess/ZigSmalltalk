@@ -1,5 +1,19 @@
 "Widget classes for Smalltalk TUI"
 
+"Add do: method to OrderedCollection"
+!OrderedCollection methodsFor: 'enumerating'!
+do: aBlock
+    "Evaluate aBlock for each element in the collection"
+    | array firstIndex lastIndex |
+    array := self instVarAt: 1.
+    firstIndex := self instVarAt: 2.
+    lastIndex := self instVarAt: 3.
+    array isNil ifTrue: [^self].
+    firstIndex to: lastIndex - 1 do: [:i |
+        aBlock value: (array at: i)
+    ]
+! !
+
 Object subclass: #Widget
     instanceVariableNames: 'bounds parent children focused visible enabled'
     classVariableNames: ''

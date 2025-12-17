@@ -63,6 +63,8 @@ pub fn executePrimitive(interp: *Interpreter, prim_index: u16) InterpreterError!
         .basic_new => primBasicNew(interp),
         .basic_new_size => primBasicNewSize(interp),
         .become_dolphin => primBecome(interp), // Dolphin uses primitive 72 for become:
+        .inst_var_at => primInstVarAt(interp),
+        .inst_var_at_put => primInstVarAtPut(interp),
         .basic_identity_hash => primHash(interp),
         .shallow_copy => primShallowCopy(interp),
         .basic_resize => primBasicResize(interp),
@@ -2230,6 +2232,69 @@ fn primAtPut(interp: *Interpreter) InterpreterError!Value {
         return InterpreterError.PrimitiveFailed;
     }
     obj.setField(idx, val, obj_size);
+    return val;
+}
+
+// instVarAt: - access instance variable by 1-based index
+fn primInstVarAt(interp: *Interpreter) InterpreterError!Value {
+    const index = try interp.pop();
+    const recv = try interp.pop();
+
+    if (!recv.isObject() or !index.isSmallInt()) {
+        try interp.push(recv);
+        try interp.push(index);
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    const obj = recv.asObject();
+    const idx_val = index.asSmallInt();
+    if (idx_val < 1) {
+        try interp.push(recv);
+        try interp.push(index);
+        return InterpreterError.PrimitiveFailed;
+    }
+    const base_idx: usize = @intCast(idx_val - 1); // Smalltalk is 1-indexed
+
+    if (base_idx >= obj.header.size) {
+        try interp.push(recv);
+        try interp.push(index);
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    return obj.getField(base_idx, obj.header.size);
+}
+
+// instVarAt:put: - set instance variable by 1-based index
+fn primInstVarAtPut(interp: *Interpreter) InterpreterError!Value {
+    const val = try interp.pop();
+    const index = try interp.pop();
+    const recv = try interp.pop();
+
+    if (!recv.isObject() or !index.isSmallInt()) {
+        try interp.push(recv);
+        try interp.push(index);
+        try interp.push(val);
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    const obj = recv.asObject();
+    const idx_val = index.asSmallInt();
+    if (idx_val < 1) {
+        try interp.push(recv);
+        try interp.push(index);
+        try interp.push(val);
+        return InterpreterError.PrimitiveFailed;
+    }
+    const base_idx: usize = @intCast(idx_val - 1); // Smalltalk is 1-indexed
+
+    if (base_idx >= obj.header.size) {
+        try interp.push(recv);
+        try interp.push(index);
+        try interp.push(val);
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    obj.setField(base_idx, val, obj.header.size);
     return val;
 }
 

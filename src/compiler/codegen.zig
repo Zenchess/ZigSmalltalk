@@ -124,7 +124,6 @@ pub const CodeGenerator = struct {
 
         // Add implicit return of the result
         try self.emit(.return_top);
-
         // Create the CompiledMethod
         return self.buildMethod(0); // 0 arguments for doIt
     }
@@ -658,7 +657,14 @@ pub const CodeGenerator = struct {
 
                 // Save current scope
                 const current_args = self.arguments;
-                const current_temp_count = self.temporaries.items.len;
+
+                // Save the actual temporary names (not just count) so we can restore them later
+                var saved_current_temps = std.ArrayListUnmanaged([]const u8){};
+                for (self.temporaries.items) |temp| {
+                    saved_current_temps.append(self.allocator, temp) catch {
+                        return CompileError.OutOfMemory;
+                    };
+                }
 
                 // Set block parameters as arguments for the block scope
                 self.arguments = node.data.block.parameters;
@@ -683,16 +689,13 @@ pub const CodeGenerator = struct {
                 // Restore current scope
                 self.arguments = current_args;
                 self.temporaries.shrinkRetainingCapacity(0);
-                // Re-add original temporaries
-                var i: usize = 0;
-                while (i < current_temp_count) : (i += 1) {
-                    // We need to restore from outer_temporaries since that's where we saved them
-                    if (i < self.outer_temporaries.items.len) {
-                        self.temporaries.append(self.allocator, self.outer_temporaries.items[i]) catch {
-                            return CompileError.OutOfMemory;
-                        };
-                    }
+                // Re-add original temporaries from saved copy
+                for (saved_current_temps.items) |temp| {
+                    self.temporaries.append(self.allocator, temp) catch {
+                        return CompileError.OutOfMemory;
+                    };
                 }
+                saved_current_temps.deinit(self.allocator);
 
                 // Restore previous outer scope
                 self.outer_arguments = prev_outer_args;
