@@ -77,9 +77,11 @@ fn jitRuntimeSendCommon(
     // Save state for error recovery
     const saved_context_ptr = interp.context_ptr;
     const saved_sp = interp.sp;
+    const saved_receiver = interp.receiver; // IMPORTANT: save receiver for restore after call
 
     // Call interpreter's sendMessage to set up the call
     interp.sendMessage(selector_index, num_args, is_super, bytecode_offset) catch {
+        interp.receiver = saved_receiver;
         return Value.nil;
     };
 
@@ -87,10 +89,16 @@ fn jitRuntimeSendCommon(
     // the result is already on the stack
     if (interp.context_ptr == saved_context_ptr) {
         // Fast path completed - pop and return result
-        if (interp.sp > saved_sp) {
+        // For 0-arg sends, result replaces receiver so sp == saved_sp (not greater)
+        // We need sp > saved_sp - num_args - 1 = recv_pos to have a result
+        const recv_pos = saved_sp - @as(usize, num_args) - 1;
+        if (interp.sp > recv_pos) {
             interp.sp -= 1;
-            return interp.stack[interp.sp];
+            const result = interp.stack[interp.sp];
+            interp.receiver = saved_receiver; // Restore caller's receiver
+            return result;
         }
+        interp.receiver = saved_receiver;
         return Value.nil;
     }
 
@@ -103,10 +111,12 @@ fn jitRuntimeSendCommon(
         // On error, restore state
         interp.primitive_block_depth -= 1;
         interp.context_ptr = saved_context_ptr;
+        interp.receiver = saved_receiver;
         return Value.nil;
     };
 
     interp.primitive_block_depth -= 1;
+    interp.receiver = saved_receiver; // Restore caller's receiver
     return result;
 }
 
@@ -210,6 +220,205 @@ pub export fn jit_runtime_super_send(
     return jitRuntimeSendCommon(interp, selector_index, num_args, bytecode_offset, true);
 }
 
+/// Runtime helper to create a BlockClosure from JIT code.
+/// Parameters come from the push_closure bytecode.
+/// Returns the created closure Value.
+pub export fn jit_runtime_push_closure(
+    interp: *Interpreter,
+    block_num_args: u8,
+    block_num_temps: u8,
+    block_start_ip: usize, // IP of the block's first bytecode
+) callconv(.c) Value {
+    const Heap = @import("memory.zig").Heap;
+
+    // Lazily create heap context for closure variable capture
+    if (interp.heap_context.isNil()) {
+        const method_num_temps = interp.method.header.num_temps;
+        const method_num_args = interp.method.header.num_args;
+        const num_to_capture = method_num_args + method_num_temps;
+
+        const heap_ctx = interp.createHeapContext(num_to_capture) catch {
+            return Value.nil;
+        };
+        interp.heap_context = Value.fromObject(heap_ctx);
+
+        if (interp.home_heap_context.isNil()) {
+            interp.home_heap_context = interp.heap_context;
+        }
+    }
+
+    // Create BlockClosure object
+    const closure = interp.heap.allocateObject(Heap.CLASS_BLOCK_CLOSURE, Heap.BLOCK_NUM_FIELDS, .normal) catch {
+        return Value.nil;
+    };
+
+    // Set closure fields
+    closure.setField(Heap.BLOCK_FIELD_OUTER_CONTEXT, interp.heap_context, Heap.BLOCK_NUM_FIELDS);
+    closure.setField(Heap.BLOCK_FIELD_START_PC, Value.fromSmallInt(@intCast(block_start_ip)), Heap.BLOCK_NUM_FIELDS);
+    closure.setField(Heap.BLOCK_FIELD_NUM_ARGS, Value.fromSmallInt(block_num_args), Heap.BLOCK_NUM_FIELDS);
+    closure.setField(Heap.BLOCK_FIELD_METHOD, Value.fromObject(@ptrCast(@alignCast(interp.method))), Heap.BLOCK_NUM_FIELDS);
+    closure.setField(Heap.BLOCK_FIELD_RECEIVER, interp.receiver, Heap.BLOCK_NUM_FIELDS);
+    closure.setField(Heap.BLOCK_FIELD_HOME_CONTEXT, interp.home_heap_context, Heap.BLOCK_NUM_FIELDS);
+    closure.setField(Heap.BLOCK_FIELD_NUM_TEMPS, Value.fromSmallInt(block_num_temps), Heap.BLOCK_NUM_FIELDS);
+
+    return Value.fromObject(closure);
+}
+
+/// Special binary operation type for JIT runtime helper
+pub const SpecialBinaryOp = enum(u8) {
+    add = 0,
+    subtract = 1,
+    multiply = 2,
+    divide = 3,
+    less_than = 4,
+    greater_than = 5,
+    less_or_equal = 6,
+    greater_or_equal = 7,
+    equal = 8,
+    not_equal = 9,
+};
+
+/// Runtime helper for specialized binary sends (like +, -, <, <=, etc.)
+/// These try the primitive fast path and fall back to method lookup.
+pub export fn jit_runtime_special_binary(
+    interp: *Interpreter,
+    op: SpecialBinaryOp,
+) callconv(.c) Value {
+    const primitives = @import("primitives.zig");
+
+    // Debug logging disabled for performance
+    // std.debug.print("jit_runtime_special_binary: op={d}, sp={d}\n", .{ @intFromEnum(op), interp.sp });
+
+    // Get arg and receiver from stack
+    if (interp.sp < 2) {
+        // std.debug.print("  ERROR: sp < 2!\n", .{});
+        return Value.nil;
+    }
+
+    const arg = interp.stack[interp.sp - 1];
+    const recv = interp.stack[interp.sp - 2];
+
+    // Map to primitive number
+    const prim_num: u16 = switch (op) {
+        .add => @intFromEnum(bytecodes.Primitive.add),
+        .subtract => @intFromEnum(bytecodes.Primitive.subtract),
+        .multiply => @intFromEnum(bytecodes.Primitive.multiply),
+        .divide => @intFromEnum(bytecodes.Primitive.divide),
+        .less_than => @intFromEnum(bytecodes.Primitive.less_than),
+        .greater_than => @intFromEnum(bytecodes.Primitive.greater_than),
+        .less_or_equal => @intFromEnum(bytecodes.Primitive.less_or_equal),
+        .greater_or_equal => @intFromEnum(bytecodes.Primitive.greater_or_equal),
+        .equal => @intFromEnum(bytecodes.Primitive.equal),
+        .not_equal => @intFromEnum(bytecodes.Primitive.not_equal),
+    };
+
+    // Try primitive fast path
+    // Note: executePrimitive pops both args from stack
+    if (primitives.executePrimitive(interp, prim_num)) |result| {
+        // Primitive succeeded - args already popped by primitive, return result
+        // JIT code will push the result onto stack
+        return result;
+    } else |_| {
+        // Primitive failed - need to fall back to method lookup
+        // Get the selector string for this operation
+        const selector: []const u8 = switch (op) {
+            .add => "+",
+            .subtract => "-",
+            .multiply => "*",
+            .divide => "/",
+            .less_than => "<",
+            .greater_than => ">",
+            .less_or_equal => "<=",
+            .greater_or_equal => ">=",
+            .equal => "=",
+            .not_equal => "~=",
+        };
+
+        // Pop args from stack for method lookup
+        interp.sp -= 2;
+
+        // Lookup and call method
+        const class = interp.heap.classOf(recv);
+        const selector_sym = interp.heap.internSymbol(selector) catch {
+            return Value.nil;
+        };
+
+        if (interp.lookupMethod(class, selector_sym)) |method| {
+            // Push receiver and arg back for method call
+            interp.stack[interp.sp] = recv;
+            interp.sp += 1;
+            interp.stack[interp.sp] = arg;
+            interp.sp += 1;
+
+            // Try primitive if method has one
+            if (method.header.primitive_index != 0) {
+                if (primitives.executePrimitive(interp, method.header.primitive_index)) |result| {
+                    interp.sp -= 2;
+                    return result;
+                } else |_| {}
+            }
+
+            // Execute method bytecode using primitive_block mechanism
+            const saved_context_ptr = interp.context_ptr;
+
+            // Set up method call
+            if (interp.context_ptr >= interp.contexts.len - 1) {
+                interp.sp -= 2;
+                return Value.nil;
+            }
+
+            interp.contexts[interp.context_ptr] = .{
+                .method = interp.method,
+                .method_class = interp.method_class,
+                .ip = interp.ip,
+                .receiver = interp.receiver,
+                .temp_base = interp.temp_base,
+                .outer_temp_base = interp.outer_temp_base,
+                .home_temp_base = interp.home_temp_base,
+                .heap_context = interp.heap_context,
+                .home_heap_context = interp.home_heap_context,
+            };
+            interp.context_ptr += 1;
+
+            const recv_pos = interp.sp - 2;
+            interp.method = method;
+            interp.method_class = class;
+            interp.ip = 0;
+            interp.receiver = recv;
+            interp.temp_base = recv_pos;
+            interp.outer_temp_base = recv_pos;
+            interp.home_temp_base = recv_pos;
+            interp.heap_context = Value.nil;
+            interp.home_heap_context = Value.nil;
+
+            // Initialize temps
+            const num_temps = method.header.num_temps;
+            const num_args: usize = 1; // Binary message has 1 arg
+            if (num_temps > num_args) {
+                var k: usize = 0;
+                while (k < num_temps - num_args and interp.sp < interp.stack.len) : (k += 1) {
+                    interp.stack[interp.sp] = Value.nil;
+                    interp.sp += 1;
+                }
+            }
+
+            // Use primitive_block mechanism to detect when send completes
+            interp.primitive_block_bases[interp.primitive_block_depth] = saved_context_ptr;
+            interp.primitive_block_depth += 1;
+
+            const result = interp.interpretLoop() catch {
+                interp.primitive_block_depth -= 1;
+                return Value.nil;
+            };
+
+            interp.primitive_block_depth -= 1;
+            return result;
+        }
+
+        return Value.nil;
+    }
+}
+
 /// Runtime helper that uses per-callsite cache to dispatch sends.
 /// This is the fast path for compiled JIT code.
 pub export fn jit_runtime_send_with_cache(
@@ -221,7 +430,7 @@ pub export fn jit_runtime_send_with_cache(
     is_super: bool,
 ) callconv(.c) Value {
     // Temporary debug logging to trace early JIT sends
-    const debug_max: usize = 32;
+    const debug_max: usize = 0;
     {
         var static_count: usize = 0;
         if (static_count < debug_max) {
@@ -624,6 +833,46 @@ pub const CodeBuffer = struct {
         self.emit32(@bitCast(offset));
     }
 
+    /// jle rel32 (jump if less or equal, signed)
+    pub fn jleRel32(self: *CodeBuffer, offset: i32) void {
+        self.emit8(0x0F);
+        self.emit8(0x8E);
+        self.emit32(@bitCast(offset));
+    }
+
+    /// jg rel32 (jump if greater, signed)
+    pub fn jgRel32(self: *CodeBuffer, offset: i32) void {
+        self.emit8(0x0F);
+        self.emit8(0x8F);
+        self.emit32(@bitCast(offset));
+    }
+
+    /// cmp reg, imm8 (compare register with 8-bit immediate)
+    pub fn cmpRegImm8(self: *CodeBuffer, reg: Reg, imm: u8) void {
+        const reg_idx: u8 = @intFromEnum(reg);
+        if (reg_idx >= 8) {
+            self.rex(true, false, false, true); // REX.W + REX.B for extended reg
+        } else {
+            self.rex(true, false, false, false); // REX.W for 64-bit
+        }
+        self.emit8(0x83); // CMP r/m64, imm8
+        self.emit8(0xF8 | (reg_idx & 0x7)); // ModRM: mod=11, reg=111 (/7), rm=reg
+        self.emit8(imm);
+    }
+
+    /// and reg, imm8 (AND register with 8-bit immediate)
+    pub fn andRegImm8(self: *CodeBuffer, reg: Reg, imm: u8) void {
+        const reg_idx: u8 = @intFromEnum(reg);
+        if (reg_idx >= 8) {
+            self.rex(true, false, false, true);
+        } else {
+            self.rex(true, false, false, false);
+        }
+        self.emit8(0x83); // AND r/m64, imm8
+        self.emit8(0xE0 | (reg_idx & 0x7)); // ModRM: mod=11, reg=100 (/4), rm=reg
+        self.emit8(imm);
+    }
+
     /// nop
     pub fn nop(self: *CodeBuffer) void {
         self.emit8(0x90);
@@ -771,7 +1020,10 @@ pub const JIT = struct {
     /// Returns false for methods with blocks, jumps, or other complex ops
     pub fn isJitEligible(method: *CompiledMethod) bool {
         // Temporaries beyond arguments currently require more frame setup; skip for safety
-        if (method.header.num_temps > 0) return false;
+        if (method.header.num_temps > 0) {
+            // std.debug.print("JIT ineligible: has {} temps\n", .{method.header.num_temps});
+            return false;
+        }
 
         const bc = method.getBytecodes();
         var ip: usize = 0;
@@ -796,10 +1048,17 @@ pub const JIT = struct {
                 // Push with index - OK
                 .push_literal => ip += 1,
                 .push_temporary => ip += 1,
+                .push_integer => ip += 1, // signed 8-bit integer follows
 
                 // Sends - OK (we have runtime send support)
                 .send => ip += 2,
                 .super_send => ip += 2,
+
+                // Specialized binary sends - OK (no operands)
+                .send_plus, .send_minus, .send_times, .send_divide,
+                .send_less_than, .send_greater_than,
+                .send_less_or_equal, .send_greater_or_equal,
+                .send_equal, .send_not_equal => {},
 
                 // Jumps - now supported with backpatching
                 .jump, .jump_if_true, .jump_if_false, .jump_if_nil, .jump_if_not_nil => {
@@ -810,8 +1069,15 @@ pub const JIT = struct {
                 .short_jump_0, .short_jump_1, .short_jump_2, .short_jump_3,
                 .short_jump_4, .short_jump_5, .short_jump_6, .short_jump_7 => {},
 
-                // Block creation - NOT eligible
-                .push_closure => return false,
+                // Block creation - now supported with runtime helper
+                .push_closure => {
+                    // Skip: num_args, num_temps, size_hi, size_lo
+                    if (ip + 4 > bc.len) return false;
+                    const size_hi: u16 = bc[ip + 2];
+                    const size_lo: u16 = bc[ip + 3];
+                    const block_size: usize = @intCast((size_hi << 8) | size_lo);
+                    ip += 4 + block_size; // Skip header + block bytecodes
+                },
 
                 // Non-local return - NOT eligible (complex)
                 .block_return => return false,
@@ -820,19 +1086,23 @@ pub const JIT = struct {
                 .extended_push, .extended_store, .extended_send => return false,
 
                 // Everything else - NOT eligible
-                else => return false,
+                else => {
+                    // std.debug.print("JIT ineligible: unsupported opcode 0x{x}\n", .{opcode});
+                    return false;
+                },
             }
         }
 
+        std.debug.print("JIT: Method is eligible, bytecodes len={d}, bytecodes: ", .{bc.len});
+        for (bc) |b| {
+            std.debug.print("{x:0>2} ", .{b});
+        }
+        std.debug.print("\n", .{});
         return true;
     }
 
     /// Compile a method to native code
     pub fn compile(self: *JIT, method: *CompiledMethod) !*CompiledCode {
-        // Debug trace to see which methods are compiled
-        std.debug.print("JIT compile method@0x{x} num_temps={d} num_literals={d} bytecode_size={d}\n",
-            .{ @intFromPtr(method), method.header.num_temps, method.header.num_literals, method.header.bytecode_size });
-
         const bc = method.getBytecodes();
 
         // Pre-scan to count send sites so we can allocate per-callsite caches
@@ -935,6 +1205,13 @@ pub const JIT = struct {
                     ip += 1;
                     self.emitPushTemporary(&buffer, idx);
                 },
+                .push_integer => {
+                    const signed_val: i8 = @bitCast(bc[ip]);
+                    ip += 1;
+                    // Convert to SmallInteger Value and push
+                    const value = Value.fromSmallInt(@intCast(signed_val));
+                    self.emitPushImmediate(&buffer, value);
+                },
                 .pop => self.emitPop(&buffer),
                 .dup => self.emitDup(&buffer),
                 .return_top => {
@@ -977,12 +1254,23 @@ pub const JIT = struct {
                         break;
                     }
                 },
-                // Jump bytecodes with 16-bit signed offset
+                // Specialized binary sends
+                .send_plus => self.emitSpecialBinaryOp(&buffer, .add),
+                .send_minus => self.emitSpecialBinaryOp(&buffer, .subtract),
+                .send_times => self.emitSpecialBinaryOp(&buffer, .multiply),
+                .send_divide => self.emitSpecialBinaryOp(&buffer, .divide),
+                .send_less_than => self.emitSpecialBinaryOp(&buffer, .less_than),
+                .send_greater_than => self.emitSpecialBinaryOp(&buffer, .greater_than),
+                .send_less_or_equal => self.emitSpecialBinaryOp(&buffer, .less_or_equal),
+                .send_greater_or_equal => self.emitSpecialBinaryOp(&buffer, .greater_or_equal),
+                .send_equal => self.emitSpecialBinaryOp(&buffer, .equal),
+                .send_not_equal => self.emitSpecialBinaryOp(&buffer, .not_equal),
+                // Jump bytecodes with 16-bit signed offset (big-endian: hi byte first)
                 .jump => {
-                    const offset_lo = bc[ip];
-                    const offset_hi = bc[ip + 1];
+                    const offset_hi = bc[ip];
+                    const offset_lo = bc[ip + 1];
                     ip += 2;
-                    const offset: i16 = @bitCast(@as(u16, offset_lo) | (@as(u16, offset_hi) << 8));
+                    const offset: i16 = @bitCast((@as(u16, offset_hi) << 8) | @as(u16, offset_lo));
                     const target_bc_ip: usize = @intCast(@as(isize, @intCast(ip)) + @as(isize, offset));
 
                     // Check if target is backward (already emitted) or forward (needs patching)
@@ -1000,10 +1288,10 @@ pub const JIT = struct {
                     }
                 },
                 .jump_if_true => {
-                    const offset_lo = bc[ip];
-                    const offset_hi = bc[ip + 1];
+                    const offset_hi = bc[ip];
+                    const offset_lo = bc[ip + 1];
                     ip += 2;
-                    const offset: i16 = @bitCast(@as(u16, offset_lo) | (@as(u16, offset_hi) << 8));
+                    const offset: i16 = @bitCast((@as(u16, offset_hi) << 8) | @as(u16, offset_lo));
                     const target_bc_ip: usize = @intCast(@as(isize, @intCast(ip)) + @as(isize, offset));
 
                     // Pop TOS and compare with true
@@ -1023,10 +1311,10 @@ pub const JIT = struct {
                     }
                 },
                 .jump_if_false => {
-                    const offset_lo = bc[ip];
-                    const offset_hi = bc[ip + 1];
+                    const offset_hi = bc[ip];
+                    const offset_lo = bc[ip + 1];
                     ip += 2;
-                    const offset: i16 = @bitCast(@as(u16, offset_lo) | (@as(u16, offset_hi) << 8));
+                    const offset: i16 = @bitCast((@as(u16, offset_hi) << 8) | @as(u16, offset_lo));
                     const target_bc_ip: usize = @intCast(@as(isize, @intCast(ip)) + @as(isize, offset));
 
                     // Pop TOS and compare with false
@@ -1046,10 +1334,10 @@ pub const JIT = struct {
                     }
                 },
                 .jump_if_nil => {
-                    const offset_lo = bc[ip];
-                    const offset_hi = bc[ip + 1];
+                    const offset_hi = bc[ip];
+                    const offset_lo = bc[ip + 1];
                     ip += 2;
-                    const offset: i16 = @bitCast(@as(u16, offset_lo) | (@as(u16, offset_hi) << 8));
+                    const offset: i16 = @bitCast((@as(u16, offset_hi) << 8) | @as(u16, offset_lo));
                     const target_bc_ip: usize = @intCast(@as(isize, @intCast(ip)) + @as(isize, offset));
 
                     // Pop TOS and compare with nil
@@ -1069,10 +1357,10 @@ pub const JIT = struct {
                     }
                 },
                 .jump_if_not_nil => {
-                    const offset_lo = bc[ip];
-                    const offset_hi = bc[ip + 1];
+                    const offset_hi = bc[ip];
+                    const offset_lo = bc[ip + 1];
                     ip += 2;
-                    const offset: i16 = @bitCast(@as(u16, offset_lo) | (@as(u16, offset_hi) << 8));
+                    const offset: i16 = @bitCast((@as(u16, offset_hi) << 8) | @as(u16, offset_lo));
                     const target_bc_ip: usize = @intCast(@as(isize, @intCast(ip)) + @as(isize, offset));
 
                     // Pop TOS and compare with nil (jump if NOT equal)
@@ -1101,6 +1389,27 @@ pub const JIT = struct {
                     buffer.emit8(0xE9); // jmp rel32
                     try forward_patches.append(self.allocator, .{ .patch_pos = buffer.currentPos(), .target_bc_ip = target_bc_ip });
                     buffer.emit32(0);
+                },
+                // Block creation - call runtime helper
+                .push_closure => {
+                    if (ip + 4 <= bc.len) {
+                        const block_num_args = bc[ip];
+                        const block_num_temps = bc[ip + 1];
+                        const size_hi: u16 = bc[ip + 2];
+                        const size_lo: u16 = bc[ip + 3];
+                        const block_size: usize = @intCast((size_hi << 8) | size_lo);
+                        ip += 4;
+
+                        // Block's bytecodes start at current ip
+                        const block_start_ip = ip;
+                        ip += block_size; // Skip block bytecodes
+
+                        // Emit call to jit_runtime_push_closure
+                        self.emitPushClosure(&buffer, block_num_args, block_num_temps, block_start_ip);
+                    } else {
+                        self.emitReturnNil(&buffer);
+                        break;
+                    }
                 },
                 else => {
                     // For unsupported opcodes, bail out to interpreter
@@ -1146,6 +1455,7 @@ pub const JIT = struct {
             .call_site_caches = call_site_caches,
         };
 
+        std.debug.print("JIT: Compiled method with {d} bytes of native code\n", .{code_size});
         return compiled;
     }
 
@@ -1153,7 +1463,11 @@ pub const JIT = struct {
     // Code Generation Helpers
     // ========================================================================
 
-    /// Prologue: Set up frame, cache interpreter pointer
+    /// Prologue: Set up frame, cache interpreter pointer and stack state
+    /// Register allocation:
+    ///   rbx = interpreter pointer (callee-saved)
+    ///   r12 = Smalltalk stack pointer (sp) - cached, write back at safepoints
+    ///   r13 = stack base address (interpreter.stack.ptr)
     fn emitPrologue(self: *JIT, buf: *CodeBuffer) void {
         _ = self;
         // push rbp
@@ -1162,17 +1476,29 @@ pub const JIT = struct {
         buf.movRegReg(.rbp, .rsp);
         // push rbx (callee-saved, will hold interpreter ptr)
         buf.pushReg(.rbx);
-        // push r12 (callee-saved)
+        // push r12 (callee-saved, will hold sp)
         buf.pushReg(.r12);
-        // push r13 (callee-saved)
+        // push r13 (callee-saved, will hold stack base)
         buf.pushReg(.r13);
-        // mov rbx, rdi (cache interpreter pointer in rbx)
-        buf.movRegReg(.rbx, .rdi);
+        // Cache interpreter pointer in rbx
+        // Windows x64: first arg in RCX, System V AMD64: first arg in RDI
+        if (builtin.os.tag == .windows) {
+            buf.movRegReg(.rbx, .rcx);
+        } else {
+            buf.movRegReg(.rbx, .rdi);
+        }
+        // Cache sp in r12: mov r12, [rbx + SP_OFFSET]
+        buf.movRegMem(.r12, .rbx, INTERP_SP_OFFSET);
+        // Cache stack base in r13: lea r13, [rbx + STACK_OFFSET]
+        buf.movRegReg(.r13, .rbx);
+        buf.addRegImm32(.r13, INTERP_STACK_OFFSET);
     }
 
-    /// Epilogue: Restore and return
+    /// Epilogue: Write back sp and restore registers
     fn emitEpilogue(self: *JIT, buf: *CodeBuffer) void {
         _ = self;
+        // Write back sp: mov [rbx + SP_OFFSET], r12
+        buf.movMemReg(.rbx, INTERP_SP_OFFSET, .r12);
         // Return nil if we fall through
         buf.movRegImm64(.rax, Value.nil.bits);
         // pop r13
@@ -1187,164 +1513,145 @@ pub const JIT = struct {
         buf.ret();
     }
 
-    /// Push nil onto Smalltalk stack
+    /// Push nil onto Smalltalk stack (uses cached r12=sp, r13=stack base)
     fn emitPushNil(self: *JIT, buf: *CodeBuffer) void {
         _ = self;
-        // Load sp from interpreter: mov rax, [rbx + SP_OFFSET]
-        buf.movRegMem(.rax, .rbx, INTERP_SP_OFFSET);
-        // Load stack base address: lea rcx, [rbx + STACK_OFFSET]
-        buf.movRegReg(.rcx, .rbx);
-        buf.addRegImm32(.rcx, INTERP_STACK_OFFSET);
-        // Store nil at stack[sp]: mov [rcx + rax*8], nil
-        buf.movRegImm64(.rdx, Value.nil.bits);
-        // mov [rcx + rax*8], rdx - need SIB encoding
-        // Simplified: calculate address manually
-        // rax = sp (index), need stack[sp] = stack_base + sp * 8
-        buf.rex(true, false, false, false);
-        buf.emit8(0x89); // mov [rcx + rax*8], rdx
-        buf.emit8(0x14); // ModRM: [SIB]
-        buf.emit8(0xC1); // SIB: scale=8, index=rax, base=rcx
-        // Increment sp: inc qword [rbx + SP_OFFSET]
-        buf.movRegMem(.rax, .rbx, INTERP_SP_OFFSET);
-        buf.addRegImm32(.rax, 1);
-        buf.movMemReg(.rbx, INTERP_SP_OFFSET, .rax);
+        // Load nil value
+        buf.movRegImm64(.rax, Value.nil.bits);
+        // Store at stack[r12]: mov [r13 + r12*8], rax
+        // NOTE: r13 base with mod=00 requires disp32, so use mod=01 with disp8=0
+        buf.rex(true, false, true, true); // REX.W + REX.X (r12) + REX.B (r13)
+        buf.emit8(0x89); // mov [r13 + r12*8 + 0], rax
+        buf.emit8(0x44); // ModRM: mod=01, [SIB + disp8]
+        buf.emit8(0xE5); // SIB: scale=8, index=r12, base=r13
+        buf.emit8(0x00); // disp8 = 0
+        // Increment sp: r12 += 1
+        buf.addRegImm32(.r12, 1);
     }
 
-    /// Push true onto Smalltalk stack
+    /// Push an immediate Value onto Smalltalk stack (uses cached r12=sp, r13=stack base)
+    fn emitPushImmediate(self: *JIT, buf: *CodeBuffer, value: Value) void {
+        _ = self;
+        // Load immediate value
+        buf.movRegImm64(.rax, value.bits);
+        // Store at stack[r12]: mov [r13 + r12*8 + 0], rax
+        buf.rex(true, false, true, true); // REX.W + REX.X (r12) + REX.B (r13)
+        buf.emit8(0x89);
+        buf.emit8(0x44); // ModRM: mod=01, [SIB + disp8]
+        buf.emit8(0xE5); // SIB: scale=8, index=r12, base=r13
+        buf.emit8(0x00); // disp8 = 0
+        // Increment sp: r12 += 1
+        buf.addRegImm32(.r12, 1);
+    }
+
+    /// Push true onto Smalltalk stack (uses cached r12=sp, r13=stack base)
     fn emitPushTrue(self: *JIT, buf: *CodeBuffer) void {
         _ = self;
-        buf.movRegMem(.rax, .rbx, INTERP_SP_OFFSET);
-        buf.movRegReg(.rcx, .rbx);
-        buf.addRegImm32(.rcx, INTERP_STACK_OFFSET);
-        buf.movRegImm64(.rdx, Value.@"true".bits);
-        buf.rex(true, false, false, false);
+        buf.movRegImm64(.rax, Value.@"true".bits);
+        // Store at stack[r12]: mov [r13 + r12*8 + 0], rax
+        buf.rex(true, false, true, true);
         buf.emit8(0x89);
-        buf.emit8(0x14);
-        buf.emit8(0xC1);
-        buf.movRegMem(.rax, .rbx, INTERP_SP_OFFSET);
-        buf.addRegImm32(.rax, 1);
-        buf.movMemReg(.rbx, INTERP_SP_OFFSET, .rax);
+        buf.emit8(0x44); // mod=01, [SIB + disp8]
+        buf.emit8(0xE5);
+        buf.emit8(0x00); // disp8 = 0
+        buf.addRegImm32(.r12, 1);
     }
 
-    /// Push false onto Smalltalk stack
+    /// Push false onto Smalltalk stack (uses cached r12=sp, r13=stack base)
     fn emitPushFalse(self: *JIT, buf: *CodeBuffer) void {
         _ = self;
-        buf.movRegMem(.rax, .rbx, INTERP_SP_OFFSET);
-        buf.movRegReg(.rcx, .rbx);
-        buf.addRegImm32(.rcx, INTERP_STACK_OFFSET);
-        buf.movRegImm64(.rdx, Value.@"false".bits);
-        buf.rex(true, false, false, false);
+        buf.movRegImm64(.rax, Value.@"false".bits);
+        // Store at stack[r12]: mov [r13 + r12*8 + 0], rax
+        buf.rex(true, false, true, true);
         buf.emit8(0x89);
-        buf.emit8(0x14);
-        buf.emit8(0xC1);
-        buf.movRegMem(.rax, .rbx, INTERP_SP_OFFSET);
-        buf.addRegImm32(.rax, 1);
-        buf.movMemReg(.rbx, INTERP_SP_OFFSET, .rax);
+        buf.emit8(0x44); // mod=01, [SIB + disp8]
+        buf.emit8(0xE5);
+        buf.emit8(0x00); // disp8 = 0
+        buf.addRegImm32(.r12, 1);
     }
 
-    /// Push self (receiver) onto stack
+    /// Push self (receiver) onto stack (uses cached r12=sp, r13=stack base)
     fn emitPushSelf(self: *JIT, buf: *CodeBuffer) void {
         _ = self;
         // Load receiver from interpreter
-        buf.movRegMem(.rdx, .rbx, INTERP_RECEIVER_OFFSET);
-        // Load sp
-        buf.movRegMem(.rax, .rbx, INTERP_SP_OFFSET);
-        // Stack base
-        buf.movRegReg(.rcx, .rbx);
-        buf.addRegImm32(.rcx, INTERP_STACK_OFFSET);
-        // Store receiver at stack[sp]
-        buf.rex(true, false, false, false);
+        buf.movRegMem(.rax, .rbx, INTERP_RECEIVER_OFFSET);
+        // Store at stack[r12]: mov [r13 + r12*8 + 0], rax
+        buf.rex(true, false, true, true);
         buf.emit8(0x89);
-        buf.emit8(0x14);
-        buf.emit8(0xC1);
-        // Increment sp
-        buf.movRegMem(.rax, .rbx, INTERP_SP_OFFSET);
-        buf.addRegImm32(.rax, 1);
-        buf.movMemReg(.rbx, INTERP_SP_OFFSET, .rax);
+        buf.emit8(0x44); // mod=01, [SIB + disp8]
+        buf.emit8(0xE5);
+        buf.emit8(0x00); // disp8 = 0
+        buf.addRegImm32(.r12, 1);
     }
 
-    /// Push a literal value
+    /// Push a literal value (uses cached r12=sp, r13=stack base)
     fn emitPushLiteral(self: *JIT, buf: *CodeBuffer, method: *CompiledMethod, index: u8) void {
         _ = self;
         const literals = method.getLiterals();
         if (index < literals.len) {
             const lit = literals[index];
-            // Load sp
-            buf.movRegMem(.rax, .rbx, INTERP_SP_OFFSET);
-            // Stack base
-            buf.movRegReg(.rcx, .rbx);
-            buf.addRegImm32(.rcx, INTERP_STACK_OFFSET);
-            // Load literal value
-            buf.movRegImm64(.rdx, lit.bits);
-            // Store at stack[sp]
-            buf.rex(true, false, false, false);
+            buf.movRegImm64(.rax, lit.bits);
+            // Store at stack[r12]: mov [r13 + r12*8 + 0], rax
+            buf.rex(true, false, true, true);
             buf.emit8(0x89);
-            buf.emit8(0x14);
-            buf.emit8(0xC1);
-            // Increment sp
-            buf.movRegMem(.rax, .rbx, INTERP_SP_OFFSET);
-            buf.addRegImm32(.rax, 1);
-            buf.movMemReg(.rbx, INTERP_SP_OFFSET, .rax);
+            buf.emit8(0x44); // mod=01, [SIB + disp8]
+            buf.emit8(0xE5);
+            buf.emit8(0x00); // disp8 = 0
+            buf.addRegImm32(.r12, 1);
         }
     }
 
-    /// Push a temporary variable
+    /// Push a temporary variable (uses cached r12=sp, r13=stack base)
     fn emitPushTemporary(self: *JIT, buf: *CodeBuffer, index: u8) void {
         _ = self;
         // temp_base + 1 + index is the stack position
-        // Load temp_base
+        // Load temp_base into rax
         buf.movRegMem(.rax, .rbx, INTERP_TEMP_BASE_OFFSET);
         // Add 1 + index
         buf.addRegImm32(.rax, 1 + @as(i32, index));
-        // Stack base
-        buf.movRegReg(.rcx, .rbx);
-        buf.addRegImm32(.rcx, INTERP_STACK_OFFSET);
-        // Load value from stack[temp_base + 1 + index]
-        buf.rex(true, false, false, false);
-        buf.emit8(0x8B); // mov rdx, [rcx + rax*8]
-        buf.emit8(0x14);
-        buf.emit8(0xC1);
-        // Now push this value
-        buf.movRegMem(.rax, .rbx, INTERP_SP_OFFSET);
-        buf.rex(true, false, false, false);
-        buf.emit8(0x89); // mov [rcx + rax*8], rdx
-        buf.emit8(0x14);
-        buf.emit8(0xC1);
-        // Increment sp
-        buf.movRegMem(.rax, .rbx, INTERP_SP_OFFSET);
-        buf.addRegImm32(.rax, 1);
-        buf.movMemReg(.rbx, INTERP_SP_OFFSET, .rax);
+        // Load value from stack[temp_base + 1 + index]: mov rcx, [r13 + rax*8 + 0]
+        buf.rex(true, false, false, true); // REX.W + REX.B (r13)
+        buf.emit8(0x8B); // mov rcx, [r13 + rax*8 + 0]
+        buf.emit8(0x4C); // mod=01, [SIB + disp8]
+        buf.emit8(0xC5); // SIB: scale=8, index=rax, base=r13
+        buf.emit8(0x00); // disp8 = 0
+        // Push this value at stack[r12]: mov [r13 + r12*8 + 0], rcx
+        buf.rex(true, false, true, true);
+        buf.emit8(0x89);
+        buf.emit8(0x4C); // mod=01, [SIB + disp8]
+        buf.emit8(0xE5);
+        buf.emit8(0x00); // disp8 = 0
+        buf.addRegImm32(.r12, 1);
     }
 
-    /// Push a receiver instance variable (simplified)
+    /// Push a receiver instance variable (simplified - just pushes nil for now)
     fn emitPushReceiverVariable(self: *JIT, buf: *CodeBuffer, index: u8) void {
-        // This is complex - for now just push nil
         _ = index;
         self.emitPushNil(buf);
     }
 
-    /// Store top of stack to temporary (don't pop)
+    /// Store top of stack to temporary (don't pop) (uses cached r12=sp, r13=stack base)
     fn emitStoreTemporary(self: *JIT, buf: *CodeBuffer, index: u8) void {
         _ = self;
-        // Load sp - 1 (top of stack)
-        buf.movRegMem(.rax, .rbx, INTERP_SP_OFFSET);
-        buf.subRegImm32(.rax, 1);
-        // Stack base
-        buf.movRegReg(.rcx, .rbx);
-        buf.addRegImm32(.rcx, INTERP_STACK_OFFSET);
-        // Load TOS value
-        buf.rex(true, false, false, false);
-        buf.emit8(0x8B); // mov rdx, [rcx + rax*8]
-        buf.emit8(0x14);
-        buf.emit8(0xC1);
+        // Load TOS (at r12-1): mov rax, [r13 + (r12-1)*8]
+        // First compute r12-1 in rcx
+        buf.movRegReg(.rcx, .r12);
+        buf.subRegImm32(.rcx, 1);
+        // Load TOS value: mov rdx, [r13 + rcx*8 + 0]
+        buf.rex(true, false, false, true);
+        buf.emit8(0x8B);
+        buf.emit8(0x54); // mod=01, [SIB + disp8]
+        buf.emit8(0xCD); // SIB: scale=8, index=rcx, base=r13
+        buf.emit8(0x00); // disp8 = 0
         // Calculate temp position: temp_base + 1 + index
         buf.movRegMem(.rax, .rbx, INTERP_TEMP_BASE_OFFSET);
         buf.addRegImm32(.rax, 1 + @as(i32, index));
-        // Store to temp
-        buf.rex(true, false, false, false);
-        buf.emit8(0x89); // mov [rcx + rax*8], rdx
-        buf.emit8(0x14);
-        buf.emit8(0xC1);
+        // Store to temp: mov [r13 + rax*8 + 0], rdx
+        buf.rex(true, false, false, true);
+        buf.emit8(0x89);
+        buf.emit8(0x54); // mod=01, [SIB + disp8]
+        buf.emit8(0xC5);
+        buf.emit8(0x00); // disp8 = 0
     }
 
     /// Pop and store to temporary
@@ -1353,71 +1660,61 @@ pub const JIT = struct {
         self.emitPop(buf);
     }
 
-    /// Pop top of stack
+    /// Pop top of stack (uses cached r12)
     fn emitPop(self: *JIT, buf: *CodeBuffer) void {
         _ = self;
-        // Decrement sp
-        buf.movRegMem(.rax, .rbx, INTERP_SP_OFFSET);
-        buf.subRegImm32(.rax, 1);
-        buf.movMemReg(.rbx, INTERP_SP_OFFSET, .rax);
+        // Decrement sp: r12 -= 1
+        buf.subRegImm32(.r12, 1);
     }
 
-    /// Pop top of stack into rax (for comparisons)
+    /// Pop top of stack into rax (for comparisons) (uses cached r12=sp, r13=stack base)
     fn emitPopToRax(self: *JIT, buf: *CodeBuffer) void {
         _ = self;
-        // Decrement sp and load value
-        buf.movRegMem(.rax, .rbx, INTERP_SP_OFFSET);
-        buf.subRegImm32(.rax, 1);
-        buf.movMemReg(.rbx, INTERP_SP_OFFSET, .rax);
-        // Load stack[sp] into rax
-        buf.movRegReg(.rcx, .rbx);
-        buf.addRegImm32(.rcx, INTERP_STACK_OFFSET);
-        // mov rax, [rcx + rax*8]
-        buf.rex(true, false, false, false);
-        buf.emit8(0x8B); // mov
-        buf.emit8(0x04); // ModRM: [rcx + rax*8]
-        buf.emit8(0xC1); // SIB: scale=8 (3<<6), index=rax (0<<3), base=rcx (1)
+        // Decrement sp
+        buf.subRegImm32(.r12, 1);
+        // Load stack[r12] into rax: mov rax, [r13 + r12*8 + 0]
+        buf.rex(true, false, true, true);
+        buf.emit8(0x8B);
+        buf.emit8(0x44); // mod=01, [SIB + disp8]
+        buf.emit8(0xE5);
+        buf.emit8(0x00); // disp8 = 0
     }
 
-    /// Duplicate top of stack
+    /// Duplicate top of stack (uses cached r12=sp, r13=stack base)
     fn emitDup(self: *JIT, buf: *CodeBuffer) void {
         _ = self;
-        // Load sp - 1
-        buf.movRegMem(.rax, .rbx, INTERP_SP_OFFSET);
+        // Load TOS (at r12-1) into rax
+        buf.movRegReg(.rax, .r12);
         buf.subRegImm32(.rax, 1);
-        // Stack base
-        buf.movRegReg(.rcx, .rbx);
-        buf.addRegImm32(.rcx, INTERP_STACK_OFFSET);
-        // Load TOS
-        buf.rex(true, false, false, false);
+        // mov rcx, [r13 + rax*8 + 0]
+        buf.rex(true, false, false, true);
         buf.emit8(0x8B);
-        buf.emit8(0x14);
-        buf.emit8(0xC1);
-        // Store at sp
-        buf.movRegMem(.rax, .rbx, INTERP_SP_OFFSET);
-        buf.rex(true, false, false, false);
+        buf.emit8(0x4C); // mod=01, [SIB + disp8]
+        buf.emit8(0xC5);
+        buf.emit8(0x00); // disp8 = 0
+        // Store at stack[r12]: mov [r13 + r12*8 + 0], rcx
+        buf.rex(true, false, true, true);
         buf.emit8(0x89);
-        buf.emit8(0x14);
-        buf.emit8(0xC1);
-        // Increment sp
-        buf.addRegImm32(.rax, 1);
-        buf.movMemReg(.rbx, INTERP_SP_OFFSET, .rax);
+        buf.emit8(0x4C); // mod=01, [SIB + disp8]
+        buf.emit8(0xE5);
+        buf.emit8(0x00); // disp8 = 0
+        buf.addRegImm32(.r12, 1);
     }
 
-    /// Return top of stack
+    /// Return top of stack (uses cached r12=sp, r13=stack base)
     fn emitReturnTop(self: *JIT, buf: *CodeBuffer) void {
         _ = self;
-        // Load sp - 1
-        buf.movRegMem(.rax, .rbx, INTERP_SP_OFFSET);
+        // Load TOS (at r12-1) into rax: mov rax, [r13 + (r12-1)*8 + 0]
+        buf.movRegReg(.rax, .r12);
         buf.subRegImm32(.rax, 1);
-        // Stack base
-        buf.movRegReg(.rcx, .rbx);
-        buf.addRegImm32(.rcx, INTERP_STACK_OFFSET);
-        // Load TOS into rax (return value)
-        buf.rex(true, false, false, false);
-        buf.emit8(0x8B); // mov rax, [rcx + rax*8]
-        buf.emit8(0x04);
-        buf.emit8(0xC1);
+        // mov rax, [r13 + rax*8 + 0]
+        buf.rex(true, false, false, true);
+        buf.emit8(0x8B);
+        buf.emit8(0x44); // mod=01, [SIB + disp8]
+        buf.emit8(0xC5);
+        buf.emit8(0x00); // disp8 = 0
+        // Write back sp: mov [rbx + SP_OFFSET], r12
+        buf.movMemReg(.rbx, INTERP_SP_OFFSET, .r12);
         // Epilogue
         buf.popReg(.r13);
         buf.popReg(.r12);
@@ -1426,11 +1723,13 @@ pub const JIT = struct {
         buf.ret();
     }
 
-    /// Return self
+    /// Return self (uses cached r12 for writeback)
     fn emitReturnSelf(self: *JIT, buf: *CodeBuffer) void {
         _ = self;
         // Load receiver into rax
         buf.movRegMem(.rax, .rbx, INTERP_RECEIVER_OFFSET);
+        // Write back sp: mov [rbx + SP_OFFSET], r12
+        buf.movMemReg(.rbx, INTERP_SP_OFFSET, .r12);
         // Epilogue
         buf.popReg(.r13);
         buf.popReg(.r12);
@@ -1439,10 +1738,12 @@ pub const JIT = struct {
         buf.ret();
     }
 
-    /// Return nil
+    /// Return nil (uses cached r12 for writeback)
     fn emitReturnNil(self: *JIT, buf: *CodeBuffer) void {
         _ = self;
         buf.movRegImm64(.rax, Value.nil.bits);
+        // Write back sp: mov [rbx + SP_OFFSET], r12
+        buf.movMemReg(.rbx, INTERP_SP_OFFSET, .r12);
         buf.popReg(.r13);
         buf.popReg(.r12);
         buf.popReg(.rbx);
@@ -1450,7 +1751,7 @@ pub const JIT = struct {
         buf.ret();
     }
 
-    /// Emit a message send
+    /// Emit a message send (uses cached r12=sp, r13=stack base)
     /// This generates code to call jit_runtime_send_with_cache and push the result
     fn emitSend(
         self: *JIT,
@@ -1462,56 +1763,82 @@ pub const JIT = struct {
         is_super: bool,
     ) void {
         _ = self;
-        // System V AMD64 calling convention:
-        // rdi = arg1 (interpreter pointer, already in rbx)
-        // rsi = arg2 (callsite cache pointer)
-        // rdx = arg3 (selector_index)
-        // rcx = arg4 (num_args)
-        // r8  = arg5 (bytecode_offset)
-        // r9  = arg6 (is_super flag)
-
-        // Move interpreter pointer to rdi (first arg)
-        buf.movRegReg(.rdi, .rbx);
-
-        // Move callsite cache pointer to rsi (second arg)
-        buf.movRegImm64(.rsi, @intFromPtr(cache));
-
-        // Move selector_index to rdx (third arg)
-        buf.movRegImm64(.rdx, @as(u64, selector_idx));
-
-        // Move num_args to rcx (fourth arg)
-        buf.movRegImm64(.rcx, @as(u64, num_args));
-
-        // Move bytecode_offset to r8 (fifth arg)
-        buf.movRegImm64(.r8, @as(u64, bytecode_offset));
-
-        // Move is_super flag to r9 (sixth arg)
-        const super_flag: u64 = if (is_super) 1 else 0;
-        buf.movRegImm64(.r9, super_flag);
-
-        // Load address of jit_runtime_send into r10 (scratch register)
         const send_fn_ptr = @intFromPtr(&jit_runtime_send_with_cache);
-        buf.movRegImm64(.r10, send_fn_ptr);
+        const super_flag: u64 = if (is_super) 1 else 0;
 
-        // Call r10
-        buf.callReg(.r10);
+        // SAFEPOINT: Write back r12 to interpreter.sp before call
+        buf.movMemReg(.rbx, INTERP_SP_OFFSET, .r12);
 
-        // Result is in rax - push it onto Smalltalk stack
-        // Load sp
-        buf.movRegMem(.rcx, .rbx, INTERP_SP_OFFSET);
-        // Stack base
-        buf.movRegReg(.rdx, .rbx);
-        buf.addRegImm32(.rdx, INTERP_STACK_OFFSET);
-        // Store result at stack[sp]
-        // mov [rdx + rcx*8], rax
-        buf.rex(true, false, false, false);
-        buf.emit8(0x89); // mov [rdx + rcx*8], rax
-        buf.emit8(0x04);
-        buf.emit8(0xCA); // SIB: scale=8, index=rcx, base=rdx
-        // Increment sp
-        buf.movRegMem(.rcx, .rbx, INTERP_SP_OFFSET);
-        buf.addRegImm32(.rcx, 1);
-        buf.movMemReg(.rbx, INTERP_SP_OFFSET, .rcx);
+        if (builtin.os.tag == .windows) {
+            // Windows x64 calling convention:
+            // rcx = arg1, rdx = arg2, r8 = arg3, r9 = arg4
+            // args 5+ go on stack, plus 32 bytes shadow space before call
+            // Note: 56 = 32 shadow + 16 args + 8 alignment (prologue leaves RSP 8-aligned)
+
+            // Allocate stack space: 32 bytes shadow + 16 bytes for 2 stack args + 8 alignment
+            buf.subRegImm32(.rsp, 56);
+
+            // Stack args start at [rsp+32] after shadow space
+            // Push arg6 (is_super) to stack at [rsp+40]
+            buf.movRegImm64(.rax, super_flag);
+            buf.rex(true, false, false, false);
+            buf.emit8(0x89);
+            buf.emit8(0x44);
+            buf.emit8(0x24);
+            buf.emit8(40);
+
+            // Push arg5 (bytecode_offset) to stack at [rsp+32]
+            buf.movRegImm64(.rax, @as(u64, bytecode_offset));
+            buf.rex(true, false, false, false);
+            buf.emit8(0x89);
+            buf.emit8(0x44);
+            buf.emit8(0x24);
+            buf.emit8(32);
+
+            // Move arg4 (num_args) to r9
+            buf.movRegImm64(.r9, @as(u64, num_args));
+
+            // Move arg3 (selector_index) to r8
+            buf.movRegImm64(.r8, @as(u64, selector_idx));
+
+            // Move arg2 (callsite cache pointer) to rdx
+            buf.movRegImm64(.rdx, @intFromPtr(cache));
+
+            // Move arg1 (interpreter pointer) to rcx
+            buf.movRegReg(.rcx, .rbx);
+
+            // Load function address and call
+            buf.movRegImm64(.r10, send_fn_ptr);
+            buf.callReg(.r10);
+
+            // Restore stack
+            buf.addRegImm32(.rsp, 56);
+        } else {
+            // System V AMD64 calling convention:
+            // rdi = arg1, rsi = arg2, rdx = arg3, rcx = arg4, r8 = arg5, r9 = arg6
+
+            buf.movRegReg(.rdi, .rbx);
+            buf.movRegImm64(.rsi, @intFromPtr(cache));
+            buf.movRegImm64(.rdx, @as(u64, selector_idx));
+            buf.movRegImm64(.rcx, @as(u64, num_args));
+            buf.movRegImm64(.r8, @as(u64, bytecode_offset));
+            buf.movRegImm64(.r9, super_flag);
+            buf.movRegImm64(.r10, send_fn_ptr);
+            buf.callReg(.r10);
+        }
+
+        // Reload r12 from interpreter.sp (runtime may have modified it)
+        buf.movRegMem(.r12, .rbx, INTERP_SP_OFFSET);
+
+        // Result is in rax - push it onto Smalltalk stack using cached regs
+        // Store at stack[r12]: mov [r13 + r12*8 + 0], rax
+        buf.rex(true, false, true, true);
+        buf.emit8(0x89);
+        buf.emit8(0x44); // mod=01, [SIB + disp8]
+        buf.emit8(0xE5);
+        buf.emit8(0x00); // disp8 = 0
+        // Increment sp: r12 += 1
+        buf.addRegImm32(.r12, 1);
     }
 
     /// Emit a super send
@@ -1524,6 +1851,449 @@ pub const JIT = struct {
         cache: *CallSiteCache,
     ) void {
         self.emitSend(buf, selector_idx, num_args, bytecode_offset, cache, true);
+    }
+
+    /// Emit code to create a BlockClosure (uses cached r12=sp, r13=stack base)
+    fn emitPushClosure(
+        self: *JIT,
+        buf: *CodeBuffer,
+        block_num_args: u8,
+        block_num_temps: u8,
+        block_start_ip: usize,
+    ) void {
+        _ = self;
+        const push_closure_fn_ptr = @intFromPtr(&jit_runtime_push_closure);
+
+        // SAFEPOINT: Write back r12 to interpreter.sp before call
+        buf.movMemReg(.rbx, INTERP_SP_OFFSET, .r12);
+
+        if (builtin.os.tag == .windows) {
+            // Windows x64: rcx, rdx, r8, r9
+            // Allocate 40 bytes: 32 shadow + 8 alignment (prologue leaves RSP 8-aligned)
+            buf.subRegImm32(.rsp, 40);
+
+            // arg4 (block_start_ip) to r9
+            buf.movRegImm64(.r9, @as(u64, block_start_ip));
+
+            // arg3 (block_num_temps) to r8
+            buf.movRegImm64(.r8, @as(u64, block_num_temps));
+
+            // arg2 (block_num_args) to rdx
+            buf.movRegImm64(.rdx, @as(u64, block_num_args));
+
+            // arg1 (interpreter pointer) to rcx
+            buf.movRegReg(.rcx, .rbx);
+
+            // Load function address and call
+            buf.movRegImm64(.r10, push_closure_fn_ptr);
+            buf.callReg(.r10);
+
+            // Restore stack
+            buf.addRegImm32(.rsp, 40);
+        } else {
+            // System V AMD64: rdi, rsi, rdx, rcx
+            buf.movRegReg(.rdi, .rbx);
+            buf.movRegImm64(.rsi, @as(u64, block_num_args));
+            buf.movRegImm64(.rdx, @as(u64, block_num_temps));
+            buf.movRegImm64(.rcx, @as(u64, block_start_ip));
+            buf.movRegImm64(.r10, push_closure_fn_ptr);
+            buf.callReg(.r10);
+        }
+
+        // Reload r12 from interpreter.sp (runtime may have modified it)
+        buf.movRegMem(.r12, .rbx, INTERP_SP_OFFSET);
+
+        // Result (closure Value) is in rax - push onto stack
+        // Store at stack[r12]: mov [r13 + r12*8 + 0], rax
+        buf.rex(true, false, true, true);
+        buf.emit8(0x89);
+        buf.emit8(0x44); // mod=01, [SIB + disp8]
+        buf.emit8(0xE5);
+        buf.emit8(0x00); // disp8 = 0
+        // Increment sp: r12 += 1
+        buf.addRegImm32(.r12, 1);
+    }
+
+    /// Emit code for specialized binary sends (uses cached r12=sp, r13=stack base)
+    fn emitSpecialBinary(
+        self: *JIT,
+        buf: *CodeBuffer,
+        op: SpecialBinaryOp,
+    ) void {
+        _ = self;
+        const special_binary_fn_ptr = @intFromPtr(&jit_runtime_special_binary);
+
+        // SAFEPOINT: Write back r12 to interpreter.sp before call
+        buf.movMemReg(.rbx, INTERP_SP_OFFSET, .r12);
+
+        if (builtin.os.tag == .windows) {
+            // Windows x64: rcx, rdx
+            // Allocate 40 bytes: 32 shadow + 8 alignment (prologue leaves RSP 8-aligned)
+            buf.subRegImm32(.rsp, 40);
+
+            // arg2 (op) to rdx
+            buf.movRegImm64(.rdx, @as(u64, @intFromEnum(op)));
+
+            // arg1 (interpreter pointer) to rcx
+            buf.movRegReg(.rcx, .rbx);
+
+            // Load function address and call
+            buf.movRegImm64(.r10, special_binary_fn_ptr);
+            buf.callReg(.r10);
+
+            // Restore stack
+            buf.addRegImm32(.rsp, 40);
+        } else {
+            // System V AMD64: rdi, rsi
+            buf.movRegReg(.rdi, .rbx);
+            buf.movRegImm64(.rsi, @as(u64, @intFromEnum(op)));
+            buf.movRegImm64(.r10, special_binary_fn_ptr);
+            buf.callReg(.r10);
+        }
+
+        // Reload r12 from interpreter.sp (runtime may have modified it)
+        buf.movRegMem(.r12, .rbx, INTERP_SP_OFFSET);
+
+        // Result is in rax - push onto stack
+        // Store at stack[r12]: mov [r13 + r12*8 + 0], rax
+        buf.rex(true, false, true, true);
+        buf.emit8(0x89);
+        buf.emit8(0x44); // mod=01, [SIB + disp8]
+        buf.emit8(0xE5);
+        buf.emit8(0x00); // disp8 = 0
+        // Increment sp: r12 += 1
+        buf.addRegImm32(.r12, 1);
+    }
+
+    /// Emit inline code for SmallInteger comparisons with fallback to runtime
+    /// This is the fast path for Phase 2.2
+    fn emitComparisonInline(
+        self: *JIT,
+        buf: *CodeBuffer,
+        op: SpecialBinaryOp,
+    ) void {
+        _ = self;
+        const special_binary_fn_ptr = @intFromPtr(&jit_runtime_special_binary);
+
+        // SmallInteger tag constants
+        const SMALLINT_TAG: u8 = 1;
+        const TAG_MASK: u8 = 7;
+        const TRUE_BITS: u64 = Value.@"true".bits;
+        const FALSE_BITS: u64 = Value.@"false".bits;
+
+        // Load arg (TOS) into rax: mov rax, [r13 + r12*8 - 8]
+        buf.rex(true, false, true, true); // REX.W + REX.X (r12) + REX.B (r13)
+        buf.emit8(0x8B); // mov
+        buf.emit8(0x44); // ModRM: mod=01, reg=rax, rm=SIB
+        buf.emit8(0xE5); // SIB: scale=8, index=r12, base=r13
+        buf.emit8(0xF8); // disp8 = -8
+
+        // Load receiver (TOS-1) into rcx: mov rcx, [r13 + r12*8 - 16]
+        buf.rex(true, false, true, true);
+        buf.emit8(0x8B);
+        buf.emit8(0x4C); // ModRM: mod=01, reg=rcx, rm=SIB
+        buf.emit8(0xE5); // SIB
+        buf.emit8(0xF0); // disp8 = -16
+
+        // Check arg is SmallInt: mov rdx, rax; and rdx, 7; cmp rdx, 1; jne slow_path
+        buf.movRegReg(.rdx, .rax);
+        buf.andRegImm8(.rdx, TAG_MASK);
+        buf.cmpRegImm8(.rdx, SMALLINT_TAG);
+        // jne slow_path (will patch later)
+        buf.emit8(0x0F);
+        buf.emit8(0x85);
+        const patch_jne1 = buf.currentPos();
+        buf.emit32(0); // placeholder
+
+        // Check receiver is SmallInt: mov rdx, rcx; and rdx, 7; cmp rdx, 1; jne slow_path
+        buf.movRegReg(.rdx, .rcx);
+        buf.andRegImm8(.rdx, TAG_MASK);
+        buf.cmpRegImm8(.rdx, SMALLINT_TAG);
+        // jne slow_path
+        buf.emit8(0x0F);
+        buf.emit8(0x85);
+        const patch_jne2 = buf.currentPos();
+        buf.emit32(0); // placeholder
+
+        // Both are SmallInts - compare directly (signed comparison works on tagged values)
+        // cmp rcx, rax (receiver vs arg)
+        buf.cmpRegReg(.rcx, .rax);
+
+        // Set result based on comparison type
+        // Strategy: load false, then conditionally jump over the "load true" based on condition
+        buf.movRegImm64(.rax, FALSE_BITS);
+
+        // Emit conditional jump to skip loading true (jump if condition NOT met)
+        // For <= : if rcx <= rax, result is true, so jg (jump if greater) skips true
+        // For <  : if rcx < rax, result is true, so jge skips true
+        // For >= : if rcx >= rax, result is true, so jl skips true
+        // For >  : if rcx > rax, result is true, so jle skips true
+        // For =  : if rcx == rax, result is true, so jne skips true
+        // For ~= : if rcx != rax, result is true, so je skips true
+        const skip_true_offset: i32 = 10; // movabs rax, imm64 = 10 bytes
+        switch (op) {
+            .less_or_equal => buf.jgRel32(skip_true_offset),
+            .less_than => buf.jgeRel32(skip_true_offset),
+            .greater_or_equal => buf.jlRel32(skip_true_offset),
+            .greater_than => buf.jleRel32(skip_true_offset),
+            .equal => buf.jneRel32(skip_true_offset),
+            .not_equal => buf.jeRel32(skip_true_offset),
+            else => unreachable,
+        }
+
+        // Load true (condition was met)
+        buf.movRegImm64(.rax, TRUE_BITS);
+
+        // Store result and adjust sp: result goes at stack[sp-2], sp becomes sp-1
+        // mov [r13 + r12*8 - 16], rax (store at receiver position)
+        buf.rex(true, false, true, true);
+        buf.emit8(0x89); // mov r/m64, r64
+        buf.emit8(0x44); // ModRM: mod=01, reg=rax, rm=SIB
+        buf.emit8(0xE5); // SIB
+        buf.emit8(0xF0); // disp8 = -16
+
+        // sub r12, 1 (sp--)
+        buf.subRegImm32(.r12, 1);
+
+        // jmp to end
+        buf.emit8(0xE9);
+        const patch_jmp_end = buf.currentPos();
+        buf.emit32(0); // placeholder
+
+        // slow_path: patch the jne jumps
+        const slow_path_pos = buf.currentPos();
+        const rel_to_slow1: i32 = @intCast(@as(isize, @intCast(slow_path_pos)) - @as(isize, @intCast(patch_jne1)) - 4);
+        const rel_to_slow2: i32 = @intCast(@as(isize, @intCast(slow_path_pos)) - @as(isize, @intCast(patch_jne2)) - 4);
+        buf.patchRel32(patch_jne1, rel_to_slow1);
+        buf.patchRel32(patch_jne2, rel_to_slow2);
+
+        // Slow path: call jit_runtime_special_binary
+        // SAFEPOINT: Write back r12 to interpreter.sp before call
+        buf.movMemReg(.rbx, INTERP_SP_OFFSET, .r12);
+
+        if (builtin.os.tag == .windows) {
+            buf.subRegImm32(.rsp, 40);
+            buf.movRegImm64(.rdx, @as(u64, @intFromEnum(op)));
+            buf.movRegReg(.rcx, .rbx);
+            buf.movRegImm64(.r10, special_binary_fn_ptr);
+            buf.callReg(.r10);
+            buf.addRegImm32(.rsp, 40);
+        } else {
+            buf.movRegReg(.rdi, .rbx);
+            buf.movRegImm64(.rsi, @as(u64, @intFromEnum(op)));
+            buf.movRegImm64(.r10, special_binary_fn_ptr);
+            buf.callReg(.r10);
+        }
+
+        // Reload r12 and push result
+        buf.movRegMem(.r12, .rbx, INTERP_SP_OFFSET);
+        buf.rex(true, false, true, true);
+        buf.emit8(0x89);
+        buf.emit8(0x44);
+        buf.emit8(0xE5);
+        buf.emit8(0x00);
+        buf.addRegImm32(.r12, 1);
+
+        // end: patch the jmp
+        const end_pos = buf.currentPos();
+        const rel_to_end: i32 = @intCast(@as(isize, @intCast(end_pos)) - @as(isize, @intCast(patch_jmp_end)) - 4);
+        buf.patchRel32(patch_jmp_end, rel_to_end);
+    }
+
+    /// Emit inline code for SmallInteger arithmetic with overflow check
+    fn emitArithmeticInline(
+        self: *JIT,
+        buf: *CodeBuffer,
+        op: SpecialBinaryOp,
+    ) void {
+        _ = self;
+        const special_binary_fn_ptr = @intFromPtr(&jit_runtime_special_binary);
+
+        const SMALLINT_TAG: u8 = 1;
+        const TAG_MASK: u8 = 7;
+
+        // Load arg (TOS) into rax
+        buf.rex(true, false, true, true);
+        buf.emit8(0x8B);
+        buf.emit8(0x44);
+        buf.emit8(0xE5);
+        buf.emit8(0xF8); // disp8 = -8
+
+        // Load receiver (TOS-1) into rcx
+        buf.rex(true, false, true, true);
+        buf.emit8(0x8B);
+        buf.emit8(0x4C);
+        buf.emit8(0xE5);
+        buf.emit8(0xF0); // disp8 = -16
+
+        // Check arg is SmallInt
+        buf.movRegReg(.rdx, .rax);
+        buf.andRegImm8(.rdx, TAG_MASK);
+        buf.cmpRegImm8(.rdx, SMALLINT_TAG);
+        buf.emit8(0x0F);
+        buf.emit8(0x85);
+        const patch_jne1 = buf.currentPos();
+        buf.emit32(0);
+
+        // Check receiver is SmallInt
+        buf.movRegReg(.rdx, .rcx);
+        buf.andRegImm8(.rdx, TAG_MASK);
+        buf.cmpRegImm8(.rdx, SMALLINT_TAG);
+        buf.emit8(0x0F);
+        buf.emit8(0x85);
+        const patch_jne2 = buf.currentPos();
+        buf.emit32(0);
+
+        // Both are SmallInts - perform arithmetic
+        // For tagged SmallInts: (a << 3 | 1) + (b << 3 | 1) = (a+b) << 3 + 2
+        // We need to subtract 1 to get proper tag: result - 1 = (a+b) << 3 + 1
+        // For subtraction: (a << 3 | 1) - (b << 3 | 1) = (a-b) << 3, need to add 1
+
+        switch (op) {
+            .add => {
+                // add rcx, rax (rcx = receiver + arg)
+                buf.rex(true, false, false, false);
+                buf.emit8(0x01); // ADD r/m64, r64
+                buf.emit8(0xC1); // ModRM: mod=11, reg=rax, rm=rcx
+                // jo slow_path (jump on overflow)
+                buf.emit8(0x0F);
+                buf.emit8(0x80);
+                const patch_jo = buf.currentPos();
+                buf.emit32(0);
+                // sub rcx, 1 (fix tag: result has tag 2, need tag 1)
+                buf.subRegImm32(.rcx, 1);
+                buf.movRegReg(.rax, .rcx);
+
+                // Store result
+                buf.rex(true, false, true, true);
+                buf.emit8(0x89);
+                buf.emit8(0x44);
+                buf.emit8(0xE5);
+                buf.emit8(0xF0);
+                buf.subRegImm32(.r12, 1);
+
+                // jmp end
+                buf.emit8(0xE9);
+                const patch_jmp_end = buf.currentPos();
+                buf.emit32(0);
+
+                // slow_path
+                const slow_path_pos = buf.currentPos();
+                buf.patchRel32(patch_jne1, @intCast(@as(isize, @intCast(slow_path_pos)) - @as(isize, @intCast(patch_jne1)) - 4));
+                buf.patchRel32(patch_jne2, @intCast(@as(isize, @intCast(slow_path_pos)) - @as(isize, @intCast(patch_jne2)) - 4));
+                buf.patchRel32(patch_jo, @intCast(@as(isize, @intCast(slow_path_pos)) - @as(isize, @intCast(patch_jo)) - 4));
+
+                // Call runtime
+                buf.movMemReg(.rbx, INTERP_SP_OFFSET, .r12);
+                if (builtin.os.tag == .windows) {
+                    buf.subRegImm32(.rsp, 40);
+                    buf.movRegImm64(.rdx, @as(u64, @intFromEnum(op)));
+                    buf.movRegReg(.rcx, .rbx);
+                    buf.movRegImm64(.r10, special_binary_fn_ptr);
+                    buf.callReg(.r10);
+                    buf.addRegImm32(.rsp, 40);
+                } else {
+                    buf.movRegReg(.rdi, .rbx);
+                    buf.movRegImm64(.rsi, @as(u64, @intFromEnum(op)));
+                    buf.movRegImm64(.r10, special_binary_fn_ptr);
+                    buf.callReg(.r10);
+                }
+                buf.movRegMem(.r12, .rbx, INTERP_SP_OFFSET);
+                buf.rex(true, false, true, true);
+                buf.emit8(0x89);
+                buf.emit8(0x44);
+                buf.emit8(0xE5);
+                buf.emit8(0x00);
+                buf.addRegImm32(.r12, 1);
+
+                // end
+                const end_pos = buf.currentPos();
+                buf.patchRel32(patch_jmp_end, @intCast(@as(isize, @intCast(end_pos)) - @as(isize, @intCast(patch_jmp_end)) - 4));
+            },
+            .subtract => {
+                // sub rcx, rax (rcx = receiver - arg)
+                buf.rex(true, false, false, false);
+                buf.emit8(0x29); // SUB r/m64, r64
+                buf.emit8(0xC1); // ModRM: mod=11, reg=rax, rm=rcx
+                // jo slow_path
+                buf.emit8(0x0F);
+                buf.emit8(0x80);
+                const patch_jo = buf.currentPos();
+                buf.emit32(0);
+                // add rcx, 1 (fix tag: result has tag 0, need tag 1)
+                buf.addRegImm32(.rcx, 1);
+                buf.movRegReg(.rax, .rcx);
+
+                // Store result
+                buf.rex(true, false, true, true);
+                buf.emit8(0x89);
+                buf.emit8(0x44);
+                buf.emit8(0xE5);
+                buf.emit8(0xF0);
+                buf.subRegImm32(.r12, 1);
+
+                // jmp end
+                buf.emit8(0xE9);
+                const patch_jmp_end = buf.currentPos();
+                buf.emit32(0);
+
+                // slow_path
+                const slow_path_pos = buf.currentPos();
+                buf.patchRel32(patch_jne1, @intCast(@as(isize, @intCast(slow_path_pos)) - @as(isize, @intCast(patch_jne1)) - 4));
+                buf.patchRel32(patch_jne2, @intCast(@as(isize, @intCast(slow_path_pos)) - @as(isize, @intCast(patch_jne2)) - 4));
+                buf.patchRel32(patch_jo, @intCast(@as(isize, @intCast(slow_path_pos)) - @as(isize, @intCast(patch_jo)) - 4));
+
+                // Call runtime
+                buf.movMemReg(.rbx, INTERP_SP_OFFSET, .r12);
+                if (builtin.os.tag == .windows) {
+                    buf.subRegImm32(.rsp, 40);
+                    buf.movRegImm64(.rdx, @as(u64, @intFromEnum(op)));
+                    buf.movRegReg(.rcx, .rbx);
+                    buf.movRegImm64(.r10, special_binary_fn_ptr);
+                    buf.callReg(.r10);
+                    buf.addRegImm32(.rsp, 40);
+                } else {
+                    buf.movRegReg(.rdi, .rbx);
+                    buf.movRegImm64(.rsi, @as(u64, @intFromEnum(op)));
+                    buf.movRegImm64(.r10, special_binary_fn_ptr);
+                    buf.callReg(.r10);
+                }
+                buf.movRegMem(.r12, .rbx, INTERP_SP_OFFSET);
+                buf.rex(true, false, true, true);
+                buf.emit8(0x89);
+                buf.emit8(0x44);
+                buf.emit8(0xE5);
+                buf.emit8(0x00);
+                buf.addRegImm32(.r12, 1);
+
+                // end
+                const end_pos = buf.currentPos();
+                buf.patchRel32(patch_jmp_end, @intCast(@as(isize, @intCast(end_pos)) - @as(isize, @intCast(patch_jmp_end)) - 4));
+            },
+            else => unreachable,
+        }
+    }
+
+    /// Emit specialized binary operation - dispatches to inline or runtime version
+    fn emitSpecialBinaryOp(
+        self: *JIT,
+        buf: *CodeBuffer,
+        op: SpecialBinaryOp,
+    ) void {
+        switch (op) {
+            // Comparisons - use inline fast path
+            .less_than, .greater_than, .less_or_equal, .greater_or_equal, .equal, .not_equal => {
+                self.emitComparisonInline(buf, op);
+            },
+            // Arithmetic - use inline fast path with overflow check
+            .add, .subtract => {
+                self.emitArithmeticInline(buf, op);
+            },
+            // Multiply/divide - use runtime helper (more complex overflow handling)
+            .multiply, .divide => {
+                self.emitSpecialBinary(buf, op);
+            },
+        }
     }
 };
 

@@ -508,15 +508,22 @@ pub const FileIn = struct {
                         break;
                     }
                 }
-                // If expression starts with ClassName that's different from current_class, clear context
-                if (effective_chunk.len > 0 and std.ascii.isUpper(effective_chunk[0])) {
-                    // Extract the class name from the expression
-                    var name_end: usize = 0;
-                    while (name_end < effective_chunk.len and (std.ascii.isAlphanumeric(effective_chunk[name_end]) or effective_chunk[name_end] == '_')) : (name_end += 1) {}
-                    const expr_class_name = effective_chunk[0..name_end];
-                    // If it's a different class name, this is an expression, not a method
-                    if (!std.mem.eql(u8, expr_class_name, self.current_class.?)) {
-                        self.current_class = null; // Clear class context
+
+                // If expression starts with a number, parens, block, string, or temp declaration,
+                // it's definitely an expression, not a method body
+                if (effective_chunk.len > 0) {
+                    const first = effective_chunk[0];
+                    if (std.ascii.isDigit(first) or first == '(' or first == '[' or first == '\'' or first == '|') {
+                        self.current_class = null; // Clear class context - this is an expression
+                    } else if (std.ascii.isUpper(first)) {
+                        // Extract the class name from the expression
+                        var name_end: usize = 0;
+                        while (name_end < effective_chunk.len and (std.ascii.isAlphanumeric(effective_chunk[name_end]) or effective_chunk[name_end] == '_')) : (name_end += 1) {}
+                        const expr_class_name = effective_chunk[0..name_end];
+                        // If it's a different class name, this is an expression, not a method
+                        if (!std.mem.eql(u8, expr_class_name, self.current_class.?)) {
+                            self.current_class = null; // Clear class context
+                        }
                     }
                 }
             }
@@ -532,7 +539,6 @@ pub const FileIn = struct {
             // Not an expression - skip it (this is probably metadata we don't understand)
             return;
         }
-
         // Otherwise treat as a method body
         try self.processMethodBody(chunk);
     }

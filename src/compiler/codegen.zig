@@ -434,16 +434,56 @@ pub const CodeGenerator = struct {
             },
 
             .message_send => {
-                // Compile receiver
+                const selector = node.data.message.selector;
+                const num_args = node.data.message.arguments.len;
+                const args = node.data.message.arguments;
+
+                // Check for inlinable control structures BEFORE compiling arguments
+                // This allows us to compile blocks inline with jumps instead of closures
+                if (num_args == 1 and args[0].node_type == .block) {
+                    const block = args[0];
+                    // Only inline if block has no parameters (niladic block)
+                    if (block.data.block.parameters.len == 0) {
+                        if (std.mem.eql(u8, selector, "ifTrue:")) {
+                            // Pattern: receiver ifTrue: [block]
+                            // Compile as: <receiver>; jump_if_false end; <block body>; end:
+                            try self.compileNode(node.data.message.receiver);
+                            try self.compileInlineIfTrue(block);
+                            return;
+                        } else if (std.mem.eql(u8, selector, "ifFalse:")) {
+                            // Pattern: receiver ifFalse: [block]
+                            // Compile as: <receiver>; jump_if_true end; <block body>; end:
+                            try self.compileNode(node.data.message.receiver);
+                            try self.compileInlineIfFalse(block);
+                            return;
+                        }
+                    }
+                } else if (num_args == 2 and args[0].node_type == .block and args[1].node_type == .block) {
+                    const true_block = args[0];
+                    const false_block = args[1];
+                    // Only inline if both blocks have no parameters
+                    if (true_block.data.block.parameters.len == 0 and false_block.data.block.parameters.len == 0) {
+                        if (std.mem.eql(u8, selector, "ifTrue:ifFalse:")) {
+                            // Pattern: receiver ifTrue: [trueBlock] ifFalse: [falseBlock]
+                            try self.compileNode(node.data.message.receiver);
+                            try self.compileInlineIfTrueIfFalse(true_block, false_block);
+                            return;
+                        } else if (std.mem.eql(u8, selector, "ifFalse:ifTrue:")) {
+                            // Pattern: receiver ifFalse: [falseBlock] ifTrue: [trueBlock]
+                            try self.compileNode(node.data.message.receiver);
+                            try self.compileInlineIfTrueIfFalse(false_block, true_block);
+                            return;
+                        }
+                    }
+                }
+
+                // Compile receiver (not inlined control structure)
                 try self.compileNode(node.data.message.receiver);
 
                 // Compile arguments
-                for (node.data.message.arguments) |arg| {
+                for (args) |arg| {
                     try self.compileNode(arg);
                 }
-
-                const selector = node.data.message.selector;
-                const num_args = node.data.message.arguments.len;
 
                 // Check for optimized sends
                 if (num_args == 1) {
@@ -756,6 +796,136 @@ pub const CodeGenerator = struct {
             try self.emitByte(1); // inst var type
             try self.emitByte(index);
         }
+    }
+
+    /// Compile: ifTrue: [block]
+    /// When true:  execute block, result is block's value
+    /// When false: skip block, result is nil
+    /// Generated: jump_if_false else; <block body>; jump end; else: push nil; end:
+    fn compileInlineIfTrue(self: *CodeGenerator, block: *ASTNode) CompileError!void {
+        // Emit jump_if_false to else (push nil)
+        try self.emit(.jump_if_false);
+        const jump_to_else_pos = self.bytecodes_buf.items.len;
+        try self.emitByte(0);
+        try self.emitByte(0);
+
+        // Compile block body inline (true case)
+        try self.compileInlineBlockBody(block);
+
+        // Jump over the else branch
+        try self.emit(.jump);
+        const jump_to_end_pos = self.bytecodes_buf.items.len;
+        try self.emitByte(0);
+        try self.emitByte(0);
+
+        // Patch jump_if_false to here (else branch)
+        // NOTE: Interpreter reads big-endian (hi byte first, lo byte second)
+        const else_pos = self.bytecodes_buf.items.len;
+        const else_offset: i16 = @intCast(@as(isize, @intCast(else_pos)) - @as(isize, @intCast(jump_to_else_pos + 2)));
+        self.bytecodes_buf.items[jump_to_else_pos] = @intCast((@as(u16, @bitCast(else_offset)) >> 8) & 0xFF);
+        self.bytecodes_buf.items[jump_to_else_pos + 1] = @intCast(@as(u16, @bitCast(else_offset)) & 0xFF);
+
+        // Else branch: push nil
+        try self.emit(.push_nil);
+
+        // Patch jump to end
+        const end_pos = self.bytecodes_buf.items.len;
+        const end_offset: i16 = @intCast(@as(isize, @intCast(end_pos)) - @as(isize, @intCast(jump_to_end_pos + 2)));
+        self.bytecodes_buf.items[jump_to_end_pos] = @intCast((@as(u16, @bitCast(end_offset)) >> 8) & 0xFF);
+        self.bytecodes_buf.items[jump_to_end_pos + 1] = @intCast(@as(u16, @bitCast(end_offset)) & 0xFF);
+    }
+
+    /// Compile: ifFalse: [block]
+    /// When false: execute block, result is block's value
+    /// When true:  skip block, result is nil
+    /// Generated: jump_if_true else; <block body>; jump end; else: push nil; end:
+    fn compileInlineIfFalse(self: *CodeGenerator, block: *ASTNode) CompileError!void {
+        // Emit jump_if_true to else (push nil)
+        try self.emit(.jump_if_true);
+        const jump_to_else_pos = self.bytecodes_buf.items.len;
+        try self.emitByte(0);
+        try self.emitByte(0);
+
+        // Compile block body inline (false case)
+        try self.compileInlineBlockBody(block);
+
+        // Jump over the else branch
+        try self.emit(.jump);
+        const jump_to_end_pos = self.bytecodes_buf.items.len;
+        try self.emitByte(0);
+        try self.emitByte(0);
+
+        // Patch jump_if_true to here (else branch)
+        // NOTE: Interpreter reads big-endian (hi byte first, lo byte second)
+        const else_pos = self.bytecodes_buf.items.len;
+        const else_offset: i16 = @intCast(@as(isize, @intCast(else_pos)) - @as(isize, @intCast(jump_to_else_pos + 2)));
+        self.bytecodes_buf.items[jump_to_else_pos] = @intCast((@as(u16, @bitCast(else_offset)) >> 8) & 0xFF);
+        self.bytecodes_buf.items[jump_to_else_pos + 1] = @intCast(@as(u16, @bitCast(else_offset)) & 0xFF);
+
+        // Else branch: push nil
+        try self.emit(.push_nil);
+
+        // Patch jump to end
+        const end_pos = self.bytecodes_buf.items.len;
+        const end_offset: i16 = @intCast(@as(isize, @intCast(end_pos)) - @as(isize, @intCast(jump_to_end_pos + 2)));
+        self.bytecodes_buf.items[jump_to_end_pos] = @intCast((@as(u16, @bitCast(end_offset)) >> 8) & 0xFF);
+        self.bytecodes_buf.items[jump_to_end_pos + 1] = @intCast(@as(u16, @bitCast(end_offset)) & 0xFF);
+    }
+
+    /// Compile: ifTrue: [t] ifFalse: [f] -> jump_if_false else; <t body>; jump end; else: <f body>; end:
+    fn compileInlineIfTrueIfFalse(self: *CodeGenerator, true_block: *ASTNode, false_block: *ASTNode) CompileError!void {
+        // Emit jump_if_false to else branch
+        try self.emit(.jump_if_false);
+        const jump_to_else_pos = self.bytecodes_buf.items.len;
+        try self.emitByte(0);
+        try self.emitByte(0);
+
+        // Compile true block body
+        try self.compileInlineBlockBody(true_block);
+
+        // Emit jump to end (skip false block)
+        try self.emit(.jump);
+        const jump_to_end_pos = self.bytecodes_buf.items.len;
+        try self.emitByte(0);
+        try self.emitByte(0);
+
+        // Patch jump_if_false to point here (else branch)
+        // NOTE: Interpreter reads big-endian (hi byte first, lo byte second)
+        const else_pos = self.bytecodes_buf.items.len;
+        const else_offset: i16 = @intCast(@as(isize, @intCast(else_pos)) - @as(isize, @intCast(jump_to_else_pos + 2)));
+        self.bytecodes_buf.items[jump_to_else_pos] = @intCast((@as(u16, @bitCast(else_offset)) >> 8) & 0xFF);
+        self.bytecodes_buf.items[jump_to_else_pos + 1] = @intCast(@as(u16, @bitCast(else_offset)) & 0xFF);
+
+        // Compile false block body
+        try self.compileInlineBlockBody(false_block);
+
+        // Patch jump to end
+        const end_pos = self.bytecodes_buf.items.len;
+        const end_offset: i16 = @intCast(@as(isize, @intCast(end_pos)) - @as(isize, @intCast(jump_to_end_pos + 2)));
+        self.bytecodes_buf.items[jump_to_end_pos] = @intCast((@as(u16, @bitCast(end_offset)) >> 8) & 0xFF);
+        self.bytecodes_buf.items[jump_to_end_pos + 1] = @intCast(@as(u16, @bitCast(end_offset)) & 0xFF);
+    }
+
+    /// Compile block body inline (without creating a BlockClosure)
+    /// For inlined control structures
+    fn compileInlineBlockBody(self: *CodeGenerator, block: *ASTNode) CompileError!void {
+        const statements = block.data.block.statements;
+
+        if (statements.len == 0) {
+            // Empty block returns nil
+            try self.emit(.push_nil);
+            return;
+        }
+
+        // Compile all statements except the last
+        for (statements[0 .. statements.len - 1]) |stmt| {
+            try self.compileNode(stmt);
+            try self.emit(.pop); // Discard intermediate results
+        }
+
+        // Compile last statement (its value is the block's value)
+        const last_stmt = statements[statements.len - 1];
+        try self.compileNode(last_stmt);
     }
 
     fn addLiteral(self: *CodeGenerator, value: Value) CompileError!usize {
