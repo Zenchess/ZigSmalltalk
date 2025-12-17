@@ -118,6 +118,7 @@ fn jitRuntimeSendCommon(
 
     interp.primitive_block_depth -= 1;
     interp.receiver = saved_receiver; // Restore caller's receiver
+
     return result;
 }
 
@@ -518,23 +519,10 @@ pub export fn jit_runtime_send_with_cache(
     bytecode_offset: usize,
     is_super: bool,
 ) callconv(.c) Value {
-    // Temporary debug logging to trace early JIT sends
-    const debug_max: usize = 0;
-    {
-        var static_count: usize = 0;
-        if (static_count < debug_max) {
-            static_count += 1;
-            const recv_val = if (interp.sp > 0 and interp.sp > num_args)
-                interp.stack[interp.sp - @as(usize, num_args) - 1]
-            else
-                Value.nil;
-            std.debug.print("jit_send[{d}] sel_idx={d} args={d} bc_ofs={d} is_super={any} recv_tag=0x{x} cache_ver={d} expected=0x{x}\n",
-                .{ static_count, selector_index, num_args, bytecode_offset, is_super, recv_val.bits & Value.TAG_MASK, cache.version, cache.expected_class.bits });
-        }
-    }
-
     const saved_sp = interp.sp;
-    if (saved_sp == 0 or saved_sp <= num_args) return Value.nil;
+    if (saved_sp == 0 or saved_sp <= num_args) {
+        return Value.nil;
+    }
 
     const recv_pos = saved_sp - @as(usize, num_args) - 1;
     const recv = interp.stack[recv_pos];
@@ -592,6 +580,7 @@ pub export fn jit_runtime_send_with_cache(
 
     // Align Smalltalk stack for caller push
     interp.sp = recv_pos;
+
     return result;
 }
 
@@ -1196,11 +1185,6 @@ pub const JIT = struct {
             }
         }
 
-        std.debug.print("JIT: Method is eligible, bytecodes len={d}, bytecodes: ", .{bc.len});
-        for (bc) |b| {
-            std.debug.print("{x:0>2} ", .{b});
-        }
-        std.debug.print("\n", .{});
         return true;
     }
 
@@ -1558,7 +1542,6 @@ pub const JIT = struct {
             .call_site_caches = call_site_caches,
         };
 
-        std.debug.print("JIT: Compiled method with {d} bytes of native code\n", .{code_size});
         return compiled;
     }
 

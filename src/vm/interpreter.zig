@@ -2488,13 +2488,26 @@ pub const Interpreter = struct {
                     }
 
                     if (compiled) |code| {
-                        // Set up receiver for JIT code
+                        // Save caller state - JIT code will modify these
+                        const saved_method = self.method;
+                        const saved_method_class = self.method_class;
+                        const saved_receiver = self.receiver;
+                        const saved_ip = self.ip;
+
+                        // Set up callee frame for JIT code
+                        self.method = found_method;
+                        self.method_class = method_holder;
                         self.receiver = recv;
-                        // Receiver and args are already on stack at recv_pos
-                        // JIT code will access them via interpreter's stack
+                        self.ip = 0; // JIT code starts at beginning of method
 
                         // Call the JIT-compiled code
                         const result = code.entry(self);
+
+                        // Restore caller state
+                        self.method = saved_method;
+                        self.method_class = saved_method_class;
+                        self.receiver = saved_receiver;
+                        self.ip = saved_ip;
 
                         // Pop receiver+args from stack
                         self.sp = recv_pos;
