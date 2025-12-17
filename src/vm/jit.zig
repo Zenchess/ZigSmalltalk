@@ -8,6 +8,7 @@
 /// - Inline cache stubs for monomorphic sends
 
 const std = @import("std");
+const builtin = @import("builtin");
 const object = @import("object.zig");
 const bytecodes = @import("bytecodes.zig");
 const Interpreter = @import("interpreter.zig").Interpreter;
@@ -376,6 +377,17 @@ pub const CodeBuffer = struct {
         return self.code[0..self.pos];
     }
 
+    /// Patch a rel32 value at a given position (for backpatching forward jumps)
+    pub fn patchRel32(self: *CodeBuffer, pos: usize, value: i32) void {
+        if (pos + 4 <= self.code.len) {
+            const bytes: [4]u8 = @bitCast(value);
+            self.code[pos] = bytes[0];
+            self.code[pos + 1] = bytes[1];
+            self.code[pos + 2] = bytes[2];
+            self.code[pos + 3] = bytes[3];
+        }
+    }
+
     // ========================================================================
     // x86-64 Instruction Encoding
     // ========================================================================
@@ -542,6 +554,14 @@ pub const CodeBuffer = struct {
         }
     }
 
+    /// cmp reg64, imm64 (uses r11 as scratch)
+    pub fn cmpRegImm64(self: *CodeBuffer, reg: Reg, imm: u64) void {
+        // x86-64 doesn't have cmp with 64-bit immediate
+        // Use r11 as scratch: mov r11, imm64; cmp reg, r11
+        self.movRegImm64(.r11, imm);
+        self.cmpRegReg(reg, .r11);
+    }
+
     /// ret
     pub fn ret(self: *CodeBuffer) void {
         self.emit8(0xC3);
@@ -619,6 +639,44 @@ pub const CodeBuffer = struct {
 // Page size for memory allocation (4KB on most systems)
 const PAGE_SIZE: usize = 4096;
 
+// ============================================================================
+// Cross-Platform Executable Memory Allocation
+// ============================================================================
+
+/// Allocate executable memory (works on Windows and POSIX)
+fn allocateExecutableMemory(size: usize) ![]align(PAGE_SIZE) u8 {
+    if (builtin.os.tag == .windows) {
+        const windows = std.os.windows;
+        const ptr = try windows.VirtualAlloc(
+            null,
+            size,
+            windows.MEM_COMMIT | windows.MEM_RESERVE,
+            windows.PAGE_EXECUTE_READWRITE,
+        );
+        const aligned_ptr: [*]align(PAGE_SIZE) u8 = @alignCast(@ptrCast(ptr));
+        return aligned_ptr[0..size];
+    } else {
+        return std.posix.mmap(
+            null,
+            size,
+            std.posix.PROT.READ | std.posix.PROT.WRITE | std.posix.PROT.EXEC,
+            .{ .TYPE = .PRIVATE, .ANONYMOUS = true },
+            -1,
+            0,
+        );
+    }
+}
+
+/// Free executable memory (works on Windows and POSIX)
+fn freeExecutableMemory(mem: []align(PAGE_SIZE) u8) void {
+    if (builtin.os.tag == .windows) {
+        const windows = std.os.windows;
+        windows.VirtualFree(@ptrCast(mem.ptr), 0, windows.MEM_RELEASE);
+    } else {
+        std.posix.munmap(mem);
+    }
+}
+
 pub const CompiledCode = struct {
     code: []u8,
     entry: *const fn (*Interpreter) callconv(.c) Value,
@@ -632,7 +690,7 @@ pub const CompiledCode = struct {
         }
         // Free executable memory
         const aligned_ptr: [*]align(PAGE_SIZE) u8 = @alignCast(self.code.ptr);
-        std.posix.munmap(aligned_ptr[0..self.code.len]);
+        freeExecutableMemory(aligned_ptr[0..self.code.len]);
     }
 };
 
@@ -743,10 +801,14 @@ pub const JIT = struct {
                 .send => ip += 2,
                 .super_send => ip += 2,
 
-                // Jumps - NOT eligible (would need backpatching)
+                // Jumps - now supported with backpatching
                 .jump, .jump_if_true, .jump_if_false, .jump_if_nil, .jump_if_not_nil => {
-                    return false;
+                    ip += 2; // skip 16-bit offset
                 },
+
+                // Short jumps (offset in opcode, forward only)
+                .short_jump_0, .short_jump_1, .short_jump_2, .short_jump_3,
+                .short_jump_4, .short_jump_5, .short_jump_6, .short_jump_7 => {},
 
                 // Block creation - NOT eligible
                 .push_closure => return false,
@@ -804,6 +866,22 @@ pub const JIT = struct {
         var buffer = try CodeBuffer.init(self.allocator, 4096);
         defer buffer.deinit();
 
+        // Track bytecode IP → native code position for jump resolution
+        // We allocate one entry per bytecode byte (not all will be used)
+        var bc_to_native = try self.allocator.alloc(usize, bc.len + 1);
+        defer self.allocator.free(bc_to_native);
+        for (bc_to_native) |*entry| {
+            entry.* = 0; // 0 means "not yet emitted"
+        }
+
+        // Forward jump patches: (patch_position, target_bytecode_ip)
+        const ForwardPatch = struct {
+            patch_pos: usize, // position of rel32 in code buffer
+            target_bc_ip: usize, // bytecode IP to jump to
+        };
+        var forward_patches = std.ArrayListUnmanaged(ForwardPatch){};
+        defer forward_patches.deinit(self.allocator);
+
         // Generate prologue
         self.emitPrologue(&buffer);
 
@@ -812,6 +890,9 @@ pub const JIT = struct {
         var call_site_index: usize = 0;
 
         while (ip < bc.len) {
+            // Record native position for this bytecode IP (before consuming opcode)
+            bc_to_native[ip] = buffer.currentPos();
+
             const opcode = bc[ip];
             ip += 1;
 
@@ -896,14 +977,131 @@ pub const JIT = struct {
                         break;
                     }
                 },
-                // Jump bytecodes - bail for now, will implement later
-                .jump, .jump_if_true, .jump_if_false, .jump_if_nil, .jump_if_not_nil => {
-                    // These require backpatching - bail to interpreter for now
-                    self.emitReturnNil(&buffer);
-                    break;
+                // Jump bytecodes with 16-bit signed offset
+                .jump => {
+                    const offset_lo = bc[ip];
+                    const offset_hi = bc[ip + 1];
+                    ip += 2;
+                    const offset: i16 = @bitCast(@as(u16, offset_lo) | (@as(u16, offset_hi) << 8));
+                    const target_bc_ip: usize = @intCast(@as(isize, @intCast(ip)) + @as(isize, offset));
+
+                    // Check if target is backward (already emitted) or forward (needs patching)
+                    if (target_bc_ip < ip and bc_to_native[target_bc_ip] != 0) {
+                        // Backward jump - target known
+                        const target_native = bc_to_native[target_bc_ip];
+                        const jump_end = buffer.currentPos() + 5; // jmp rel32 is 5 bytes
+                        const rel_offset: i32 = @intCast(@as(isize, @intCast(target_native)) - @as(isize, @intCast(jump_end)));
+                        buffer.jmpRel32(rel_offset);
+                    } else {
+                        // Forward jump - emit placeholder and record for patching
+                        buffer.emit8(0xE9); // jmp rel32
+                        try forward_patches.append(self.allocator, .{ .patch_pos = buffer.currentPos(), .target_bc_ip = target_bc_ip });
+                        buffer.emit32(0); // placeholder
+                    }
                 },
-                // Short jumps (0xB8-0xBF) are handled by isPushTemporary check
-                // but if we get here, bail
+                .jump_if_true => {
+                    const offset_lo = bc[ip];
+                    const offset_hi = bc[ip + 1];
+                    ip += 2;
+                    const offset: i16 = @bitCast(@as(u16, offset_lo) | (@as(u16, offset_hi) << 8));
+                    const target_bc_ip: usize = @intCast(@as(isize, @intCast(ip)) + @as(isize, offset));
+
+                    // Pop TOS and compare with true
+                    self.emitPopToRax(&buffer);
+                    buffer.cmpRegImm64(.rax, Value.@"true".bits);
+
+                    if (target_bc_ip < ip and bc_to_native[target_bc_ip] != 0) {
+                        const target_native = bc_to_native[target_bc_ip];
+                        const jump_end = buffer.currentPos() + 6; // je rel32 is 6 bytes
+                        const rel_offset: i32 = @intCast(@as(isize, @intCast(target_native)) - @as(isize, @intCast(jump_end)));
+                        buffer.jeRel32(rel_offset);
+                    } else {
+                        buffer.emit8(0x0F);
+                        buffer.emit8(0x84); // je rel32
+                        try forward_patches.append(self.allocator, .{ .patch_pos = buffer.currentPos(), .target_bc_ip = target_bc_ip });
+                        buffer.emit32(0);
+                    }
+                },
+                .jump_if_false => {
+                    const offset_lo = bc[ip];
+                    const offset_hi = bc[ip + 1];
+                    ip += 2;
+                    const offset: i16 = @bitCast(@as(u16, offset_lo) | (@as(u16, offset_hi) << 8));
+                    const target_bc_ip: usize = @intCast(@as(isize, @intCast(ip)) + @as(isize, offset));
+
+                    // Pop TOS and compare with false
+                    self.emitPopToRax(&buffer);
+                    buffer.cmpRegImm64(.rax, Value.@"false".bits);
+
+                    if (target_bc_ip < ip and bc_to_native[target_bc_ip] != 0) {
+                        const target_native = bc_to_native[target_bc_ip];
+                        const jump_end = buffer.currentPos() + 6;
+                        const rel_offset: i32 = @intCast(@as(isize, @intCast(target_native)) - @as(isize, @intCast(jump_end)));
+                        buffer.jeRel32(rel_offset);
+                    } else {
+                        buffer.emit8(0x0F);
+                        buffer.emit8(0x84);
+                        try forward_patches.append(self.allocator, .{ .patch_pos = buffer.currentPos(), .target_bc_ip = target_bc_ip });
+                        buffer.emit32(0);
+                    }
+                },
+                .jump_if_nil => {
+                    const offset_lo = bc[ip];
+                    const offset_hi = bc[ip + 1];
+                    ip += 2;
+                    const offset: i16 = @bitCast(@as(u16, offset_lo) | (@as(u16, offset_hi) << 8));
+                    const target_bc_ip: usize = @intCast(@as(isize, @intCast(ip)) + @as(isize, offset));
+
+                    // Pop TOS and compare with nil
+                    self.emitPopToRax(&buffer);
+                    buffer.cmpRegImm64(.rax, Value.nil.bits);
+
+                    if (target_bc_ip < ip and bc_to_native[target_bc_ip] != 0) {
+                        const target_native = bc_to_native[target_bc_ip];
+                        const jump_end = buffer.currentPos() + 6;
+                        const rel_offset: i32 = @intCast(@as(isize, @intCast(target_native)) - @as(isize, @intCast(jump_end)));
+                        buffer.jeRel32(rel_offset);
+                    } else {
+                        buffer.emit8(0x0F);
+                        buffer.emit8(0x84);
+                        try forward_patches.append(self.allocator, .{ .patch_pos = buffer.currentPos(), .target_bc_ip = target_bc_ip });
+                        buffer.emit32(0);
+                    }
+                },
+                .jump_if_not_nil => {
+                    const offset_lo = bc[ip];
+                    const offset_hi = bc[ip + 1];
+                    ip += 2;
+                    const offset: i16 = @bitCast(@as(u16, offset_lo) | (@as(u16, offset_hi) << 8));
+                    const target_bc_ip: usize = @intCast(@as(isize, @intCast(ip)) + @as(isize, offset));
+
+                    // Pop TOS and compare with nil (jump if NOT equal)
+                    self.emitPopToRax(&buffer);
+                    buffer.cmpRegImm64(.rax, Value.nil.bits);
+
+                    if (target_bc_ip < ip and bc_to_native[target_bc_ip] != 0) {
+                        const target_native = bc_to_native[target_bc_ip];
+                        const jump_end = buffer.currentPos() + 6;
+                        const rel_offset: i32 = @intCast(@as(isize, @intCast(target_native)) - @as(isize, @intCast(jump_end)));
+                        buffer.jneRel32(rel_offset);
+                    } else {
+                        buffer.emit8(0x0F);
+                        buffer.emit8(0x85); // jne rel32
+                        try forward_patches.append(self.allocator, .{ .patch_pos = buffer.currentPos(), .target_bc_ip = target_bc_ip });
+                        buffer.emit32(0);
+                    }
+                },
+                // Short jumps (0xB8-0xBF) - forward only, offset in opcode
+                .short_jump_0, .short_jump_1, .short_jump_2, .short_jump_3,
+                .short_jump_4, .short_jump_5, .short_jump_6, .short_jump_7 => {
+                    const short_offset = Opcode.getShortJumpOffset(opcode);
+                    const target_bc_ip = ip + short_offset;
+
+                    // Short jumps are always forward
+                    buffer.emit8(0xE9); // jmp rel32
+                    try forward_patches.append(self.allocator, .{ .patch_pos = buffer.currentPos(), .target_bc_ip = target_bc_ip });
+                    buffer.emit32(0);
+                },
                 else => {
                     // For unsupported opcodes, bail out to interpreter
                     // For now, just return nil
@@ -913,21 +1111,28 @@ pub const JIT = struct {
             }
         }
 
+        // Record final bytecode position (for forward jumps to end)
+        bc_to_native[ip] = buffer.currentPos();
+
         // Generate epilogue if we haven't returned yet
         self.emitEpilogue(&buffer);
+
+        // Backpatch all forward jumps
+        for (forward_patches.items) |patch| {
+            const target_native = bc_to_native[patch.target_bc_ip];
+            if (target_native != 0) {
+                // Calculate relative offset from end of jump instruction
+                const jump_end = patch.patch_pos + 4; // rel32 is 4 bytes
+                const rel_offset: i32 = @intCast(@as(isize, @intCast(target_native)) - @as(isize, @intCast(jump_end)));
+                buffer.patchRel32(patch.patch_pos, rel_offset);
+            }
+        }
 
         // Allocate executable memory and copy code
         const code_size = buffer.pos;
         const aligned_size = std.mem.alignForward(usize, code_size, PAGE_SIZE);
 
-        const executable_mem = try std.posix.mmap(
-            null,
-            aligned_size,
-            std.posix.PROT.READ | std.posix.PROT.WRITE | std.posix.PROT.EXEC,
-            .{ .TYPE = .PRIVATE, .ANONYMOUS = true },
-            -1,
-            0,
-        );
+        const executable_mem = try allocateExecutableMemory(aligned_size);
 
         @memcpy(executable_mem[0..code_size], buffer.code[0..code_size]);
 
@@ -1155,6 +1360,23 @@ pub const JIT = struct {
         buf.movRegMem(.rax, .rbx, INTERP_SP_OFFSET);
         buf.subRegImm32(.rax, 1);
         buf.movMemReg(.rbx, INTERP_SP_OFFSET, .rax);
+    }
+
+    /// Pop top of stack into rax (for comparisons)
+    fn emitPopToRax(self: *JIT, buf: *CodeBuffer) void {
+        _ = self;
+        // Decrement sp and load value
+        buf.movRegMem(.rax, .rbx, INTERP_SP_OFFSET);
+        buf.subRegImm32(.rax, 1);
+        buf.movMemReg(.rbx, INTERP_SP_OFFSET, .rax);
+        // Load stack[sp] into rax
+        buf.movRegReg(.rcx, .rbx);
+        buf.addRegImm32(.rcx, INTERP_STACK_OFFSET);
+        // mov rax, [rcx + rax*8]
+        buf.rex(true, false, false, false);
+        buf.emit8(0x8B); // mov
+        buf.emit8(0x04); // ModRM: [rcx + rax*8]
+        buf.emit8(0xC1); // SIB: scale=8 (3<<6), index=rax (0<<3), base=rcx (1)
     }
 
     /// Duplicate top of stack

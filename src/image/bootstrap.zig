@@ -1462,28 +1462,11 @@ fn installMethodWithSelector(heap: *Heap, class: *Object, selector: Value, metho
         dict = dict_val.asObject();
     }
 
-    // Find empty slot or existing selector
-    const dict_size = dict.header.size;
-    var slot: usize = 0;
-    var checked: usize = 0;
-    while (slot + 1 < dict_size) : (slot += 2) {
-        const existing = dict.getField(slot, dict_size);
-        checked += 1;
-        if (existing.isNil()) {
-            // Found empty slot
-            dict.setField(slot, selector, dict_size);
-            dict.setField(slot + 1, Value.fromObject(@ptrCast(method)), dict_size);
-            return;
-        }
-        // Check if selector already exists (update method)
-        if (existing.bits == selector.bits) {
-            dict.setField(slot + 1, Value.fromObject(@ptrCast(method)), dict_size);
-            return;
-        }
+    // Use hash-based insertion to match hash-based lookup in interpreter
+    const method_val = Value.fromObject(@ptrCast(@alignCast(method)));
+    if (!insertIntoMethodDict(dict, selector, method_val)) {
+        std.debug.print("WARNING: Method dictionary full for selector\n", .{});
     }
-
-    // Dictionary full - this shouldn't happen with 1024 slots
-    std.debug.print("WARNING: Method dictionary full (checked {d} slots, dict_size={d}, dict@{*})\n", .{ checked, dict_size, dict });
 }
 
 test "bootstrap creates core classes" {

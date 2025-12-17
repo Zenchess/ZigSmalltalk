@@ -1,6 +1,17 @@
 # ZigSmalltalk VM Optimization Plan
 
-## Current Performance Baseline
+## Current State (December 2024)
+
+### What We Have
+- **Baseline JIT compiler** exists in `src/vm/jit.zig`
+- JIT enabled via `--jit` flag, activates after load-order processing
+- Monomorphic inline caches (MIC) per call site
+- GC invalidates JIT caches (avoids stale pointers)
+- Threaded dispatch infrastructure in interpreter
+- **Cross-platform**: JIT now works on Windows (VirtualAlloc) and POSIX (mmap)
+- **Phase 1.2 complete**: Jump bytecodes with backpatching support
+
+### Performance Baseline
 
 | Benchmark | Time | Rate |
 |-----------|------|------|
@@ -19,113 +30,130 @@
 | VisualWorks 3.0 | 2000 | ~5,950,000 | JIT compiler |
 | Squeak/Cog | 2014 | ~180,000,000 | Modern JIT |
 
-**Gap analysis**: We're roughly 5-6x slower than classic interpreters on equivalent hardware.
+**Gap analysis**: ~5-6x slower than classic interpreters on equivalent hardware.
 
 ---
 
-## Optimization Phases
+## Optimization Phases (Revised Roadmap)
 
-### Phase 1: Interpreter Optimization (This Phase)
+### Phase 0: Platform & Stability (CURRENT PRIORITY)
 
-**Goal**: 5-10x speedup through interpreter improvements
+**Goal**: JIT builds and runs on all platforms
 
-#### 1.1 Global Method Cache
+#### 0.1 Cross-Platform Executable Memory
+- Replace `std.posix.mmap` with platform-specific allocation
+- Windows: `VirtualAlloc` with `PAGE_EXECUTE_READWRITE`
+- POSIX: `mmap` with `PROT_READ | PROT_WRITE | PROT_EXEC`
+- Add helper function `allocateExecutableMemory()` and `freeExecutableMemory()`
 
-**Problem**: Every message send does a full method lookup through the class hierarchy.
+#### 0.2 Validation
+- Build succeeds on Windows and Linux
+- `--jit --no-repl --load-order load-order-fixed.txt` completes without crash
+- Basic microbenchmarks work with JIT enabled
 
-**Solution**: A global cache mapping (class, selector) -> method.
+---
 
-```
-Cache entry: { receiverClass, selector, method }
-Lookup: hash(class ^ selector) & cacheMask
-```
+### Phase 1: Interpreter + JIT Foundation
 
-**Expected speedup**: 1.5-2x on method-heavy code
+**Goal**: 5-10x speedup through combined interpreter/JIT improvements
 
-#### 1.2 SmallInteger Arithmetic Fast Paths
+#### 1.1 SmallInteger Arithmetic Fast Paths (Interpreter)
+**Benefits both interpreted and JIT code**
 
-**Problem**: `1 + 2` currently goes through full message dispatch.
-
-**Solution**: Check for SmallInteger receivers and handle +, -, *, <, >, =, etc. directly in the interpreter without method lookup.
-
-```
-if (receiver.isSmallInt() and selector == #+) {
+Check for SmallInteger receivers and handle +, -, *, <, >, =, etc. directly:
+```zig
+if (receiver.isSmallInt() and selector == self.specialSelectors.plus) {
     if (arg.isSmallInt()) {
-        return receiver + arg;  // Direct arithmetic
+        // Overflow-checked addition
+        return receiver + arg;
     }
 }
 // Fall through to normal send
 ```
-
 **Expected speedup**: 2-3x on arithmetic-heavy code
 
-#### 1.3 Improved Bytecode Dispatch
+#### 1.2 JIT: Jumps & Backpatching
+- Maintain map of bytecode IP → native code position
+- Emit placeholder rel32 for jumps, patch once target known
+- Support short jumps (0xB8–0xBF) and long jumps (0xB0–0xB4)
+- Remove "no jumps" restriction from JIT eligibility
 
-**Problem**: Current switch-based dispatch has branch prediction issues.
+#### 1.3 JIT: Registerize Stack Pointer
+- Keep `sp` in callee-saved register (e.g., `r12`) for entire compiled method
+- Write back to `interpreter.sp` only at safepoints (calls, returns)
+- Removes many loads/stores from hot paths
 
-**Solution**: Consider computed goto / direct threading (if Zig supports it), or at minimum ensure hot bytecodes are handled first.
+#### 1.4 Block Invocation Fast Path (Interpreter)
+- Recognize BlockClosure receiver for `value`, `value:`, `value:value:`
+- Invoke directly without method lookup
 
-**Expected speedup**: 1.3-1.5x
-
-#### 1.4 Block Invocation Fast Path
-
-**Problem**: Block value/value:/value:value: go through normal dispatch.
-
-**Solution**: Recognize BlockClosure receiver and invoke directly.
-
-**Expected speedup**: 1.2-1.5x on block-heavy code
-
----
-
-### Phase 2: Inline Caches (Future)
-
-**Goal**: Additional 3-5x speedup
-
-#### 2.1 Monomorphic Inline Cache (MIC)
-
-Cache the last class seen at each call site:
-```
-callsite:
-  if (receiver.class == cached_class) goto cached_method
-  else: slow_lookup_and_update_cache()
-```
-
-#### 2.2 Polymorphic Inline Cache (PIC)
-
-For call sites that see 2-4 different classes:
-```
-callsite:
-  switch (receiver.class) {
-    cached_class1: goto method1
-    cached_class2: goto method2
-    cached_class3: goto method3
-    default: megamorphic_lookup()
-  }
-```
-
-#### 2.3 Cache Invalidation
-
-When a method is added/changed:
-- Flush affected cache entries
-- Or use class version numbers
+**Expected combined speedup**: 3-5x
 
 ---
 
-### Phase 3: Baseline JIT (Future)
+### Phase 2: Inline Caching Improvements
 
-**Goal**: Remove interpreter overhead entirely for hot methods
+**Goal**: Additional 2-4x speedup
 
-- Template-based code generation
-- No optimization passes
-- Direct register allocation
-- Keep interpreter for cold code and debugging
+#### 2.1 JIT: Inline Monomorphic Send Fast Path
+For each send site in JIT code, emit:
+```
+load receiver (from stack via sp register)
+classOf(receiver)  // inline tag check or helper call
+compare with cache.expected_class and cache.version
+on hit: call cached target entry directly
+on miss: call runtime_patch_send() to update cache
+```
+
+#### 2.2 JIT: Inline SmallInt Ops
+- Emit inline +, -, *, <, <=, >, >=, =, ≠ for SmallInts
+- Tag checks with slow-path guards (call runtime on overflow/type mismatch)
+
+#### 2.3 JIT: Inline Boolean ifTrue:/ifFalse:
+- Check receiver == true/false
+- Inline the chosen branch
+- Slow path for non-boolean receivers
+
+#### 2.4 PIC Light (2-3 entry cache)
+- Expand call-site cache to hold 2-3 entries
+- Chain class/version checks before miss
+- Still indirect calls (no self-modifying code yet)
 
 ---
 
-### Phase 4: Optimizing JIT with LLVM (Far Future)
+### Phase 3: Broader JIT Coverage
 
-**Goal**: "Half the speed of C"
+**Goal**: JIT handles more code patterns
 
+#### 3.1 More Inline Primitives
+- `at:`, `at:put:` for Arrays/ByteArrays (with bounds checks)
+- Block `value`/`value:` when arity matches and no captured temps
+
+#### 3.2 Stack Registerization Deeper
+- Keep TOS/NOS in registers where profitable
+- Spill around calls
+
+#### 3.3 Blocks and Non-Local Return
+- JIT block creation and invocation
+- Safe path for NLR (deopt to interpreter)
+
+#### 3.4 OSR Lite
+- Allow jumping into JITted loops from interpreter when loop is hot
+
+---
+
+### Phase 4: Polish & Advanced
+
+**Goal**: Production-quality JIT
+
+#### 4.1 Code Cache Management
+- Eviction/aging policies
+- Per-class versioning for invalidation (instead of global bumps)
+
+#### 4.2 Patch-in-Place
+- For hottest monomorphic sites, patch direct call/jump once stable
+
+#### 4.3 Optimizing JIT (Far Future)
 - Profile-guided optimization
 - Inlining of hot sends
 - Type specialization
@@ -136,75 +164,104 @@ When a method is added/changed:
 
 ## Implementation Notes
 
-### Method Cache Structure
+### Cross-Platform Executable Memory (Phase 0)
 
 ```zig
-const MethodCacheEntry = struct {
-    selector: Value,      // Selector being looked up
-    class: Value,         // Receiver's class
-    method: ?*CompiledMethod,  // Cached method (null = negative cache)
-};
+const builtin = @import("builtin");
 
-const METHOD_CACHE_SIZE = 2048;  // Must be power of 2
-var method_cache: [METHOD_CACHE_SIZE]MethodCacheEntry = undefined;
-
-fn cachedLookup(class: Value, selector: Value) ?*CompiledMethod {
-    const hash = @as(usize, @bitCast(class)) ^ @as(usize, @bitCast(selector));
-    const index = hash & (METHOD_CACHE_SIZE - 1);
-    const entry = &method_cache[index];
-
-    if (entry.class == class and entry.selector == selector) {
-        return entry.method;  // Cache hit
+fn allocateExecutableMemory(size: usize) ![]align(4096) u8 {
+    if (builtin.os.tag == .windows) {
+        const windows = std.os.windows;
+        const ptr = windows.VirtualAlloc(
+            null,
+            size,
+            windows.MEM_COMMIT | windows.MEM_RESERVE,
+            windows.PAGE_EXECUTE_READWRITE,
+        ) orelse return error.OutOfMemory;
+        return @as([*]align(4096) u8, @ptrCast(ptr))[0..size];
+    } else {
+        return std.posix.mmap(
+            null,
+            size,
+            std.posix.PROT.READ | std.posix.PROT.WRITE | std.posix.PROT.EXEC,
+            .{ .TYPE = .PRIVATE, .ANONYMOUS = true },
+            -1,
+            0,
+        );
     }
-
-    // Cache miss - do full lookup and cache result
-    const method = fullMethodLookup(class, selector);
-    entry.class = class;
-    entry.selector = selector;
-    entry.method = method;
-    return method;
 }
+
+fn freeExecutableMemory(mem: []align(4096) u8) void {
+    if (builtin.os.tag == .windows) {
+        const windows = std.os.windows;
+        windows.VirtualFree(@ptrCast(mem.ptr), 0, windows.MEM_RELEASE);
+    } else {
+        std.posix.munmap(mem);
+    }
+}
+```
+
+### JIT Call Site Cache Structure (Existing)
+
+```zig
+pub const CallSiteCache = struct {
+    expected_class: Value,           // For quick class comparison
+    cached_method: ?*CompiledMethod, // Resolved method
+    cached_holder: Value,            // Class that defines method
+    version: u32,                    // For invalidation
+    cached_jit_code: ?*CompiledCode, // JIT code if compiled
+    method_ptr: usize,               // Owning method
+    bytecode_offset: u16,            // Send location
+};
 ```
 
 ### SmallInteger Fast Path Example
 
 ```zig
-fn executeSend(self: *Interpreter, selector: Value, argCount: usize) !void {
-    const receiver = self.stackAt(argCount);
-
-    // Fast path for SmallInteger arithmetic
-    if (receiver.isSmallInt() and argCount == 1) {
-        const arg = self.stackAt(0);
-        if (arg.isSmallInt()) {
-            if (selector == self.specialSelectors.plus) {
-                // Overflow check
-                const a = receiver.asSmallInt();
-                const b = arg.asSmallInt();
-                if (@addWithOverflow(a, b)) |result| {
-                    self.popN(2);
-                    self.push(Value.fromSmallInt(result));
-                    return;
-                }
+// In interpreter send handling:
+if (receiver.isSmallInt() and argCount == 1) {
+    const arg = self.stackAt(0);
+    if (arg.isSmallInt()) {
+        const a = receiver.asSmallInt();
+        const b = arg.asSmallInt();
+        if (selector == self.specialSelectors.plus) {
+            const result = @addWithOverflow(a, b);
+            if (result[1] == 0) {  // No overflow
+                self.popN(2);
+                self.push(Value.fromSmallInt(result[0]));
+                return;
             }
-            // ... similar for -, *, <, >, =, etc.
         }
+        // ... similar for -, *, <, >, =, etc.
     }
-
-    // Normal send path
-    return self.normalSend(receiver, selector, argCount);
 }
+// Fall through to normal send
 ```
 
 ---
 
 ## Success Metrics
 
-| Phase | Target Sends/sec | Speedup |
-|-------|------------------|---------|
-| Current | 176,000 | 1x |
-| Phase 1 | 800,000 - 1,500,000 | 5-8x |
-| Phase 2 | 3,000,000 - 5,000,000 | 17-28x |
-| Phase 3 | 10,000,000+ | 50x+ |
+| Phase | Target Sends/sec | Speedup | Status |
+|-------|------------------|---------|--------|
+| Current | 176,000 | 1x | ✓ |
+| Phase 0 | 176,000 | 1x | ✓ Windows build fix |
+| Phase 1.1 | - | - | ✓ SmallInteger fast paths (interpreter) |
+| Phase 1.2 | - | - | ✓ JIT jumps & backpatching |
+| Phase 1 | 500,000 - 1,000,000 | 3-5x | Interpreter + JIT foundation |
+| Phase 2 | 2,000,000 - 4,000,000 | 10-20x | Inline caching |
+| Phase 3 | 5,000,000 - 10,000,000 | 30-50x | Broader coverage |
+| Phase 4 | 10,000,000+ | 50x+ | Production polish |
+
+---
+
+## Testing Checkpoints
+
+After each phase:
+1. `zig build` succeeds on Windows and Linux
+2. `--jit --no-repl --load-order load-order-fixed.txt` completes without crash
+3. Microbenchmarks show expected speedup (or no regression)
+4. No crashes under debugger
 
 ---
 
