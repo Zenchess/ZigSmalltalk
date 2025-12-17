@@ -18,7 +18,9 @@
 
 | Benchmark | Rate | Notes |
 |-----------|------|-------|
-| Fibonacci (fib 20 x100) | **~11,500,000 sends/sec** | With SP registerization |
+| Fibonacci (fib 30) | **~9,000,000 sends/sec** | Current JIT baseline |
+| Fibonacci (fib 35) | **~9,200,000 sends/sec** | Consistent |
+| Raw sends (10M) | ~2,200,000 sends/sec | timesRepeat overhead |
 | Previous baseline | ~1,050,000 sends/sec | Before SP registerization |
 | Original baseline | ~176,000 sends/sec | Without fast paths |
 
@@ -26,13 +28,14 @@
 
 | Implementation | Year | Sends/sec | vs ZigSmalltalk |
 |----------------|------|-----------|-----------------|
-| **ZigSmalltalk** | **2024** | **~11,500,000** | **1x** |
-| VisualWorks 3.0 | 2000 | ~5,950,000 | 0.5x (we're 2x faster!) |
-| Dolphin 2.1 | 2000 | ~1,112,000 | 0.1x (we're 10x faster!) |
-| Squeak 2.5 | 1999 | ~850,000 | 0.07x (we're 13x faster!) |
-| Squeak/Cog | 2014 | ~180,000,000 | 15x faster than us |
+| **ZigSmalltalk** | **2024** | **~9,000,000** | **1x** |
+| VisualWorks 3.0 | 2000 | ~5,950,000 | 0.66x (we're 1.5x faster!) |
+| Dolphin 2.1 | 2000 | ~1,112,000 | 0.12x (we're 8x faster!) |
+| Squeak 2.5 | 1999 | ~850,000 | 0.09x (we're 11x faster!) |
+| Squeak Stack VM | 2024 | ~20-50,000,000 | 2-5x faster than us |
+| Pharo Cog JIT | 2024 | ~100-200,000,000 | 10-20x faster than us |
 
-**Current status**: FASTER than VisualWorks 3.0 JIT! Phase 1.3 (SP registerization) provided ~12x speedup.
+**Current status**: Faster than VisualWorks 3.0 and classic Smalltalks. 2-5x slower than modern Squeak, 10-20x slower than Pharo Cog.
 
 ### Compiler-Level Control Flow Inlining (NEW)
 
@@ -303,13 +306,13 @@ if (receiver.isSmallInt() and argCount == 1) {
 | Phase 0 | 176,000 | 1x | ✓ Windows/POSIX exec memory |
 | Phase 1.1 | 1,000,000+ | 6x | ✓ SmallInteger fast paths |
 | Phase 1.2 | - | - | ✓ JIT jumps & backpatching |
-| Phase 1.3 | **11,500,000** | **65x** | ✓ **SP registerization (12x speedup!)** |
+| Phase 1.3 | **9,000,000** | **51x** | ✓ **SP registerization** |
 | Compiler | - | - | ✓ **ifTrue:/ifFalse: inlining** |
-| Phase 2 | 20,000,000+ | 100x+ | Inline caching |
+| Phase 2 | 20,000,000+ | 100x+ | ⟳ Inline caching improvements |
 | Phase 3 | 50,000,000+ | 250x+ | Broader coverage (blocks) |
 | Phase 4 | 100,000,000+ | 500x+ | Production polish (Cog-level) |
 
-**Current**: ~11,500,000 sends/sec (65x improvement from baseline, 2x faster than VisualWorks 3.0!)
+**Current**: ~9,000,000 sends/sec (51x improvement from baseline, 1.5x faster than VisualWorks 3.0!)
 
 ### Compiler Optimizations Completed
 
