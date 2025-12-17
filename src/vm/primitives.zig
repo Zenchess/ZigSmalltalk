@@ -397,6 +397,32 @@ pub fn executePrimitive(interp: *Interpreter, prim_index: u16) InterpreterError!
         .image_directory => primImageDirectory(interp),
         .image_path_set => primImagePathSet(interp),
 
+        // Terminal primitives (940-963)
+        .terminal_init => primTerminalInit(interp),
+        .terminal_deinit => primTerminalDeinit(interp),
+        .terminal_write => primTerminalWrite(interp),
+        .terminal_clear => primTerminalClear(interp),
+        .terminal_set_cursor => primTerminalSetCursor(interp),
+        .terminal_get_cursor => primTerminalGetCursor(interp),
+        .terminal_set_fg_color => primTerminalSetFgColor(interp),
+        .terminal_set_bg_color => primTerminalSetBgColor(interp),
+        .terminal_reset_style => primTerminalResetStyle(interp),
+        .terminal_poll_key => primTerminalPollKey(interp),
+        .terminal_read_key => primTerminalReadKey(interp),
+        .terminal_get_size => primTerminalGetSize(interp),
+        .terminal_flush => primTerminalFlush(interp),
+        .terminal_set_bold => primTerminalSetBold(interp),
+        .terminal_set_italic => primTerminalSetItalic(interp),
+        .terminal_set_underline => primTerminalSetUnderline(interp),
+        .terminal_hide_cursor => primTerminalHideCursor(interp),
+        .terminal_show_cursor => primTerminalShowCursor(interp),
+        .terminal_clear_line => primTerminalClearLine(interp),
+        .terminal_clear_to_eol => primTerminalClearToEol(interp),
+        .terminal_set_fg_indexed => primTerminalSetFgIndexed(interp),
+        .terminal_set_bg_indexed => primTerminalSetBgIndexed(interp),
+        .terminal_draw_box => primTerminalDrawBox(interp),
+        .terminal_fill_rect => primTerminalFillRect(interp),
+
         else => InterpreterError.PrimitiveFailed,
     };
 }
@@ -2411,13 +2437,13 @@ pub fn primBlockValue(interp: *Interpreter) InterpreterError!Value {
     } else if (outer_context_val.isSmallInt()) {
         // Old format: stack indices (for backwards compatibility)
         interp.outer_temp_base = @intCast(outer_context_val.asSmallInt());
-        interp.home_temp_base = if (home_context_val.isSmallInt()) @intCast(home_context_val.asSmallInt()) else interp.temp_base;
+        interp.home_temp_base = if (home_context_val.isSmallInt()) @intCast(home_context_val.asSmallInt()) else saved_home_temp_base;
         interp.heap_context = Value.nil;
         interp.home_heap_context = Value.nil;
     } else {
-        // Neither format - use defaults
-        interp.outer_temp_base = interp.temp_base;
-        interp.home_temp_base = interp.temp_base;
+        // Neither format - use saved values to access outer scope temps
+        interp.outer_temp_base = saved_temp_base;
+        interp.home_temp_base = saved_home_temp_base;
         interp.heap_context = Value.nil;
         interp.home_heap_context = Value.nil;
     }
@@ -2439,6 +2465,10 @@ pub fn primBlockValue(interp: *Interpreter) InterpreterError!Value {
         const outer_ctx = interp.heap_context;
         // Create new context for this block's temps
         const heap_ctx = try interp.createHeapContext(num_temps);
+        // Store the outer context in SENDER field so push_outer_temp can follow the chain
+        if (!outer_ctx.isNil()) {
+            heap_ctx.setField(Heap.CONTEXT_FIELD_SENDER, outer_ctx, heap_ctx.header.size);
+        }
         interp.heap_context = Value.fromObject(heap_ctx);
         // Keep home context pointing to outer for level >= 2 access
         if (interp.home_heap_context.isNil()) {
@@ -2552,12 +2582,13 @@ fn primBlockValue1(interp: *Interpreter) InterpreterError!Value {
         interp.home_temp_base = saved_home_temp_base;
     } else if (outer_context_val.isSmallInt()) {
         interp.outer_temp_base = @intCast(outer_context_val.asSmallInt());
-        interp.home_temp_base = if (home_context_val.isSmallInt()) @intCast(home_context_val.asSmallInt()) else interp.sp - 1;
+        interp.home_temp_base = if (home_context_val.isSmallInt()) @intCast(home_context_val.asSmallInt()) else saved_home_temp_base;
         interp.heap_context = Value.nil;
         interp.home_heap_context = Value.nil;
     } else {
-        interp.outer_temp_base = interp.sp - 1;
-        interp.home_temp_base = interp.sp - 1;
+        // Neither format - use saved values to access outer scope temps
+        interp.outer_temp_base = saved_temp_base;
+        interp.home_temp_base = saved_home_temp_base;
         interp.heap_context = Value.nil;
         interp.home_heap_context = Value.nil;
     }
@@ -2586,6 +2617,10 @@ fn primBlockValue1(interp: *Interpreter) InterpreterError!Value {
     if (num_temps > 0) {
         const outer_ctx = interp.heap_context;
         const heap_ctx = try interp.createHeapContext(1 + num_temps); // 1 arg + temps
+        // Store the outer context in SENDER field so push_outer_temp can follow the chain
+        if (!outer_ctx.isNil()) {
+            heap_ctx.setField(Heap.CONTEXT_FIELD_SENDER, outer_ctx, heap_ctx.header.size);
+        }
         interp.heap_context = Value.fromObject(heap_ctx);
         if (interp.home_heap_context.isNil()) {
             interp.home_heap_context = outer_ctx;
@@ -2696,12 +2731,13 @@ fn primBlockValue2(interp: *Interpreter) InterpreterError!Value {
         interp.home_temp_base = saved_home_temp_base;
     } else if (outer_context_val.isSmallInt()) {
         interp.outer_temp_base = @intCast(outer_context_val.asSmallInt());
-        interp.home_temp_base = if (home_context_val.isSmallInt()) @intCast(home_context_val.asSmallInt()) else interp.sp - 1;
+        interp.home_temp_base = if (home_context_val.isSmallInt()) @intCast(home_context_val.asSmallInt()) else saved_home_temp_base;
         interp.heap_context = Value.nil;
         interp.home_heap_context = Value.nil;
     } else {
-        interp.outer_temp_base = interp.sp - 1;
-        interp.home_temp_base = interp.sp - 1;
+        // Neither format - use saved values to access outer scope temps
+        interp.outer_temp_base = saved_temp_base;
+        interp.home_temp_base = saved_home_temp_base;
         interp.heap_context = Value.nil;
         interp.home_heap_context = Value.nil;
     }
@@ -2730,6 +2766,10 @@ fn primBlockValue2(interp: *Interpreter) InterpreterError!Value {
     if (num_temps > 0) {
         const outer_ctx = interp.heap_context;
         const heap_ctx = try interp.createHeapContext(2 + num_temps); // 2 args + temps
+        // Store the outer context in SENDER field so push_outer_temp can follow the chain
+        if (!outer_ctx.isNil()) {
+            heap_ctx.setField(Heap.CONTEXT_FIELD_SENDER, outer_ctx, heap_ctx.header.size);
+        }
         interp.heap_context = Value.fromObject(heap_ctx);
         if (interp.home_heap_context.isNil()) {
             interp.home_heap_context = outer_ctx;
@@ -2843,12 +2883,13 @@ fn primBlockValue3(interp: *Interpreter) InterpreterError!Value {
         interp.home_temp_base = saved_home_temp_base;
     } else if (outer_context_val.isSmallInt()) {
         interp.outer_temp_base = @intCast(outer_context_val.asSmallInt());
-        interp.home_temp_base = if (home_context_val.isSmallInt()) @intCast(home_context_val.asSmallInt()) else interp.sp - 1;
+        interp.home_temp_base = if (home_context_val.isSmallInt()) @intCast(home_context_val.asSmallInt()) else saved_home_temp_base;
         interp.heap_context = Value.nil;
         interp.home_heap_context = Value.nil;
     } else {
-        interp.outer_temp_base = interp.sp - 1;
-        interp.home_temp_base = interp.sp - 1;
+        // Neither format - use saved values to access outer scope temps
+        interp.outer_temp_base = saved_temp_base;
+        interp.home_temp_base = saved_home_temp_base;
         interp.heap_context = Value.nil;
         interp.home_heap_context = Value.nil;
     }
@@ -2877,6 +2918,10 @@ fn primBlockValue3(interp: *Interpreter) InterpreterError!Value {
     if (num_temps > 0) {
         const outer_ctx = interp.heap_context;
         const heap_ctx = try interp.createHeapContext(3 + num_temps); // 3 args + temps
+        // Store the outer context in SENDER field so push_outer_temp can follow the chain
+        if (!outer_ctx.isNil()) {
+            heap_ctx.setField(Heap.CONTEXT_FIELD_SENDER, outer_ctx, heap_ctx.header.size);
+        }
         interp.heap_context = Value.fromObject(heap_ctx);
         if (interp.home_heap_context.isNil()) {
             interp.home_heap_context = outer_ctx;
@@ -2995,12 +3040,13 @@ fn primBlockValue4(interp: *Interpreter) InterpreterError!Value {
         interp.home_temp_base = saved_home_temp_base;
     } else if (outer_context_val.isSmallInt()) {
         interp.outer_temp_base = @intCast(outer_context_val.asSmallInt());
-        interp.home_temp_base = if (home_context_val.isSmallInt()) @intCast(home_context_val.asSmallInt()) else interp.sp - 1;
+        interp.home_temp_base = if (home_context_val.isSmallInt()) @intCast(home_context_val.asSmallInt()) else saved_home_temp_base;
         interp.heap_context = Value.nil;
         interp.home_heap_context = Value.nil;
     } else {
-        interp.outer_temp_base = interp.sp - 1;
-        interp.home_temp_base = interp.sp - 1;
+        // Neither format - use saved values to access outer scope temps
+        interp.outer_temp_base = saved_temp_base;
+        interp.home_temp_base = saved_home_temp_base;
         interp.heap_context = Value.nil;
         interp.home_heap_context = Value.nil;
     }
@@ -3030,6 +3076,10 @@ fn primBlockValue4(interp: *Interpreter) InterpreterError!Value {
     if (num_temps > 0) {
         const outer_ctx = interp.heap_context;
         const heap_ctx = try interp.createHeapContext(4 + num_temps); // 4 args + temps
+        // Store the outer context in SENDER field so push_outer_temp can follow the chain
+        if (!outer_ctx.isNil()) {
+            heap_ctx.setField(Heap.CONTEXT_FIELD_SENDER, outer_ctx, heap_ctx.header.size);
+        }
         interp.heap_context = Value.fromObject(heap_ctx);
         if (interp.home_heap_context.isNil()) {
             interp.home_heap_context = outer_ctx;
@@ -3175,6 +3225,10 @@ fn primBlockValueWithArgs(interp: *Interpreter) InterpreterError!Value {
     if (num_temps > 0) {
         const outer_ctx = interp.heap_context;
         const heap_ctx = try interp.createHeapContext(array_size + num_temps); // args + temps
+        // Store the outer context in SENDER field so push_outer_temp can follow the chain
+        if (!outer_ctx.isNil()) {
+            heap_ctx.setField(Heap.CONTEXT_FIELD_SENDER, outer_ctx, heap_ctx.header.size);
+        }
         interp.heap_context = Value.fromObject(heap_ctx);
         if (interp.home_heap_context.isNil()) {
             interp.home_heap_context = outer_ctx;
@@ -4092,6 +4146,10 @@ fn primToDo(interp: *Interpreter) InterpreterError!Value {
                 interp.home_heap_context = saved_home_heap_context;
                 return InterpreterError.OutOfMemory;
             };
+            // Store the outer context in SENDER field so push_outer_temp can follow the chain
+            if (!outer_ctx.isNil()) {
+                heap_ctx.setField(Heap.CONTEXT_FIELD_SENDER, outer_ctx, heap_ctx.header.size);
+            }
             interp.heap_context = Value.fromObject(heap_ctx);
             if (interp.home_heap_context.isNil()) {
                 interp.home_heap_context = outer_ctx;
@@ -10917,4 +10975,540 @@ fn primDllFree(interp: *Interpreter) InterpreterError!Value {
 fn primDllCallPtr(interp: *Interpreter) InterpreterError!Value {
     // This delegates to the existing runtime FFI call mechanism
     return primFFIRuntimeCall(interp);
+}
+
+// ============================================================================
+// Terminal Primitives for Smalltalk TUI (940-963)
+// ============================================================================
+
+/// Terminal state for Smalltalk TUI
+const TerminalState = struct {
+    initialized: bool = false,
+    original_termios: ?std.posix.termios = null,
+    stdout: std.fs.File = undefined,
+    stdin: std.fs.File = undefined,
+
+    fn init(self: *TerminalState) !void {
+        if (self.initialized) return;
+
+        self.stdout = std.fs.File.stdout();
+        self.stdin = std.fs.File.stdin();
+
+        // On POSIX systems, save original termios and enter raw mode
+        if (@import("builtin").os.tag != .windows) {
+            if (std.posix.tcgetattr(self.stdin.handle)) |termios| {
+                self.original_termios = termios;
+                var raw = termios;
+                // Disable canonical mode and echo
+                raw.lflag.ICANON = false;
+                raw.lflag.ECHO = false;
+                raw.lflag.ISIG = false;
+                // Set minimum characters and timeout for read
+                raw.cc[@intFromEnum(std.posix.V.MIN)] = 0;
+                raw.cc[@intFromEnum(std.posix.V.TIME)] = 0;
+                _ = std.posix.tcsetattr(self.stdin.handle, .NOW, raw) catch {};
+            } else |_| {}
+        }
+
+        // Enter alternate screen and hide cursor
+        _ = self.stdout.write("\x1b[?1049h\x1b[?25l") catch {};
+
+        self.initialized = true;
+    }
+
+    fn deinit(self: *TerminalState) void {
+        if (!self.initialized) return;
+
+        // Leave alternate screen and show cursor
+        _ = self.stdout.write("\x1b[?25h\x1b[?1049l") catch {};
+
+        // Restore original termios on POSIX
+        if (@import("builtin").os.tag != .windows) {
+            if (self.original_termios) |termios| {
+                _ = std.posix.tcsetattr(self.stdin.handle, .NOW, termios) catch {};
+            }
+        }
+
+        self.initialized = false;
+        self.original_termios = null;
+    }
+
+    fn write(self: *TerminalState, data: []const u8) void {
+        _ = self.stdout.write(data) catch {};
+    }
+
+    fn writeFmt(self: *TerminalState, comptime fmt: []const u8, args: anytype) void {
+        var buf: [256]u8 = undefined;
+        const str = std.fmt.bufPrint(&buf, fmt, args) catch return;
+        self.write(str);
+    }
+
+    fn flush(self: *TerminalState) void {
+        // stdout is typically line-buffered, but we write directly to handle
+        _ = self;
+    }
+
+    fn getSize(self: *TerminalState) struct { cols: u16, rows: u16 } {
+        _ = self;
+        // Try to get terminal size via ioctl
+        if (@import("builtin").os.tag != .windows) {
+            var ws: std.posix.winsize = undefined;
+            const TIOCGWINSZ: u32 = 0x5413;
+            const result = std.posix.system.ioctl(std.fs.File.stdout().handle, TIOCGWINSZ, @intFromPtr(&ws));
+            if (result == 0) {
+                return .{ .cols = ws.ws_col, .rows = ws.ws_row };
+            }
+        }
+        // Default fallback
+        return .{ .cols = 80, .rows = 24 };
+    }
+
+    // Windows console functions (from msvcrt)
+    extern "c" fn _kbhit() c_int;
+    extern "c" fn _getch() c_int;
+
+    fn pollKey(self: *TerminalState) ?u32 {
+        _ = self;
+        // Non-blocking key read
+        if (@import("builtin").os.tag == .windows) {
+            // Windows: use _kbhit and _getch from msvcrt
+            if (_kbhit() != 0) {
+                const ch = _getch();
+                // Handle extended keys (arrows, function keys)
+                if (ch == 0 or ch == 0xE0) {
+                    const ext = _getch();
+                    return switch (ext) {
+                        72 => 0x1001, // Up arrow
+                        80 => 0x1002, // Down arrow
+                        77 => 0x1003, // Right arrow
+                        75 => 0x1004, // Left arrow
+                        71 => 0x1005, // Home
+                        79 => 0x1006, // End
+                        83 => 0x1007, // Delete
+                        73 => 0x1008, // Page Up
+                        81 => 0x1009, // Page Down
+                        else => @as(u32, @intCast(ext)) + 0x100,
+                    };
+                }
+                return @intCast(ch);
+            }
+            return null;
+        } else {
+            var buf: [8]u8 = undefined;
+            const stdin = std.fs.File.stdin();
+            const n = stdin.read(&buf) catch return null;
+            if (n == 0) return null;
+
+            // Parse escape sequences
+            if (buf[0] == 0x1b and n > 1) {
+                return parseEscapeSequence(buf[0..n]);
+            }
+            return buf[0];
+        }
+    }
+
+    fn parseEscapeSequence(seq: []const u8) u32 {
+        if (seq.len < 2) return seq[0];
+        if (seq[1] == '[') {
+            if (seq.len >= 3) {
+                return switch (seq[2]) {
+                    'A' => 0x1001, // Up arrow
+                    'B' => 0x1002, // Down arrow
+                    'C' => 0x1003, // Right arrow
+                    'D' => 0x1004, // Left arrow
+                    'H' => 0x1005, // Home
+                    'F' => 0x1006, // End
+                    '3' => if (seq.len >= 4 and seq[3] == '~') @as(u32, 0x1007) else seq[0], // Delete
+                    '5' => if (seq.len >= 4 and seq[3] == '~') @as(u32, 0x1008) else seq[0], // Page Up
+                    '6' => if (seq.len >= 4 and seq[3] == '~') @as(u32, 0x1009) else seq[0], // Page Down
+                    else => seq[0],
+                };
+            }
+        }
+        return seq[0];
+    }
+};
+
+var terminal_state: TerminalState = .{};
+
+/// Primitive 940: Initialize terminal in raw/alternate screen mode
+fn primTerminalInit(interp: *Interpreter) InterpreterError!Value {
+    const receiver = try interp.pop();
+    terminal_state.init() catch return InterpreterError.PrimitiveFailed;
+    return receiver;
+}
+
+/// Primitive 941: Restore terminal to normal mode
+fn primTerminalDeinit(interp: *Interpreter) InterpreterError!Value {
+    const receiver = try interp.pop();
+    terminal_state.deinit();
+    return receiver;
+}
+
+/// Primitive 942: Write string at current cursor position
+fn primTerminalWrite(interp: *Interpreter) InterpreterError!Value {
+    const str_val = try interp.pop();
+    const receiver = try interp.pop();
+
+    if (str_val.isObject()) {
+        const obj = str_val.asObject();
+        if (obj.header.getFormat() == .bytes) {
+            const str_bytes = obj.bytes(obj.header.size);
+            terminal_state.write(str_bytes);
+            return receiver;
+        }
+    }
+    return InterpreterError.PrimitiveFailed;
+}
+
+/// Primitive 943: Clear entire screen
+fn primTerminalClear(interp: *Interpreter) InterpreterError!Value {
+    const receiver = try interp.pop();
+    terminal_state.write("\x1b[2J\x1b[H");
+    return receiver;
+}
+
+/// Primitive 944: Set cursor position (row, col) - 1-based
+fn primTerminalSetCursor(interp: *Interpreter) InterpreterError!Value {
+    const col_val = try interp.pop();
+    const row_val = try interp.pop();
+    const receiver = try interp.pop();
+
+    if (row_val.isSmallInt() and col_val.isSmallInt()) {
+        const row: i32 = @intCast(row_val.asSmallInt());
+        const col: i32 = @intCast(col_val.asSmallInt());
+        terminal_state.writeFmt("\x1b[{d};{d}H", .{ row, col });
+        return receiver;
+    }
+    return InterpreterError.PrimitiveFailed;
+}
+
+/// Primitive 945: Get cursor position - returns Point
+fn primTerminalGetCursor(interp: *Interpreter) InterpreterError!Value {
+    const receiver = try interp.pop();
+    // Query cursor position with escape sequence
+    terminal_state.write("\x1b[6n");
+    // TODO: Parse response \x1b[row;colR
+    // For now, return a default position
+    _ = receiver;
+    return InterpreterError.PrimitiveFailed; // Not fully implemented
+}
+
+/// Primitive 946: Set foreground color (RGB)
+fn primTerminalSetFgColor(interp: *Interpreter) InterpreterError!Value {
+    const b_val = try interp.pop();
+    const g_val = try interp.pop();
+    const r_val = try interp.pop();
+    const receiver = try interp.pop();
+
+    if (r_val.isSmallInt() and g_val.isSmallInt() and b_val.isSmallInt()) {
+        const r: u8 = @intCast(@as(i32, @intCast(r_val.asSmallInt())) & 255);
+        const g: u8 = @intCast(@as(i32, @intCast(g_val.asSmallInt())) & 255);
+        const b: u8 = @intCast(@as(i32, @intCast(b_val.asSmallInt())) & 255);
+        terminal_state.writeFmt("\x1b[38;2;{d};{d};{d}m", .{ r, g, b });
+        return receiver;
+    }
+    return InterpreterError.PrimitiveFailed;
+}
+
+/// Primitive 947: Set background color (RGB)
+fn primTerminalSetBgColor(interp: *Interpreter) InterpreterError!Value {
+    const b_val = try interp.pop();
+    const g_val = try interp.pop();
+    const r_val = try interp.pop();
+    const receiver = try interp.pop();
+
+    if (r_val.isSmallInt() and g_val.isSmallInt() and b_val.isSmallInt()) {
+        const r: u8 = @intCast(@as(i32, @intCast(r_val.asSmallInt())) & 255);
+        const g: u8 = @intCast(@as(i32, @intCast(g_val.asSmallInt())) & 255);
+        const b: u8 = @intCast(@as(i32, @intCast(b_val.asSmallInt())) & 255);
+        terminal_state.writeFmt("\x1b[48;2;{d};{d};{d}m", .{ r, g, b });
+        return receiver;
+    }
+    return InterpreterError.PrimitiveFailed;
+}
+
+/// Primitive 948: Reset all styles and colors
+fn primTerminalResetStyle(interp: *Interpreter) InterpreterError!Value {
+    const receiver = try interp.pop();
+    terminal_state.write("\x1b[0m");
+    return receiver;
+}
+
+/// Primitive 949: Poll for key press (non-blocking) - returns nil if none
+fn primTerminalPollKey(interp: *Interpreter) InterpreterError!Value {
+    const receiver = try interp.pop();
+    _ = receiver;
+
+    if (terminal_state.pollKey()) |key| {
+        return Value.fromSmallInt(@intCast(key));
+    }
+    return Value.nil;
+}
+
+/// Primitive 950: Read key (blocking)
+fn primTerminalReadKey(interp: *Interpreter) InterpreterError!Value {
+    const receiver = try interp.pop();
+    _ = receiver;
+
+    // For blocking read, we need to wait for input
+    // This is more complex and may need to be implemented differently
+    if (@import("builtin").os.tag != .windows) {
+        var buf: [8]u8 = undefined;
+        // Set blocking mode temporarily
+        var termios = std.posix.tcgetattr(terminal_state.stdin.handle) catch return InterpreterError.PrimitiveFailed;
+        const saved_vmin = termios.cc[@intFromEnum(std.posix.V.MIN)];
+        const saved_vtime = termios.cc[@intFromEnum(std.posix.V.TIME)];
+        termios.cc[@intFromEnum(std.posix.V.MIN)] = 1;
+        termios.cc[@intFromEnum(std.posix.V.TIME)] = 0;
+        _ = std.posix.tcsetattr(terminal_state.stdin.handle, .NOW, termios) catch {};
+
+        const n = terminal_state.stdin.read(&buf) catch 0;
+
+        // Restore non-blocking mode
+        termios.cc[@intFromEnum(std.posix.V.MIN)] = saved_vmin;
+        termios.cc[@intFromEnum(std.posix.V.TIME)] = saved_vtime;
+        _ = std.posix.tcsetattr(terminal_state.stdin.handle, .NOW, termios) catch {};
+
+        if (n > 0) {
+            if (buf[0] == 0x1b and n > 1) {
+                return Value.fromSmallInt(@intCast(TerminalState.parseEscapeSequence(buf[0..n])));
+            }
+            return Value.fromSmallInt(@intCast(buf[0]));
+        }
+    }
+    return InterpreterError.PrimitiveFailed;
+}
+
+/// Primitive 951: Get terminal size - returns Point (cols @ rows)
+fn primTerminalGetSize(interp: *Interpreter) InterpreterError!Value {
+    const receiver = try interp.pop();
+    _ = receiver;
+
+    const size = terminal_state.getSize();
+
+    // Create an array {cols. rows}
+    const array = interp.heap.allocateArray(2) catch {
+        return InterpreterError.OutOfMemory;
+    };
+    const arr_obj = array.asObject();
+    const fields = arr_obj.fields(2);
+    fields[0] = Value.fromSmallInt(size.cols);
+    fields[1] = Value.fromSmallInt(size.rows);
+
+    return array;
+}
+
+/// Primitive 952: Flush output buffer
+fn primTerminalFlush(interp: *Interpreter) InterpreterError!Value {
+    const receiver = try interp.pop();
+    terminal_state.flush();
+    return receiver;
+}
+
+/// Primitive 953: Set bold mode
+fn primTerminalSetBold(interp: *Interpreter) InterpreterError!Value {
+    const bool_val = try interp.pop();
+    const receiver = try interp.pop();
+
+    if (bool_val.isTrue()) {
+        terminal_state.write("\x1b[1m");
+    } else {
+        terminal_state.write("\x1b[22m");
+    }
+    return receiver;
+}
+
+/// Primitive 954: Set italic mode
+fn primTerminalSetItalic(interp: *Interpreter) InterpreterError!Value {
+    const bool_val = try interp.pop();
+    const receiver = try interp.pop();
+
+    if (bool_val.isTrue()) {
+        terminal_state.write("\x1b[3m");
+    } else {
+        terminal_state.write("\x1b[23m");
+    }
+    return receiver;
+}
+
+/// Primitive 955: Set underline mode
+fn primTerminalSetUnderline(interp: *Interpreter) InterpreterError!Value {
+    const bool_val = try interp.pop();
+    const receiver = try interp.pop();
+
+    if (bool_val.isTrue()) {
+        terminal_state.write("\x1b[4m");
+    } else {
+        terminal_state.write("\x1b[24m");
+    }
+    return receiver;
+}
+
+/// Primitive 956: Hide cursor
+fn primTerminalHideCursor(interp: *Interpreter) InterpreterError!Value {
+    const receiver = try interp.pop();
+    terminal_state.write("\x1b[?25l");
+    return receiver;
+}
+
+/// Primitive 957: Show cursor
+fn primTerminalShowCursor(interp: *Interpreter) InterpreterError!Value {
+    const receiver = try interp.pop();
+    terminal_state.write("\x1b[?25h");
+    return receiver;
+}
+
+/// Primitive 958: Clear current line
+fn primTerminalClearLine(interp: *Interpreter) InterpreterError!Value {
+    const receiver = try interp.pop();
+    terminal_state.write("\x1b[2K");
+    return receiver;
+}
+
+/// Primitive 959: Clear to end of line
+fn primTerminalClearToEol(interp: *Interpreter) InterpreterError!Value {
+    const receiver = try interp.pop();
+    terminal_state.write("\x1b[K");
+    return receiver;
+}
+
+/// Primitive 960: Set foreground color by index (0-255)
+fn primTerminalSetFgIndexed(interp: *Interpreter) InterpreterError!Value {
+    const idx_val = try interp.pop();
+    const receiver = try interp.pop();
+
+    if (idx_val.isSmallInt()) {
+        const idx: u8 = @intCast(@as(i32, @intCast(idx_val.asSmallInt())) & 255);
+        terminal_state.writeFmt("\x1b[38;5;{d}m", .{idx});
+        return receiver;
+    }
+    return InterpreterError.PrimitiveFailed;
+}
+
+/// Primitive 961: Set background color by index (0-255)
+fn primTerminalSetBgIndexed(interp: *Interpreter) InterpreterError!Value {
+    const idx_val = try interp.pop();
+    const receiver = try interp.pop();
+
+    if (idx_val.isSmallInt()) {
+        const idx: u8 = @intCast(@as(i32, @intCast(idx_val.asSmallInt())) & 255);
+        terminal_state.writeFmt("\x1b[48;5;{d}m", .{idx});
+        return receiver;
+    }
+    return InterpreterError.PrimitiveFailed;
+}
+
+/// Primitive 962: Draw a box with Unicode box-drawing characters
+/// Accepts either 4 integers (x, y, w, h) or 2 arrays ({x,y}, {w,h})
+fn primTerminalDrawBox(interp: *Interpreter) InterpreterError!Value {
+    const size_val = try interp.pop();
+    const origin_val = try interp.pop();
+    const receiver = try interp.pop();
+
+    var x: i32 = 0;
+    var y: i32 = 0;
+    var w: i32 = 0;
+    var h: i32 = 0;
+
+    // Handle array arguments: drawBoxAt: {x. y} extent: {w. h}
+    if (origin_val.isObject() and size_val.isObject()) {
+        const origin_obj = origin_val.asObject();
+        const size_obj = size_val.asObject();
+        const origin_fields = origin_obj.fields(2);
+        const size_fields = size_obj.fields(2);
+        if (origin_fields[0].isSmallInt() and origin_fields[1].isSmallInt() and
+            size_fields[0].isSmallInt() and size_fields[1].isSmallInt())
+        {
+            x = @intCast(origin_fields[0].asSmallInt());
+            y = @intCast(origin_fields[1].asSmallInt());
+            w = @intCast(size_fields[0].asSmallInt());
+            h = @intCast(size_fields[1].asSmallInt());
+        } else {
+            return InterpreterError.PrimitiveFailed;
+        }
+    } else {
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    if (w > 0 and h > 0) {
+
+        // Top border
+        terminal_state.writeFmt("\x1b[{d};{d}H\u{250C}", .{ y, x }); // ┌
+        var i: i32 = 1;
+        while (i < w - 1) : (i += 1) {
+            terminal_state.write("\u{2500}"); // ─
+        }
+        terminal_state.write("\u{2510}"); // ┐
+
+        // Side borders
+        i = 1;
+        while (i < h - 1) : (i += 1) {
+            terminal_state.writeFmt("\x1b[{d};{d}H\u{2502}", .{ y + i, x }); // │
+            terminal_state.writeFmt("\x1b[{d};{d}H\u{2502}", .{ y + i, x + w - 1 }); // │
+        }
+
+        // Bottom border
+        terminal_state.writeFmt("\x1b[{d};{d}H\u{2514}", .{ y + h - 1, x }); // └
+        i = 1;
+        while (i < w - 1) : (i += 1) {
+            terminal_state.write("\u{2500}"); // ─
+        }
+        terminal_state.write("\u{2518}"); // ┘
+
+        return receiver;
+    }
+    return InterpreterError.PrimitiveFailed;
+}
+
+/// Primitive 963: Fill a rectangle with a character
+/// Accepts: origin array {x,y}, size array {w,h}, char (integer)
+fn primTerminalFillRect(interp: *Interpreter) InterpreterError!Value {
+    const char_val = try interp.pop();
+    const size_val = try interp.pop();
+    const origin_val = try interp.pop();
+    const receiver = try interp.pop();
+
+    var fill_char: u8 = ' ';
+    if (char_val.isSmallInt()) {
+        fill_char = @intCast(@as(i32, @intCast(char_val.asSmallInt())) & 255);
+    }
+
+    var x: i32 = 0;
+    var y: i32 = 0;
+    var w: i32 = 0;
+    var h: i32 = 0;
+
+    // Handle array arguments: fillRectAt: {x. y} extent: {w. h} char: c
+    if (origin_val.isObject() and size_val.isObject()) {
+        const origin_obj = origin_val.asObject();
+        const size_obj = size_val.asObject();
+        const origin_fields = origin_obj.fields(2);
+        const size_fields = size_obj.fields(2);
+        if (origin_fields[0].isSmallInt() and origin_fields[1].isSmallInt() and
+            size_fields[0].isSmallInt() and size_fields[1].isSmallInt())
+        {
+            x = @intCast(origin_fields[0].asSmallInt());
+            y = @intCast(origin_fields[1].asSmallInt());
+            w = @intCast(size_fields[0].asSmallInt());
+            h = @intCast(size_fields[1].asSmallInt());
+        } else {
+            return InterpreterError.PrimitiveFailed;
+        }
+    } else {
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    if (w > 0 and h > 0) {
+        var row: i32 = 0;
+        while (row < h) : (row += 1) {
+            terminal_state.writeFmt("\x1b[{d};{d}H", .{ y + row, x });
+            var col: i32 = 0;
+            while (col < w) : (col += 1) {
+                terminal_state.writeFmt("{c}", .{fill_char});
+            }
+        }
+        return receiver;
+    }
+    return InterpreterError.PrimitiveFailed;
 }

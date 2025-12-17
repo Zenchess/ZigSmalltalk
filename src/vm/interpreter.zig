@@ -1012,6 +1012,10 @@ pub const Interpreter = struct {
         self.receiver = recv;
         self.temp_base = self.sp;
         self.outer_temp_base = self.temp_base;
+        self.home_temp_base = self.temp_base;
+        // Reset heap contexts for fresh execution
+        self.heap_context = Value.nil;
+        self.home_heap_context = Value.nil;
 
         // Push receiver
         try self.push(recv);
@@ -1557,7 +1561,24 @@ pub const Interpreter = struct {
                     const index = self.fetchByte();
 
                     // Try heap context first (for cross-process variable access)
-                    const heap_ctx = if (level >= 2) self.home_heap_context else self.heap_context;
+                    var heap_ctx = if (level >= 2) self.home_heap_context else self.heap_context;
+
+                    // For level 1, if current context has a sender, follow the chain
+                    // This handles the case where a block with temps needs to access outer method temps
+                    // If current heap_ctx is a block's temp context, SENDER points to outer context
+                    if (level == 1 and !heap_ctx.isNil()) {
+                        const ctx_obj = heap_ctx.asObject();
+                        const sender = ctx_obj.getField(Heap.CONTEXT_FIELD_SENDER, ctx_obj.header.size);
+                        if (!sender.isNil() and sender.isObject()) {
+                            // Use the sender (outer) context instead
+                            heap_ctx = sender;
+                        } else {
+                            // Block has temps but outer method uses stack temps (no heap context)
+                            // Must fall back to stack-based access for the outer temp
+                            heap_ctx = Value.nil;
+                        }
+                    }
+
                     if (!heap_ctx.isNil()) {
                         // Read from heap-allocated context
                         const ctx_obj = heap_ctx.asObject();
@@ -1587,7 +1608,23 @@ pub const Interpreter = struct {
                     self.stack[slot] = val;
 
                     // Also write to heap context for cross-process/forked block access
-                    const heap_ctx = if (level >= 2) self.home_heap_context else self.heap_context;
+                    var heap_ctx = if (level >= 2) self.home_heap_context else self.heap_context;
+
+                    // For level 1, if current context has a sender, follow the chain
+                    // This handles the case where a block with temps needs to store to outer method temps
+                    if (level == 1 and !heap_ctx.isNil()) {
+                        const ctx_obj = heap_ctx.asObject();
+                        const sender = ctx_obj.getField(Heap.CONTEXT_FIELD_SENDER, ctx_obj.header.size);
+                        if (!sender.isNil() and sender.isObject()) {
+                            // Use the sender (outer) context instead
+                            heap_ctx = sender;
+                        } else {
+                            // Block has temps but outer method uses stack temps
+                            // Stack write above handles it, no heap context to update
+                            heap_ctx = Value.nil;
+                        }
+                    }
+
                     if (!heap_ctx.isNil()) {
                         const ctx_obj = heap_ctx.asObject();
                         setHeapContextTemp(ctx_obj, index, val);
@@ -4131,7 +4168,21 @@ pub const Interpreter = struct {
         const index = bc[self.ip + 1];
         self.ip += 2;
 
-        const heap_ctx = if (level >= 2) self.home_heap_context else self.heap_context;
+        var heap_ctx = if (level >= 2) self.home_heap_context else self.heap_context;
+
+        // For level 1, if current context has a sender, follow the chain
+        // This handles the case where a block with temps needs to access outer method temps
+        if (level == 1 and !heap_ctx.isNil()) {
+            const ctx_obj = heap_ctx.asObject();
+            const sender = ctx_obj.getField(Heap.CONTEXT_FIELD_SENDER, ctx_obj.header.size);
+            if (!sender.isNil() and sender.isObject()) {
+                heap_ctx = sender;
+            } else {
+                // Block has temps but outer method uses stack temps
+                heap_ctx = Value.nil;
+            }
+        }
+
         if (!heap_ctx.isNil()) {
             const ctx_obj = heap_ctx.asObject();
             self.stack[self.sp] = getHeapContextTemp(ctx_obj, index);
@@ -4158,7 +4209,20 @@ pub const Interpreter = struct {
         self.stack[slot] = val;
 
         // Also write to heap context for cross-process/forked block access
-        const heap_ctx = if (level >= 2) self.home_heap_context else self.heap_context;
+        var heap_ctx = if (level >= 2) self.home_heap_context else self.heap_context;
+
+        // For level 1, if current context has a sender, follow the chain
+        if (level == 1 and !heap_ctx.isNil()) {
+            const ctx_obj = heap_ctx.asObject();
+            const sender = ctx_obj.getField(Heap.CONTEXT_FIELD_SENDER, ctx_obj.header.size);
+            if (!sender.isNil() and sender.isObject()) {
+                heap_ctx = sender;
+            } else {
+                // Block has temps but outer method uses stack temps
+                heap_ctx = Value.nil;
+            }
+        }
+
         if (!heap_ctx.isNil()) {
             const ctx_obj = heap_ctx.asObject();
             setHeapContextTemp(ctx_obj, index, val);
