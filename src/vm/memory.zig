@@ -431,6 +431,22 @@ pub const Heap = struct {
         return self.globals.get(name);
     }
 
+    /// Global entry for mutable access
+    pub const GlobalEntry = struct {
+        value: Value,
+        ptr: *Value,
+
+        pub fn setValue(self: *GlobalEntry, val: Value) void {
+            self.ptr.* = val;
+            self.value = val;
+        }
+    };
+
+    /// Get a mutable entry for a global variable (for fast counter loops)
+    pub fn getGlobalEntry(self: *Heap, name: []const u8) ?*Value {
+        return self.globals.getPtr(name);
+    }
+
     fn nextHash(self: *Heap) u32 {
         const h = self.next_hash;
         self.next_hash +%= 1;
@@ -468,6 +484,13 @@ pub const Heap = struct {
 
         // 4. Interpreter stack (critical for GC during execution)
         if (self.interpreter) |interp| {
+            // Clear caches before tracing to avoid stale pointers
+            interp.flushAllCaches();
+            if (interp.jit_compiler) |jit_ptr| {
+                // Invalidate JIT call-site caches but keep code alive
+                jit_ptr.invalidateCachesForGc();
+            }
+
             // Trace all values on the stack
             for (interp.stack[0..interp.sp]) |*slot| {
                 slot.* = try self.copyObject(slot.*);

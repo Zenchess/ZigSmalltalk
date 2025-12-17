@@ -33,12 +33,21 @@ pub const CallSiteCache = struct {
     cached_holder: Value,
     /// Cache version for invalidation
     version: u32,
+    /// Cached JIT code for the resolved method (if compiled)
+    cached_jit_code: ?*CompiledCode,
+    /// Owning method pointer for this call site (used for runtime patching)
+    method_ptr: usize,
+    /// Bytecode offset of the send opcode in owning method
+    bytecode_offset: u16,
 
     pub const EMPTY: CallSiteCache = .{
         .expected_class = Value.nil,
         .cached_method = null,
         .cached_holder = Value.nil,
         .version = 0,
+        .cached_jit_code = null,
+        .method_ptr = 0,
+        .bytecode_offset = 0,
     };
 };
 
@@ -57,21 +66,19 @@ pub const CallSiteCache = struct {
 // - rcx: bytecode_offset (for inline cache keying)
 // Returns: Value (result in rax)
 
-/// Runtime helper called from JIT code to perform a message send
-/// This executes the full send and returns the result.
-/// Uses primitive_block_depth mechanism to detect when send completes.
-pub export fn jit_runtime_send(
+fn jitRuntimeSendCommon(
     interp: *Interpreter,
     selector_index: u8,
     num_args: u8,
     bytecode_offset: usize,
-) callconv(.c) Value {
+    is_super: bool,
+) Value {
     // Save state for error recovery
     const saved_context_ptr = interp.context_ptr;
     const saved_sp = interp.sp;
 
     // Call interpreter's sendMessage to set up the call
-    interp.sendMessage(selector_index, num_args, false, bytecode_offset) catch {
+    interp.sendMessage(selector_index, num_args, is_super, bytecode_offset) catch {
         return Value.nil;
     };
 
@@ -102,6 +109,96 @@ pub export fn jit_runtime_send(
     return result;
 }
 
+fn runCachedJitMethod(
+    interp: *Interpreter,
+    cache: *CallSiteCache,
+    recv: Value,
+    recv_pos: usize,
+    num_args: u8,
+) Value {
+    if (cache.cached_jit_code == null or cache.cached_method == null) {
+        return Value.nil;
+    }
+
+    const saved_method = interp.method;
+    const saved_method_class = interp.method_class;
+    const saved_receiver = interp.receiver;
+    const saved_ip = interp.ip;
+    const saved_temp_base = interp.temp_base;
+    const saved_outer_temp_base = interp.outer_temp_base;
+    const saved_home_temp_base = interp.home_temp_base;
+    const saved_heap_context = interp.heap_context;
+    const saved_home_heap_context = interp.home_heap_context;
+    const saved_sp = interp.sp;
+
+    // Initialize callee frame metadata so compiled code sees correct state
+    const method = cache.cached_method.?;
+    const code = cache.cached_jit_code.?;
+    interp.method = method;
+    interp.method_class = cache.cached_holder;
+    interp.receiver = recv;
+    interp.ip = 0;
+    interp.temp_base = recv_pos;
+    interp.outer_temp_base = recv_pos;
+    interp.home_temp_base = recv_pos;
+    interp.heap_context = Value.nil;
+    interp.home_heap_context = Value.nil;
+
+    // Stack layout: [ ... recv args... ]. Set sp to end of args then add temps.
+    const base_sp = recv_pos + 1 + @as(usize, num_args);
+    if (base_sp > interp.stack.len) {
+        // Restore and bail if corrupted
+        interp.method = saved_method;
+        interp.method_class = saved_method_class;
+        interp.receiver = saved_receiver;
+        interp.ip = saved_ip;
+        interp.temp_base = saved_temp_base;
+        interp.outer_temp_base = saved_outer_temp_base;
+        interp.home_temp_base = saved_home_temp_base;
+        interp.heap_context = saved_heap_context;
+        interp.home_heap_context = saved_home_heap_context;
+        interp.sp = saved_sp;
+        return Value.nil;
+    }
+    interp.sp = base_sp;
+
+    const total_temps: usize = method.header.num_temps;
+    const local_temps = if (total_temps > num_args) total_temps - @as(usize, num_args) else 0;
+    var k: usize = 0;
+    while (k < local_temps and interp.sp < interp.stack.len) : (k += 1) {
+        interp.stack[interp.sp] = Value.nil;
+        interp.sp += 1;
+    }
+
+    const result = code.entry(interp);
+
+    // Restore caller state
+    interp.method = saved_method;
+    interp.method_class = saved_method_class;
+    interp.receiver = saved_receiver;
+    interp.ip = saved_ip;
+    interp.temp_base = saved_temp_base;
+    interp.outer_temp_base = saved_outer_temp_base;
+    interp.home_temp_base = saved_home_temp_base;
+    interp.heap_context = saved_heap_context;
+    interp.home_heap_context = saved_home_heap_context;
+    interp.sp = saved_sp;
+
+    return result;
+}
+
+/// Runtime helper called from JIT code to perform a message send
+/// This executes the full send and returns the result.
+/// Uses primitive_block_depth mechanism to detect when send completes.
+pub export fn jit_runtime_send(
+    interp: *Interpreter,
+    selector_index: u8,
+    num_args: u8,
+    bytecode_offset: usize,
+) callconv(.c) Value {
+    return jitRuntimeSendCommon(interp, selector_index, num_args, bytecode_offset, false);
+}
+
 /// Runtime helper for super sends
 pub export fn jit_runtime_super_send(
     interp: *Interpreter,
@@ -109,31 +206,93 @@ pub export fn jit_runtime_super_send(
     num_args: u8,
     bytecode_offset: usize,
 ) callconv(.c) Value {
-    const saved_context_ptr = interp.context_ptr;
-    const saved_sp = interp.sp;
+    return jitRuntimeSendCommon(interp, selector_index, num_args, bytecode_offset, true);
+}
 
-    interp.sendMessage(selector_index, num_args, true, bytecode_offset) catch {
-        return Value.nil;
-    };
-
-    if (interp.context_ptr == saved_context_ptr) {
-        if (interp.sp > saved_sp) {
-            interp.sp -= 1;
-            return interp.stack[interp.sp];
+/// Runtime helper that uses per-callsite cache to dispatch sends.
+/// This is the fast path for compiled JIT code.
+pub export fn jit_runtime_send_with_cache(
+    interp: *Interpreter,
+    cache: *CallSiteCache,
+    selector_index: u8,
+    num_args: u8,
+    bytecode_offset: usize,
+    is_super: bool,
+) callconv(.c) Value {
+    // Temporary debug logging to trace early JIT sends
+    const debug_max: usize = 32;
+    {
+        var static_count: usize = 0;
+        if (static_count < debug_max) {
+            static_count += 1;
+            const recv_val = if (interp.sp > 0 and interp.sp > num_args)
+                interp.stack[interp.sp - @as(usize, num_args) - 1]
+            else
+                Value.nil;
+            std.debug.print("jit_send[{d}] sel_idx={d} args={d} bc_ofs={d} is_super={any} recv_tag=0x{x} cache_ver={d} expected=0x{x}\n",
+                .{ static_count, selector_index, num_args, bytecode_offset, is_super, recv_val.bits & Value.TAG_MASK, cache.version, cache.expected_class.bits });
         }
-        return Value.nil;
     }
 
-    interp.primitive_block_bases[interp.primitive_block_depth] = saved_context_ptr;
-    interp.primitive_block_depth += 1;
+    const saved_sp = interp.sp;
+    if (saved_sp == 0 or saved_sp <= num_args) return Value.nil;
 
-    const result = interp.interpretLoop() catch {
-        interp.primitive_block_depth -= 1;
-        interp.context_ptr = saved_context_ptr;
-        return Value.nil;
-    };
+    const recv_pos = saved_sp - @as(usize, num_args) - 1;
+    const recv = interp.stack[recv_pos];
+    const recv_class = interp.heap.classOf(recv);
 
-    interp.primitive_block_depth -= 1;
+    // Cache hit: class + version match and we have compiled code
+    if (cache.expected_class.bits == recv_class.bits and
+        cache.version == interp.cache_version and
+        cache.cached_jit_code != null)
+    {
+        const result = runCachedJitMethod(interp, cache, recv, recv_pos, num_args);
+        // Pop receiver/args, caller will push the result
+        interp.sp = recv_pos;
+        return result;
+    }
+
+    // Cache miss - fall back to full send path
+    const result = jitRuntimeSendCommon(interp, selector_index, num_args, bytecode_offset, is_super);
+
+    // Attempt to patch cache from interpreter inline cache entry (avoids hashing for hot sites)
+    if (cache.method_ptr != 0) {
+        const ic_hash = cache.method_ptr ^ @as(usize, cache.bytecode_offset);
+        const ic_index = ic_hash & (interp.inline_cache.len - 1);
+        const ic_entry = &interp.inline_cache[ic_index];
+        if (ic_entry.method_ptr == cache.method_ptr and
+            ic_entry.bytecode_offset == cache.bytecode_offset and
+            ic_entry.cached_method != null and
+            ic_entry.cached_class.bits == recv_class.bits)
+        {
+            var jit_code = ic_entry.cached_jit_code;
+            // Try to lazily compile if the interpreter hasn't cached JIT code yet
+            if (jit_code == null and interp.jit_enabled) {
+                if (interp.jit_compiler) |jit_ptr| {
+                    var compiled = jit_ptr.getCompiled(ic_entry.cached_method.?);
+                    if (compiled == null and JIT.isJitEligible(ic_entry.cached_method.?)) {
+                        _ = jit_ptr.compile(ic_entry.cached_method.?) catch null;
+                        compiled = jit_ptr.getCompiled(ic_entry.cached_method.?);
+                    }
+                    if (compiled) |code| {
+                        ic_entry.cached_jit_code = code;
+                        jit_code = code;
+                    }
+                }
+            }
+
+            if (jit_code) |code| {
+                cache.expected_class = recv_class;
+                cache.version = interp.cache_version;
+                cache.cached_method = ic_entry.cached_method;
+                cache.cached_holder = ic_entry.cached_holder;
+                cache.cached_jit_code = code;
+            }
+        }
+    }
+
+    // Align Smalltalk stack for caller push
+    interp.sp = recv_pos;
     return result;
 }
 
@@ -465,8 +624,12 @@ pub const CompiledCode = struct {
     entry: *const fn (*Interpreter) callconv(.c) Value,
     method: *CompiledMethod,
     allocator: std.mem.Allocator,
+    call_site_caches: []CallSiteCache,
 
     pub fn deinit(self: *CompiledCode) void {
+        if (self.call_site_caches.len > 0) {
+            self.allocator.free(self.call_site_caches);
+        }
         // Free executable memory
         const aligned_ptr: [*]align(PAGE_SIZE) u8 = @alignCast(self.code.ptr);
         std.posix.munmap(aligned_ptr[0..self.code.len]);
@@ -500,6 +663,31 @@ pub const JIT = struct {
         self.compiled_methods.deinit();
     }
 
+    /// Drop all compiled methods (used on GC to avoid stale pointers)
+    pub fn reset(self: *JIT) void {
+        var it = self.compiled_methods.valueIterator();
+        while (it.next()) |compiled| {
+            compiled.*.deinit();
+            self.allocator.destroy(compiled.*);
+        }
+        self.compiled_methods.clearRetainingCapacity();
+    }
+
+    /// Invalidate all call-site caches after a GC so stale heap pointers aren't reused.
+    /// Keeps compiled code alive but forces repatching on next send.
+    pub fn invalidateCachesForGc(self: *JIT) void {
+        var it = self.compiled_methods.valueIterator();
+        while (it.next()) |compiled| {
+            for (compiled.*.call_site_caches) |*cache| {
+                cache.expected_class = Value.nil;
+                cache.cached_method = null;
+                cache.cached_holder = Value.nil;
+                cache.version = 0;
+                cache.cached_jit_code = null; // force repatch
+            }
+        }
+    }
+
     /// Get or compile a method
     pub fn getCompiled(self: *JIT, method: *CompiledMethod) ?*CompiledCode {
         if (self.compiled_methods.get(method)) |compiled| {
@@ -524,6 +712,9 @@ pub const JIT = struct {
     /// Check if a method can be JIT compiled
     /// Returns false for methods with blocks, jumps, or other complex ops
     pub fn isJitEligible(method: *CompiledMethod) bool {
+        // Temporaries beyond arguments currently require more frame setup; skip for safety
+        if (method.header.num_temps > 0) return false;
+
         const bc = method.getBytecodes();
         var ip: usize = 0;
 
@@ -576,6 +767,40 @@ pub const JIT = struct {
 
     /// Compile a method to native code
     pub fn compile(self: *JIT, method: *CompiledMethod) !*CompiledCode {
+        // Debug trace to see which methods are compiled
+        std.debug.print("JIT compile method@0x{x} num_temps={d} num_literals={d} bytecode_size={d}\n",
+            .{ @intFromPtr(method), method.header.num_temps, method.header.num_literals, method.header.bytecode_size });
+
+        const bc = method.getBytecodes();
+
+        // Pre-scan to count send sites so we can allocate per-callsite caches
+        var send_count: usize = 0;
+        var scan_ip: usize = 0;
+        while (scan_ip < bc.len) {
+            const opcode = bc[scan_ip];
+            scan_ip += 1;
+            if (Opcode.isPushReceiverVariable(opcode) or Opcode.isPushTemporary(opcode) or Opcode.isStoreTemporary(opcode) or Opcode.isPopStoreTemporary(opcode)) {
+                continue;
+            }
+            const op: Opcode = @enumFromInt(opcode);
+            switch (op) {
+                .push_literal, .push_temporary => scan_ip += 1,
+                .send, .super_send => {
+                    // selector + arg count bytes
+                    scan_ip += 2;
+                    send_count += 1;
+                },
+                else => {},
+            }
+        }
+
+        var call_site_caches = try self.allocator.alloc(CallSiteCache, send_count);
+        errdefer self.allocator.free(call_site_caches);
+        for (call_site_caches) |*cache| {
+            cache.* = CallSiteCache.EMPTY;
+            cache.method_ptr = @intFromPtr(method);
+        }
+
         var buffer = try CodeBuffer.init(self.allocator, 4096);
         defer buffer.deinit();
 
@@ -583,8 +808,8 @@ pub const JIT = struct {
         self.emitPrologue(&buffer);
 
         // Translate bytecodes
-        const bc = method.getBytecodes();
         var ip: usize = 0;
+        var call_site_index: usize = 0;
 
         while (ip < bc.len) {
             const opcode = bc[ip];
@@ -647,7 +872,14 @@ pub const JIT = struct {
                     ip += 1;
                     // bytecode_offset is the position of the send opcode (ip - 3)
                     const send_offset = ip - 3;
-                    self.emitSend(&buffer, selector_idx, n_args, send_offset);
+                    if (call_site_index < call_site_caches.len) {
+                        call_site_caches[call_site_index].bytecode_offset = @intCast(send_offset);
+                        call_site_index += 1;
+                        self.emitSend(&buffer, selector_idx, n_args, send_offset, &call_site_caches[call_site_index - 1], false);
+                    } else {
+                        self.emitReturnNil(&buffer);
+                        break;
+                    }
                 },
                 .super_send => {
                     const selector_idx = bc[ip];
@@ -655,7 +887,14 @@ pub const JIT = struct {
                     const n_args = bc[ip];
                     ip += 1;
                     const send_offset = ip - 3;
-                    self.emitSuperSend(&buffer, selector_idx, n_args, send_offset);
+                    if (call_site_index < call_site_caches.len) {
+                        call_site_caches[call_site_index].bytecode_offset = @intCast(send_offset);
+                        call_site_index += 1;
+                        self.emitSuperSend(&buffer, selector_idx, n_args, send_offset, &call_site_caches[call_site_index - 1]);
+                    } else {
+                        self.emitReturnNil(&buffer);
+                        break;
+                    }
                 },
                 // Jump bytecodes - bail for now, will implement later
                 .jump, .jump_if_true, .jump_if_false, .jump_if_nil, .jump_if_not_nil => {
@@ -699,6 +938,7 @@ pub const JIT = struct {
             .entry = @ptrCast(@alignCast(executable_mem.ptr)),
             .method = method,
             .allocator = self.allocator,
+            .call_site_caches = call_site_caches,
         };
 
         return compiled;
@@ -989,29 +1229,46 @@ pub const JIT = struct {
     }
 
     /// Emit a message send
-    /// This generates code to call jit_runtime_send and push the result
-    fn emitSend(self: *JIT, buf: *CodeBuffer, selector_idx: u8, num_args: u8, bytecode_offset: usize) void {
+    /// This generates code to call jit_runtime_send_with_cache and push the result
+    fn emitSend(
+        self: *JIT,
+        buf: *CodeBuffer,
+        selector_idx: u8,
+        num_args: u8,
+        bytecode_offset: usize,
+        cache: *CallSiteCache,
+        is_super: bool,
+    ) void {
         _ = self;
         // System V AMD64 calling convention:
         // rdi = arg1 (interpreter pointer, already in rbx)
-        // rsi = arg2 (selector_index)
-        // rdx = arg3 (num_args)
-        // rcx = arg4 (bytecode_offset)
+        // rsi = arg2 (callsite cache pointer)
+        // rdx = arg3 (selector_index)
+        // rcx = arg4 (num_args)
+        // r8  = arg5 (bytecode_offset)
+        // r9  = arg6 (is_super flag)
 
         // Move interpreter pointer to rdi (first arg)
         buf.movRegReg(.rdi, .rbx);
 
-        // Move selector_index to rsi (second arg)
-        buf.movRegImm64(.rsi, @as(u64, selector_idx));
+        // Move callsite cache pointer to rsi (second arg)
+        buf.movRegImm64(.rsi, @intFromPtr(cache));
 
-        // Move num_args to rdx (third arg)
-        buf.movRegImm64(.rdx, @as(u64, num_args));
+        // Move selector_index to rdx (third arg)
+        buf.movRegImm64(.rdx, @as(u64, selector_idx));
 
-        // Move bytecode_offset to rcx (fourth arg)
-        buf.movRegImm64(.rcx, @as(u64, bytecode_offset));
+        // Move num_args to rcx (fourth arg)
+        buf.movRegImm64(.rcx, @as(u64, num_args));
+
+        // Move bytecode_offset to r8 (fifth arg)
+        buf.movRegImm64(.r8, @as(u64, bytecode_offset));
+
+        // Move is_super flag to r9 (sixth arg)
+        const super_flag: u64 = if (is_super) 1 else 0;
+        buf.movRegImm64(.r9, super_flag);
 
         // Load address of jit_runtime_send into r10 (scratch register)
-        const send_fn_ptr = @intFromPtr(&jit_runtime_send);
+        const send_fn_ptr = @intFromPtr(&jit_runtime_send_with_cache);
         buf.movRegImm64(.r10, send_fn_ptr);
 
         // Call r10
@@ -1036,30 +1293,15 @@ pub const JIT = struct {
     }
 
     /// Emit a super send
-    fn emitSuperSend(self: *JIT, buf: *CodeBuffer, selector_idx: u8, num_args: u8, bytecode_offset: usize) void {
-        _ = self;
-        // Same as emitSend but calls jit_runtime_super_send
-
-        buf.movRegReg(.rdi, .rbx);
-        buf.movRegImm64(.rsi, @as(u64, selector_idx));
-        buf.movRegImm64(.rdx, @as(u64, num_args));
-        buf.movRegImm64(.rcx, @as(u64, bytecode_offset));
-
-        const send_fn_ptr = @intFromPtr(&jit_runtime_super_send);
-        buf.movRegImm64(.r10, send_fn_ptr);
-        buf.callReg(.r10);
-
-        // Push result onto Smalltalk stack
-        buf.movRegMem(.rcx, .rbx, INTERP_SP_OFFSET);
-        buf.movRegReg(.rdx, .rbx);
-        buf.addRegImm32(.rdx, INTERP_STACK_OFFSET);
-        buf.rex(true, false, false, false);
-        buf.emit8(0x89);
-        buf.emit8(0x04);
-        buf.emit8(0xCA);
-        buf.movRegMem(.rcx, .rbx, INTERP_SP_OFFSET);
-        buf.addRegImm32(.rcx, 1);
-        buf.movMemReg(.rbx, INTERP_SP_OFFSET, .rcx);
+    fn emitSuperSend(
+        self: *JIT,
+        buf: *CodeBuffer,
+        selector_idx: u8,
+        num_args: u8,
+        bytecode_offset: usize,
+        cache: *CallSiteCache,
+    ) void {
+        self.emitSend(buf, selector_idx, num_args, bytecode_offset, cache, true);
     }
 };
 

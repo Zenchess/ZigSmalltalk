@@ -1,6 +1,3 @@
-# Bootstrap stubs - must load first to prevent infinite recursion
-ansi-tests/bootstrap-stubs.st
-
 # Core Object hierarchy - load first
 ansi-tests/ProtoObject.cls
 ansi-tests/Object.cls
@@ -18,7 +15,6 @@ ansi-tests/Metaclass.cls
 ansi-tests/Magnitude.cls
 ansi-tests/Association.cls
 ansi-tests/Character.cls
-ansi-tests/Character-stubs.st
 ansi-tests/ArithmeticValue.cls
 ansi-tests/Number.cls
 ansi-tests/Integer.cls
@@ -70,8 +66,6 @@ ansi-tests/ReadWriteStream.cls
 
 # Core Message and Exception hierarchy
 ansi-tests/Message.cls
-ansi-tests/ExceptionHandlerAbstract.cls
-ansi-tests/ExceptionHandler.cls
 ansi-tests/Exception.cls
 ansi-tests/Error.cls
 ansi-tests/MessageNotUnderstood.cls
@@ -125,27 +119,23 @@ ansi-tests/WriteStreamHelper.cls
 # Main test case - load before other test classes
 ansi-tests/MainTestCase.cls
 
-# Test base classes - load in dependency order
-ansi-tests/CollectionTest.cls
-ansi-tests/SequencedReadableCollectionTest.cls
-ansi-tests/SequencedStreamTest.cls
-
 # Smalltalk system stubs - load after all test framework classes
 ansi-tests/SmalltalkSystem-stubs.st
 
-# ANSI quick win methods (Integer, Boolean, Character, Collection, String)
-ansi-quick-wins.st
-
-# Test classes - load after all dependencies (alphabetical, grouped by superclass)
-# Tests inheriting from MainTestCase
+# Test classes - load after all dependencies
+ansi-tests/ArrayANSITest.cls
 ansi-tests/ArrayFactoryANSITest.cls
+ansi-tests/BagANSITest.cls
 ansi-tests/BagFactoryANSITest.cls
 ansi-tests/BooleanANSITest.cls
+ansi-tests/ByteArrayANSITest.cls
 ansi-tests/ByteArrayFactoryANSITest.cls
 ansi-tests/CharacterANSITest.cls
 ansi-tests/CharacterFactoryANSITest.cls
+ansi-tests/CollectionTest.cls
 ansi-tests/DateAndTimeANSITest.cls
 ansi-tests/DateAndTimeFactoryANSITest.cls
+ansi-tests/DictionaryANSITest.cls
 ansi-tests/DictionaryFactoryANSITest.cls
 ansi-tests/DurationANSITest.cls
 ansi-tests/DurationFactoryANSITest.cls
@@ -164,6 +154,7 @@ ansi-tests/FractionFactoryANSITest.cls
 ansi-tests/IdentityDictionaryANSITest.cls
 ansi-tests/IdentityDictionaryFactoryANSITest.cls
 ansi-tests/IntegerANSITest.cls
+ansi-tests/IntervalANSITest.cls
 ansi-tests/IntervalFactoryANSITest.cls
 ansi-tests/MessageNotUnderstoodANSITest.cls
 ansi-tests/MessageNotUnderstoodSelectorANSITest.cls
@@ -174,41 +165,32 @@ ansi-tests/NotificationANSITest.cls
 ansi-tests/NotificationClassANSITest.cls
 ansi-tests/ObjectANSITest.cls
 ansi-tests/ObjectClassANSITest.cls
+ansi-tests/OrderedCollectionANSITest.cls
 ansi-tests/OrderedCollectionFactoryANSITest.cls
 ansi-tests/ReadFileStreamANSITest.cls
+ansi-tests/ReadStreamANSITest.cls
 ansi-tests/ReadStreamFactoryANSITest.cls
+ansi-tests/ReadWriteStreamANSITest.cls
 ansi-tests/ReadWriteStreamFactoryANSITest.cls
 ansi-tests/ScaledDecimalANSITest.cls
 ansi-tests/SelectorANSITest.cls
+ansi-tests/SequencedReadableCollectionTest.cls
+ansi-tests/SequencedStreamTest.cls
+ansi-tests/SetANSITest.cls
 ansi-tests/SetFactoryANSITest.cls
+ansi-tests/SortedCollectionANSITest.cls
 ansi-tests/SortedCollectionFactoryANSITest.cls
+ansi-tests/StringANSITest.cls
 ansi-tests/StringFactoryANSITest.cls
 ansi-tests/SymbolANSITest.cls
 ansi-tests/TranscriptANSITest.cls
 ansi-tests/WarningANSITest.cls
 ansi-tests/WarningClassANSITest.cls
 ansi-tests/WriteFileStreamANSITest.cls
+ansi-tests/WriteStreamANSITest.cls
 ansi-tests/WriteStreamFactoryANSITest.cls
 ansi-tests/ZeroDivideANSITest.cls
 ansi-tests/ZeroDivideFactoryANSITest.cls
-
-# Tests inheriting from CollectionTest
-ansi-tests/BagANSITest.cls
-ansi-tests/DictionaryANSITest.cls
-ansi-tests/IntervalANSITest.cls
-ansi-tests/OrderedCollectionANSITest.cls
-ansi-tests/SetANSITest.cls
-ansi-tests/SortedCollectionANSITest.cls
-ansi-tests/StringANSITest.cls
-
-# Tests inheriting from SequencedReadableCollectionTest
-ansi-tests/ArrayANSITest.cls
-ansi-tests/ByteArrayANSITest.cls
-
-# Tests inheriting from SequencedStreamTest
-ansi-tests/ReadStreamANSITest.cls
-ansi-tests/ReadWriteStreamANSITest.cls
-ansi-tests/WriteStreamANSITest.cls
 
 # Patches and initialization
 ansi-tests/Patches.st
@@ -218,8 +200,5 @@ ansi-tests/AnsiInit.st
 # Include TranscriptShell
 src/image/transcript-shell.st
 
-# Process scheduling support
-src/smalltalk/process-scheduling.st
-
 # Test runner
-run-all-tests.st
+ansi-tests/run-tests.st

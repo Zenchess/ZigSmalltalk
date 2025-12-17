@@ -194,6 +194,20 @@ pub const Interpreter = struct {
     jit_compiled_calls: u64,
     jit_interpreted_calls: u64,
 
+    // Threaded dispatch (uses dispatch table instead of switch)
+    threaded_dispatch_enabled: bool,
+
+    // Dispatch result fields for threaded dispatch handlers
+    dispatch_return_value: Value,
+    dispatch_error: InterpreterError,
+
+    // Stack caching - keep top values in "registers" (struct fields)
+    // This reduces memory access for common operations
+    stack_cache_tos: Value,      // Top of stack (cached)
+    stack_cache_nos: Value,      // Next on stack (cached)
+    stack_cache_count: u2,       // Number of cached values (0, 1, or 2)
+    stack_cache_enabled: bool,   // Whether to use stack caching
+
     pub fn init(heap: *Heap, allocator: std.mem.Allocator) Interpreter {
         return .{
             .heap = heap,
@@ -259,6 +273,16 @@ pub const Interpreter = struct {
             .jit_enabled = false,
             .jit_compiled_calls = 0,
             .jit_interpreted_calls = 0,
+            // Threaded dispatch enabled (has inline fast paths)
+            .threaded_dispatch_enabled = true,
+            // Dispatch result fields initialized with defaults
+            .dispatch_return_value = Value.nil,
+            .dispatch_error = InterpreterError.InvalidBytecode,
+            // Stack caching disabled by default (enable for benchmarks)
+            .stack_cache_tos = Value.nil,
+            .stack_cache_nos = Value.nil,
+            .stack_cache_count = 0,
+            .stack_cache_enabled = false,
         };
     }
 
@@ -275,6 +299,95 @@ pub const Interpreter = struct {
     /// Disable JIT compilation
     pub fn disableJit(self: *Interpreter) void {
         self.jit_enabled = false;
+    }
+
+    /// Enable threaded dispatch (dispatch table instead of switch)
+    pub fn enableThreadedDispatch(self: *Interpreter) void {
+        self.threaded_dispatch_enabled = true;
+    }
+
+    /// Disable threaded dispatch (use switch-based dispatch)
+    pub fn disableThreadedDispatch(self: *Interpreter) void {
+        self.threaded_dispatch_enabled = false;
+    }
+
+    /// Enable stack caching for performance
+    pub fn enableStackCaching(self: *Interpreter) void {
+        self.stack_cache_enabled = true;
+        self.stack_cache_count = 0;
+    }
+
+    /// Disable stack caching
+    pub fn disableStackCaching(self: *Interpreter) void {
+        self.flushStackCache();
+        self.stack_cache_enabled = false;
+    }
+
+    /// Flush cached stack values to memory
+    pub inline fn flushStackCache(self: *Interpreter) void {
+        if (self.stack_cache_count >= 1) {
+            if (self.stack_cache_count >= 2) {
+                self.stack[self.sp] = self.stack_cache_nos;
+                self.sp += 1;
+            }
+            self.stack[self.sp] = self.stack_cache_tos;
+            self.sp += 1;
+            self.stack_cache_count = 0;
+        }
+    }
+
+    /// Push value with stack caching
+    pub inline fn pushCached(self: *Interpreter, value: Value) void {
+        if (self.stack_cache_count < 2) {
+            if (self.stack_cache_count == 1) {
+                self.stack_cache_nos = self.stack_cache_tos;
+            }
+            self.stack_cache_tos = value;
+            self.stack_cache_count += 1;
+        } else {
+            // Cache full - write NOS to memory, shift TOS→NOS, new→TOS
+            self.stack[self.sp] = self.stack_cache_nos;
+            self.sp += 1;
+            self.stack_cache_nos = self.stack_cache_tos;
+            self.stack_cache_tos = value;
+        }
+    }
+
+    /// Pop value with stack caching
+    pub inline fn popCached(self: *Interpreter) Value {
+        if (self.stack_cache_count >= 1) {
+            const result = self.stack_cache_tos;
+            if (self.stack_cache_count >= 2) {
+                self.stack_cache_tos = self.stack_cache_nos;
+                self.stack_cache_count -= 1;
+            } else {
+                // Try to refill from memory
+                if (self.sp > 0) {
+                    self.sp -= 1;
+                    self.stack_cache_tos = self.stack[self.sp];
+                } else {
+                    self.stack_cache_count = 0;
+                }
+            }
+            return result;
+        } else {
+            // Cache empty - read from memory
+            if (self.sp > 0) {
+                self.sp -= 1;
+                return self.stack[self.sp];
+            }
+            return Value.nil; // Stack underflow
+        }
+    }
+
+    /// Peek at top of stack with caching
+    pub inline fn peekCached(self: *Interpreter) Value {
+        if (self.stack_cache_count >= 1) {
+            return self.stack_cache_tos;
+        } else if (self.sp > 0) {
+            return self.stack[self.sp - 1];
+        }
+        return Value.nil;
     }
 
     /// Deinitialize JIT compiler
@@ -929,8 +1042,12 @@ pub const Interpreter = struct {
             }
         }
 
-        // Main interpretation loop
-        return self.interpretLoop() catch |err| {
+        // Main interpretation loop - use threaded dispatch when enabled
+        const interpret_result = if (self.threaded_dispatch_enabled)
+            self.interpretLoopThreaded()
+        else
+            self.interpretLoop();
+        return interpret_result catch |err| {
             // Non-local return from block - result is on stack, return it as success
             if (err == InterpreterError.BlockNonLocalReturn) {
                 return try self.pop();
@@ -1462,17 +1579,16 @@ pub const Interpreter = struct {
                     // Get value but leave on stack (store doesn't pop in Smalltalk)
                     const val = self.peek();
 
-                    // Try heap context first (for cross-process variable access)
+                    // ALWAYS write to stack for fast reads by outer scope
+                    const base = if (level >= 2) self.home_temp_base else self.outer_temp_base;
+                    const slot = base + 1 + index;
+                    self.stack[slot] = val;
+
+                    // Also write to heap context for cross-process/forked block access
                     const heap_ctx = if (level >= 2) self.home_heap_context else self.heap_context;
                     if (!heap_ctx.isNil()) {
-                        // Write to heap-allocated context
                         const ctx_obj = heap_ctx.asObject();
                         setHeapContextTemp(ctx_obj, index, val);
-                    } else {
-                        // Fall back to stack-based access
-                        const base = if (level >= 2) self.home_temp_base else self.outer_temp_base;
-                        const slot = base + 1 + index;
-                        self.stack[slot] = val;
                     }
                 },
 
@@ -1698,14 +1814,7 @@ pub const Interpreter = struct {
     }
 
     fn pushTemporary(self: *Interpreter, index: u8) InterpreterError!void {
-        // Read from heap context if present (this allows inner blocks to update outer temps
-        // via store_outer_temp and have the outer block see the updated value)
-        if (!self.heap_context.isNil()) {
-            const val = getHeapContextTemp(self.heap_context.asObject(), index);
-            try self.push(val);
-            return;
-        }
-        // Fall back to stack access
+        // Fast path: always read from stack (store_outer_temp keeps stack in sync)
         // temp_base points to receiver slot, temps start at temp_base + 1
         const stack_index = self.temp_base + 1 + index;
         if (stack_index < self.sp) {
@@ -2588,7 +2697,7 @@ pub const Interpreter = struct {
         holder: Value,
     };
 
-    fn lookupMethodWithHolder(self: *Interpreter, start_class: Value, selector: Value) ?MethodLookup {
+    pub fn lookupMethodWithHolder(self: *Interpreter, start_class: Value, selector: Value) ?MethodLookup {
         // Check method cache first
         const hash = start_class.bits ^ selector.bits;
         const index = hash & (METHOD_CACHE_SIZE - 1);
@@ -3074,6 +3183,1165 @@ pub const Interpreter = struct {
         }
         if (DEBUG_VERBOSE) std.debug.print("DEBUG lookup miss selector={s} recv={s}\n", .{ selector, recv_name });
         return InterpreterError.MessageNotUnderstood;
+    }
+
+    // ========================================================================
+    // Threaded Dispatch Infrastructure
+    // ========================================================================
+
+    /// Result from dispatch handlers - avoids error union overhead in function pointers
+    pub const DispatchResult = enum(u8) {
+        continue_dispatch, // Continue to next instruction
+        return_value, // Return dispatch_return_value
+        return_error, // Return dispatch_error
+    };
+
+    /// Handler function type for dispatch table
+    pub const DispatchHandler = *const fn (*Interpreter) DispatchResult;
+
+    /// Threaded dispatch loop - uses dispatch table instead of switch
+    pub fn interpretLoopThreaded(self: *Interpreter) InterpreterError!Value {
+        // Build dispatch table at comptime
+        const dispatch_table = comptime initDispatchTable();
+
+        while (true) {
+            // Debugger check (keep for compatibility)
+            if (debugger.debugEnabled and debugger.shouldBreak()) {
+                debugger.enterDebugger();
+            }
+
+            // Periodic preemption check (every 1000 instructions)
+            self.instruction_count +%= 1;
+            if (self.instruction_count % 1000 == 0) {
+                self.processCompletedOverlappedCalls();
+                if (self.yieldToNextProcess()) {
+                    continue;
+                }
+            }
+
+            // Stack bounds check (infrequent - every 256 instructions)
+            if (self.instruction_count & 0xFF == 0) {
+                if (self.sp >= self.stack.len - 32) {
+                    return InterpreterError.StackOverflow;
+                }
+            }
+
+            const bytecodes_slice = self.method.getBytecodes();
+            if (self.ip >= bytecodes_slice.len) {
+                return InterpreterError.InvalidBytecode;
+            }
+            const byte = bytecodes_slice[self.ip];
+            self.ip += 1;
+
+            // Dispatch through table
+            const result = dispatch_table[byte](self);
+            switch (result) {
+                .continue_dispatch => continue,
+                .return_value => return self.dispatch_return_value,
+                .return_error => return self.dispatch_error,
+            }
+        }
+    }
+
+    /// Initialize dispatch table at comptime
+    fn initDispatchTable() [256]DispatchHandler {
+        var table: [256]DispatchHandler = .{&handleInvalidOpcode} ** 256;
+
+        // Push receiver variables (0x00-0x0F)
+        inline for (0..16) |i| {
+            table[i] = makeHandlerPushReceiverVar(i);
+        }
+
+        // Push temporaries (0x10-0x1F)
+        inline for (0..16) |i| {
+            table[0x10 + i] = makeHandlerPushTemp(i);
+        }
+
+        // Extended push operations (0x20-0x2A)
+        table[0x20] = &handlePushLiteral;
+        table[0x21] = &handlePushLiteralVariable;
+        table[0x22] = &handlePushReceiver;
+        table[0x23] = &handlePushNil;
+        table[0x24] = &handlePushTrue;
+        table[0x25] = &handlePushFalse;
+        table[0x26] = &handlePushInteger;
+        table[0x27] = &handlePushInteger16;
+        table[0x28] = &handlePushContext;
+        table[0x29] = &handlePushReceiverVariableExt;
+        table[0x2A] = &handlePushTemporaryExt;
+
+        // Store receiver variables (0x40-0x4F)
+        inline for (0..16) |i| {
+            table[0x40 + i] = makeHandlerStoreReceiverVar(i);
+        }
+
+        // Store temporaries (0x50-0x5F)
+        inline for (0..16) |i| {
+            table[0x50 + i] = makeHandlerStoreTemp(i);
+        }
+
+        // Pop and store receiver variables (0x60-0x6F)
+        inline for (0..16) |i| {
+            table[0x60 + i] = makeHandlerPopStoreReceiverVar(i);
+        }
+
+        // Pop and store temporaries (0x70-0x7F)
+        inline for (0..16) |i| {
+            table[0x70 + i] = makeHandlerPopStoreTemp(i);
+        }
+
+        // Sends (0x80-0x96) - these call back to original handler methods
+        table[0x80] = &handleSend;
+        table[0x81] = &handleSuperSend;
+        table[0x82] = &handleSendPlus;
+        table[0x83] = &handleSendMinus;
+        table[0x84] = &handleSendTimes;
+        table[0x85] = &handleSendDivide;
+        // 0x86 = send_mod - use fallback
+        table[0x87] = &handleSendLessThan;
+        table[0x88] = &handleSendGreaterThan;
+        table[0x89] = &handleSendLessOrEqual;
+        table[0x8A] = &handleSendGreaterOrEqual;
+        table[0x8B] = &handleSendEqual;
+        table[0x8C] = &handleSendNotEqual;
+        // 0x8D-0x8E = at:, at:put: - use fallback
+        table[0x8F] = &handleSendSize;
+        table[0x90] = &handleSendClass;
+        table[0x91] = &handleSendIdentical;
+        table[0x92] = &handleSendNotIdentical;
+        // 0x93-0x96 = value, value:, new, new: - use fallback
+
+        // Returns (0xA0-0xA5)
+        table[0xA0] = &handleReturnReceiver;
+        table[0xA1] = &handleReturnTrue;
+        table[0xA2] = &handleReturnFalse;
+        table[0xA3] = &handleReturnNil;
+        table[0xA4] = &handleReturnTop;
+        table[0xA5] = &handleBlockReturn;
+
+        // Jumps (0xB0-0xBF)
+        table[0xB0] = &handleJump;
+        table[0xB1] = &handleJumpIfTrue;
+        table[0xB2] = &handleJumpIfFalse;
+        table[0xB3] = &handleJumpIfNil;
+        table[0xB4] = &handleJumpIfNotNil;
+        // Short jumps (0xB8-0xBF)
+        inline for (0..8) |i| {
+            table[0xB8 + i] = makeHandlerShortJump(i);
+        }
+
+        // Misc (0xC0-0xC6)
+        table[0xC0] = &handlePop;
+        table[0xC1] = &handleDup;
+        table[0xC2] = &handlePushOuterTemp;
+        table[0xC3] = &handleStoreOuterTemp;
+        table[0xC4] = &handlePushClosure;
+        table[0xC5] = &handlePrimitive;
+        table[0xC6] = &handleMakeArray;
+
+        // Extended operations (0xD0-0xD2)
+        table[0xD0] = &handleExtendedPush;
+        table[0xD1] = &handleExtendedStore;
+        table[0xD2] = &handleExtendedSend;
+
+        // NOP
+        table[0xFF] = &handleNop;
+
+        return table;
+    }
+
+    // ========================================================================
+    // Dispatch Handlers - Inline for maximum performance
+    // ========================================================================
+
+    fn handleInvalidOpcode(self: *Interpreter) DispatchResult {
+        self.dispatch_error = InterpreterError.InvalidBytecode;
+        return .return_error;
+    }
+
+    fn handleNop(_: *Interpreter) DispatchResult {
+        return .continue_dispatch;
+    }
+
+    // Push operations
+    fn handlePushNil(self: *Interpreter) DispatchResult {
+        self.stack[self.sp] = Value.nil;
+        self.sp += 1;
+        return .continue_dispatch;
+    }
+
+    fn handlePushTrue(self: *Interpreter) DispatchResult {
+        self.stack[self.sp] = Value.@"true";
+        self.sp += 1;
+        return .continue_dispatch;
+    }
+
+    fn handlePushFalse(self: *Interpreter) DispatchResult {
+        self.stack[self.sp] = Value.@"false";
+        self.sp += 1;
+        return .continue_dispatch;
+    }
+
+    fn handlePushReceiver(self: *Interpreter) DispatchResult {
+        self.stack[self.sp] = self.receiver;
+        self.sp += 1;
+        return .continue_dispatch;
+    }
+
+    fn handlePushContext(self: *Interpreter) DispatchResult {
+        // thisContext - for now push nil
+        self.stack[self.sp] = Value.nil;
+        self.sp += 1;
+        return .continue_dispatch;
+    }
+
+    fn handlePushInteger(self: *Interpreter) DispatchResult {
+        const bc = self.method.getBytecodes();
+        const n: i8 = @bitCast(bc[self.ip]);
+        self.ip += 1;
+        self.stack[self.sp] = Value.fromSmallInt(n);
+        self.sp += 1;
+        return .continue_dispatch;
+    }
+
+    fn handlePushInteger16(self: *Interpreter) DispatchResult {
+        const bc = self.method.getBytecodes();
+        const hi: u16 = bc[self.ip];
+        const lo: u16 = bc[self.ip + 1];
+        self.ip += 2;
+        const n: i16 = @bitCast((hi << 8) | lo);
+        self.stack[self.sp] = Value.fromSmallInt(n);
+        self.sp += 1;
+        return .continue_dispatch;
+    }
+
+    fn handlePushLiteral(self: *Interpreter) DispatchResult {
+        const bc = self.method.getBytecodes();
+        const index = bc[self.ip];
+        self.ip += 1;
+        const literals = self.method.getLiterals();
+        self.stack[self.sp] = literals[index];
+        self.sp += 1;
+        return .continue_dispatch;
+    }
+
+    fn handlePushLiteralVariable(self: *Interpreter) DispatchResult {
+        const bc = self.method.getBytecodes();
+        const index = bc[self.ip];
+        self.ip += 1;
+        const literals = self.method.getLiterals();
+        const literal = literals[index];
+
+        if (literal.isObject()) {
+            const lit_obj = literal.asObject();
+            if (lit_obj.header.class_index == Heap.CLASS_SYMBOL) {
+                const name_bytes = lit_obj.bytes(lit_obj.header.size);
+                var found_val: ?Value = null;
+                if (!self.receiver.isNil()) {
+                    found_val = self.lookupClassVariable(name_bytes);
+                }
+                if (found_val == null) {
+                    found_val = self.heap.getGlobal(name_bytes);
+                }
+                self.stack[self.sp] = found_val orelse Value.nil;
+            } else if (lit_obj.header.class_index == Heap.CLASS_ARRAY and lit_obj.header.size == 2) {
+                self.stack[self.sp] = lit_obj.getField(1, 2);
+            } else {
+                self.stack[self.sp] = Value.nil;
+            }
+        } else {
+            self.stack[self.sp] = Value.nil;
+        }
+        self.sp += 1;
+        return .continue_dispatch;
+    }
+
+    fn handlePushReceiverVariableExt(self: *Interpreter) DispatchResult {
+        const bc = self.method.getBytecodes();
+        const index = bc[self.ip];
+        self.ip += 1;
+        if (self.pushReceiverVariable(index)) {
+            return .continue_dispatch;
+        } else |err| {
+            self.dispatch_error = err;
+            return .return_error;
+        }
+    }
+
+    fn handlePushTemporaryExt(self: *Interpreter) DispatchResult {
+        const bc = self.method.getBytecodes();
+        const index = bc[self.ip];
+        self.ip += 1;
+        if (self.pushTemporary(index)) {
+            return .continue_dispatch;
+        } else |err| {
+            self.dispatch_error = err;
+            return .return_error;
+        }
+    }
+
+    // Stack operations
+    fn handlePop(self: *Interpreter) DispatchResult {
+        if (self.sp > 0) {
+            self.sp -= 1;
+            return .continue_dispatch;
+        } else {
+            self.dispatch_error = InterpreterError.StackUnderflow;
+            return .return_error;
+        }
+    }
+
+    fn handleDup(self: *Interpreter) DispatchResult {
+        const val = if (self.sp > 0) self.stack[self.sp - 1] else Value.nil;
+        self.stack[self.sp] = val;
+        self.sp += 1;
+        return .continue_dispatch;
+    }
+
+    // Jump operations
+    fn handleJump(self: *Interpreter) DispatchResult {
+        const bc = self.method.getBytecodes();
+        const hi: u16 = bc[self.ip];
+        const lo: u16 = bc[self.ip + 1];
+        const offset: i16 = @bitCast((hi << 8) | lo);
+        self.ip = @intCast(@as(isize, @intCast(self.ip + 2)) + offset);
+        return .continue_dispatch;
+    }
+
+    fn handleJumpIfTrue(self: *Interpreter) DispatchResult {
+        const bc = self.method.getBytecodes();
+        const hi: u16 = bc[self.ip];
+        const lo: u16 = bc[self.ip + 1];
+        const offset: i16 = @bitCast((hi << 8) | lo);
+        self.ip += 2;
+        if (self.sp > 0) {
+            self.sp -= 1;
+            if (self.stack[self.sp].isTrue()) {
+                self.ip = @intCast(@as(isize, @intCast(self.ip)) + offset);
+            }
+        }
+        return .continue_dispatch;
+    }
+
+    fn handleJumpIfFalse(self: *Interpreter) DispatchResult {
+        const bc = self.method.getBytecodes();
+        const hi: u16 = bc[self.ip];
+        const lo: u16 = bc[self.ip + 1];
+        const offset: i16 = @bitCast((hi << 8) | lo);
+        self.ip += 2;
+        if (self.sp > 0) {
+            self.sp -= 1;
+            if (self.stack[self.sp].isFalse()) {
+                self.ip = @intCast(@as(isize, @intCast(self.ip)) + offset);
+            }
+        }
+        return .continue_dispatch;
+    }
+
+    fn handleJumpIfNil(self: *Interpreter) DispatchResult {
+        const bc = self.method.getBytecodes();
+        const hi: u16 = bc[self.ip];
+        const lo: u16 = bc[self.ip + 1];
+        const offset: i16 = @bitCast((hi << 8) | lo);
+        self.ip += 2;
+        if (self.sp > 0) {
+            self.sp -= 1;
+            if (self.stack[self.sp].isNil()) {
+                self.ip = @intCast(@as(isize, @intCast(self.ip)) + offset);
+            }
+        }
+        return .continue_dispatch;
+    }
+
+    fn handleJumpIfNotNil(self: *Interpreter) DispatchResult {
+        const bc = self.method.getBytecodes();
+        const hi: u16 = bc[self.ip];
+        const lo: u16 = bc[self.ip + 1];
+        const offset: i16 = @bitCast((hi << 8) | lo);
+        self.ip += 2;
+        if (self.sp > 0) {
+            self.sp -= 1;
+            if (!self.stack[self.sp].isNil()) {
+                self.ip = @intCast(@as(isize, @intCast(self.ip)) + offset);
+            }
+        }
+        return .continue_dispatch;
+    }
+
+    // Return operations - delegate to existing methods
+    fn handleReturnReceiver(self: *Interpreter) DispatchResult {
+        const maybe_result = self.returnFromMethod(self.receiver) catch |err| {
+            self.dispatch_error = err;
+            return .return_error;
+        };
+        if (maybe_result) |final_result| {
+            self.dispatch_return_value = final_result;
+            return .return_value;
+        }
+        return .continue_dispatch;
+    }
+
+    fn handleReturnTrue(self: *Interpreter) DispatchResult {
+        const maybe_result = self.returnFromMethod(Value.@"true") catch |err| {
+            self.dispatch_error = err;
+            return .return_error;
+        };
+        if (maybe_result) |final_result| {
+            self.dispatch_return_value = final_result;
+            return .return_value;
+        }
+        return .continue_dispatch;
+    }
+
+    fn handleReturnFalse(self: *Interpreter) DispatchResult {
+        const maybe_result = self.returnFromMethod(Value.@"false") catch |err| {
+            self.dispatch_error = err;
+            return .return_error;
+        };
+        if (maybe_result) |final_result| {
+            self.dispatch_return_value = final_result;
+            return .return_value;
+        }
+        return .continue_dispatch;
+    }
+
+    fn handleReturnNil(self: *Interpreter) DispatchResult {
+        const maybe_result = self.returnFromMethod(Value.nil) catch |err| {
+            self.dispatch_error = err;
+            return .return_error;
+        };
+        if (maybe_result) |final_result| {
+            self.dispatch_return_value = final_result;
+            return .return_value;
+        }
+        return .continue_dispatch;
+    }
+
+    fn handleReturnTop(self: *Interpreter) DispatchResult {
+        if (self.sp == 0) {
+            self.dispatch_error = InterpreterError.StackUnderflow;
+            return .return_error;
+        }
+        self.sp -= 1;
+        const result = self.stack[self.sp];
+
+        // Check for primitive block return
+        if (self.primitive_block_depth > 0 and
+            self.context_ptr == self.primitive_block_bases[self.primitive_block_depth - 1])
+        {
+            self.dispatch_return_value = result;
+            return .return_value;
+        }
+
+        const maybe_result = self.returnFromMethod(result) catch |err| {
+            self.dispatch_error = err;
+            return .return_error;
+        };
+        if (maybe_result) |final_result| {
+            self.dispatch_return_value = final_result;
+            return .return_value;
+        }
+        return .continue_dispatch;
+    }
+
+    fn handleBlockReturn(self: *Interpreter) DispatchResult {
+        if (self.sp == 0) {
+            self.dispatch_error = InterpreterError.StackUnderflow;
+            return .return_error;
+        }
+        self.sp -= 1;
+        const result = self.stack[self.sp];
+
+        if (self.primitive_block_depth > 0) {
+            self.non_local_return_target = self.home_temp_base;
+            self.stack[self.sp] = result;
+            self.sp += 1;
+            self.dispatch_error = InterpreterError.BlockNonLocalReturn;
+            return .return_error;
+        }
+
+        const maybe_result = self.returnFromMethod(result) catch |err| {
+            self.dispatch_error = err;
+            return .return_error;
+        };
+        if (maybe_result) |final_result| {
+            self.dispatch_return_value = final_result;
+            return .return_value;
+        }
+        return .continue_dispatch;
+    }
+
+    // Send operations - delegate to existing sendMessage
+    fn handleSend(self: *Interpreter) DispatchResult {
+        const bc = self.method.getBytecodes();
+        const selector_index = bc[self.ip];
+        const num_args = bc[self.ip + 1];
+        self.ip += 2;
+        if (self.sendMessage(selector_index, num_args, false, self.ip - 3)) {
+            return .continue_dispatch;
+        } else |err| {
+            return self.handleSendError(err);
+        }
+    }
+
+    fn handleSuperSend(self: *Interpreter) DispatchResult {
+        const bc = self.method.getBytecodes();
+        const selector_index = bc[self.ip];
+        const num_args = bc[self.ip + 1];
+        self.ip += 2;
+        if (self.sendMessage(selector_index, num_args, true, self.ip - 3)) {
+            return .continue_dispatch;
+        } else |err| {
+            return self.handleSendError(err);
+        }
+    }
+
+    fn handleSendError(self: *Interpreter, err: InterpreterError) DispatchResult {
+        if (err == InterpreterError.BlockNonLocalReturn) {
+            const current_temp_base = self.temp_base;
+            if (current_temp_base == self.non_local_return_target) {
+                const nlr_result = if (self.sp > 0) blk: {
+                    self.sp -= 1;
+                    break :blk self.stack[self.sp];
+                } else Value.nil;
+
+                while (self.primitive_block_depth > 0 and
+                    self.primitive_block_bases[self.primitive_block_depth - 1] > self.context_ptr)
+                {
+                    self.primitive_block_depth -= 1;
+                }
+
+                const maybe_result = self.returnFromMethod(nlr_result) catch |e| {
+                    self.dispatch_error = e;
+                    return .return_error;
+                };
+                if (maybe_result) |final_result| {
+                    self.dispatch_return_value = final_result;
+                    return .return_value;
+                }
+                return .continue_dispatch;
+            } else {
+                const nlr_result = if (self.sp > 0) blk: {
+                    self.sp -= 1;
+                    break :blk self.stack[self.sp];
+                } else Value.nil;
+                if (self.context_ptr > 0) {
+                    self.context_ptr -= 1;
+                    const ctx = self.contexts[self.context_ptr];
+                    self.method = ctx.method;
+                    self.method_class = ctx.method_class;
+                    self.ip = ctx.ip;
+                    self.receiver = ctx.receiver;
+                    self.sp = ctx.temp_base;
+                    self.temp_base = ctx.temp_base;
+                    self.outer_temp_base = ctx.outer_temp_base;
+                    self.home_temp_base = ctx.home_temp_base;
+                    self.heap_context = ctx.heap_context;
+                    self.home_heap_context = ctx.home_heap_context;
+                }
+                self.stack[self.sp] = nlr_result;
+                self.sp += 1;
+            }
+        }
+        self.dispatch_error = err;
+        return .return_error;
+    }
+
+    // Optimized sends - inline fast path for SmallInteger arithmetic
+    fn handleSendPlus(self: *Interpreter) DispatchResult {
+        // FAST PATH: Check if both TOS and NOS are SmallIntegers
+        if (self.sp >= 2) {
+            const b = self.stack[self.sp - 1];
+            const a = self.stack[self.sp - 2];
+            if (a.isSmallInt() and b.isSmallInt()) {
+                const result = a.asSmallInt() +% b.asSmallInt();
+                // Check for overflow
+                const max: i61 = std.math.maxInt(i61);
+                const min: i61 = std.math.minInt(i61);
+                if (result >= min and result <= max) {
+                    // Replace a with result, remove b
+                    self.stack[self.sp - 2] = Value.fromSmallInt(@intCast(result));
+                    self.sp -= 1;
+                    return .continue_dispatch;
+                }
+            }
+        }
+        // SLOW PATH: Fall back to sendSpecialBinary
+        if (self.sendSpecialBinary(.add, "+")) {
+            return .continue_dispatch;
+        } else |err| {
+            self.dispatch_error = err;
+            return .return_error;
+        }
+    }
+
+    fn handleSendMinus(self: *Interpreter) DispatchResult {
+        // FAST PATH: Inline SmallInteger subtraction
+        if (self.sp >= 2) {
+            const b = self.stack[self.sp - 1];
+            const a = self.stack[self.sp - 2];
+            if (a.isSmallInt() and b.isSmallInt()) {
+                const result = a.asSmallInt() -% b.asSmallInt();
+                const max: i61 = std.math.maxInt(i61);
+                const min: i61 = std.math.minInt(i61);
+                if (result >= min and result <= max) {
+                    self.stack[self.sp - 2] = Value.fromSmallInt(@intCast(result));
+                    self.sp -= 1;
+                    return .continue_dispatch;
+                }
+            }
+        }
+        if (self.sendSpecialBinary(.subtract, "-")) {
+            return .continue_dispatch;
+        } else |err| {
+            self.dispatch_error = err;
+            return .return_error;
+        }
+    }
+
+    fn handleSendTimes(self: *Interpreter) DispatchResult {
+        // FAST PATH: Inline SmallInteger multiplication
+        if (self.sp >= 2) {
+            const b = self.stack[self.sp - 1];
+            const a = self.stack[self.sp - 2];
+            if (a.isSmallInt() and b.isSmallInt()) {
+                const av = a.asSmallInt();
+                const bv = b.asSmallInt();
+                // Check for overflow using wider arithmetic
+                const result: i128 = @as(i128, av) * @as(i128, bv);
+                const max: i128 = std.math.maxInt(i61);
+                const min: i128 = std.math.minInt(i61);
+                if (result >= min and result <= max) {
+                    self.stack[self.sp - 2] = Value.fromSmallInt(@intCast(result));
+                    self.sp -= 1;
+                    return .continue_dispatch;
+                }
+            }
+        }
+        if (self.sendSpecialBinary(.multiply, "*")) {
+            return .continue_dispatch;
+        } else |err| {
+            self.dispatch_error = err;
+            return .return_error;
+        }
+    }
+
+    fn handleSendDivide(self: *Interpreter) DispatchResult {
+        // FAST PATH: Inline SmallInteger division
+        if (self.sp >= 2) {
+            const b = self.stack[self.sp - 1];
+            const a = self.stack[self.sp - 2];
+            if (a.isSmallInt() and b.isSmallInt()) {
+                const bv = b.asSmallInt();
+                if (bv != 0) {
+                    const av = a.asSmallInt();
+                    if (@rem(av, bv) == 0) {
+                        // Exact division
+                        const result = @divTrunc(av, bv);
+                        self.stack[self.sp - 2] = Value.fromSmallInt(@intCast(result));
+                        self.sp -= 1;
+                        return .continue_dispatch;
+                    }
+                }
+            }
+        }
+        if (self.sendSpecialBinary(.divide, "/")) {
+            return .continue_dispatch;
+        } else |err| {
+            self.dispatch_error = err;
+            return .return_error;
+        }
+    }
+
+    fn handleSendLessThan(self: *Interpreter) DispatchResult {
+        // FAST PATH: Inline SmallInteger comparison
+        if (self.sp >= 2) {
+            const b = self.stack[self.sp - 1];
+            const a = self.stack[self.sp - 2];
+            if (a.isSmallInt() and b.isSmallInt()) {
+                const result = if (a.asSmallInt() < b.asSmallInt()) Value.@"true" else Value.@"false";
+                self.stack[self.sp - 2] = result;
+                self.sp -= 1;
+                return .continue_dispatch;
+            }
+        }
+        if (self.sendSpecialBinary(.less_than, "<")) {
+            return .continue_dispatch;
+        } else |err| {
+            self.dispatch_error = err;
+            return .return_error;
+        }
+    }
+
+    fn handleSendGreaterThan(self: *Interpreter) DispatchResult {
+        // FAST PATH: Inline SmallInteger comparison
+        if (self.sp >= 2) {
+            const b = self.stack[self.sp - 1];
+            const a = self.stack[self.sp - 2];
+            if (a.isSmallInt() and b.isSmallInt()) {
+                const result = if (a.asSmallInt() > b.asSmallInt()) Value.@"true" else Value.@"false";
+                self.stack[self.sp - 2] = result;
+                self.sp -= 1;
+                return .continue_dispatch;
+            }
+        }
+        if (self.sendSpecialBinary(.greater_than, ">")) {
+            return .continue_dispatch;
+        } else |err| {
+            self.dispatch_error = err;
+            return .return_error;
+        }
+    }
+
+    fn handleSendLessOrEqual(self: *Interpreter) DispatchResult {
+        // FAST PATH: Inline SmallInteger comparison
+        if (self.sp >= 2) {
+            const b = self.stack[self.sp - 1];
+            const a = self.stack[self.sp - 2];
+            if (a.isSmallInt() and b.isSmallInt()) {
+                const result = if (a.asSmallInt() <= b.asSmallInt()) Value.@"true" else Value.@"false";
+                self.stack[self.sp - 2] = result;
+                self.sp -= 1;
+                return .continue_dispatch;
+            }
+        }
+        if (self.sendSpecialBinary(.less_or_equal, "<=")) {
+            return .continue_dispatch;
+        } else |err| {
+            self.dispatch_error = err;
+            return .return_error;
+        }
+    }
+
+    fn handleSendGreaterOrEqual(self: *Interpreter) DispatchResult {
+        // FAST PATH: Inline SmallInteger comparison
+        if (self.sp >= 2) {
+            const b = self.stack[self.sp - 1];
+            const a = self.stack[self.sp - 2];
+            if (a.isSmallInt() and b.isSmallInt()) {
+                const result = if (a.asSmallInt() >= b.asSmallInt()) Value.@"true" else Value.@"false";
+                self.stack[self.sp - 2] = result;
+                self.sp -= 1;
+                return .continue_dispatch;
+            }
+        }
+        if (self.sendSpecialBinary(.greater_or_equal, ">=")) {
+            return .continue_dispatch;
+        } else |err| {
+            self.dispatch_error = err;
+            return .return_error;
+        }
+    }
+
+    fn handleSendEqual(self: *Interpreter) DispatchResult {
+        // FAST PATH: Inline SmallInteger/identity comparison
+        if (self.sp >= 2) {
+            const b = self.stack[self.sp - 1];
+            const a = self.stack[self.sp - 2];
+            if (a.isSmallInt() and b.isSmallInt()) {
+                const result = if (a.asSmallInt() == b.asSmallInt()) Value.@"true" else Value.@"false";
+                self.stack[self.sp - 2] = result;
+                self.sp -= 1;
+                return .continue_dispatch;
+            }
+        }
+        if (self.sendSpecialBinary(.equal, "=")) {
+            return .continue_dispatch;
+        } else |err| {
+            self.dispatch_error = err;
+            return .return_error;
+        }
+    }
+
+    fn handleSendNotEqual(self: *Interpreter) DispatchResult {
+        // FAST PATH: Inline SmallInteger comparison
+        if (self.sp >= 2) {
+            const b = self.stack[self.sp - 1];
+            const a = self.stack[self.sp - 2];
+            if (a.isSmallInt() and b.isSmallInt()) {
+                const result = if (a.asSmallInt() != b.asSmallInt()) Value.@"true" else Value.@"false";
+                self.stack[self.sp - 2] = result;
+                self.sp -= 1;
+                return .continue_dispatch;
+            }
+        }
+        if (self.sendSpecialBinary(.not_equal, "~=")) {
+            return .continue_dispatch;
+        } else |err| {
+            self.dispatch_error = err;
+            return .return_error;
+        }
+    }
+
+    fn handleSendClass(self: *Interpreter) DispatchResult {
+        if (self.sp > 0) {
+            self.sp -= 1;
+            const recv = self.stack[self.sp];
+            const class = self.heap.classOf(recv);
+            self.stack[self.sp] = class;
+            self.sp += 1;
+            return .continue_dispatch;
+        }
+        self.dispatch_error = InterpreterError.StackUnderflow;
+        return .return_error;
+    }
+
+    fn handleSendSize(self: *Interpreter) DispatchResult {
+        if (self.sendUnary("size")) {
+            return .continue_dispatch;
+        } else |err| {
+            self.dispatch_error = err;
+            return .return_error;
+        }
+    }
+
+    fn handleSendIdentical(self: *Interpreter) DispatchResult {
+        if (self.sendIdentical()) {
+            return .continue_dispatch;
+        } else |err| {
+            self.dispatch_error = err;
+            return .return_error;
+        }
+    }
+
+    fn handleSendNotIdentical(self: *Interpreter) DispatchResult {
+        if (self.sendNotIdentical()) {
+            return .continue_dispatch;
+        } else |err| {
+            self.dispatch_error = err;
+            return .return_error;
+        }
+    }
+
+    // Closure and outer temp operations
+    fn handlePushOuterTemp(self: *Interpreter) DispatchResult {
+        const bc = self.method.getBytecodes();
+        const level = bc[self.ip];
+        const index = bc[self.ip + 1];
+        self.ip += 2;
+
+        const heap_ctx = if (level >= 2) self.home_heap_context else self.heap_context;
+        if (!heap_ctx.isNil()) {
+            const ctx_obj = heap_ctx.asObject();
+            self.stack[self.sp] = getHeapContextTemp(ctx_obj, index);
+        } else {
+            const base = if (level >= 2) self.home_temp_base else self.outer_temp_base;
+            const slot = base + 1 + index;
+            self.stack[self.sp] = self.stack[slot];
+        }
+        self.sp += 1;
+        return .continue_dispatch;
+    }
+
+    fn handleStoreOuterTemp(self: *Interpreter) DispatchResult {
+        const bc = self.method.getBytecodes();
+        const level = bc[self.ip];
+        const index = bc[self.ip + 1];
+        self.ip += 2;
+
+        const val = if (self.sp > 0) self.stack[self.sp - 1] else Value.nil;
+
+        // ALWAYS write to stack for fast reads by outer scope
+        const base = if (level >= 2) self.home_temp_base else self.outer_temp_base;
+        const slot = base + 1 + index;
+        self.stack[slot] = val;
+
+        // Also write to heap context for cross-process/forked block access
+        const heap_ctx = if (level >= 2) self.home_heap_context else self.heap_context;
+        if (!heap_ctx.isNil()) {
+            const ctx_obj = heap_ctx.asObject();
+            setHeapContextTemp(ctx_obj, index, val);
+        }
+        return .continue_dispatch;
+    }
+
+    fn handlePushClosure(self: *Interpreter) DispatchResult {
+        // Delegate to existing complex logic via switch fallback
+        // This is too complex to inline efficiently
+        const bc = self.method.getBytecodes();
+        const block_num_args = bc[self.ip];
+        const block_num_temps = bc[self.ip + 1];
+        const size_hi: u16 = bc[self.ip + 2];
+        const size_lo: u16 = bc[self.ip + 3];
+        const bytecode_size: usize = @intCast((size_hi << 8) | size_lo);
+        self.ip += 4;
+
+        // Lazily create heap context for closure
+        if (self.heap_context.isNil()) {
+            const method_num_temps = self.method.header.num_temps;
+            const method_num_args = self.method.header.num_args;
+            const num_to_capture = method_num_args + method_num_temps;
+
+            const heap_ctx = self.createHeapContext(num_to_capture) catch {
+                self.dispatch_error = InterpreterError.OutOfMemory;
+                return .return_error;
+            };
+            self.heap_context = Value.fromObject(heap_ctx);
+
+            if (self.home_heap_context.isNil()) {
+                self.home_heap_context = self.heap_context;
+            }
+        }
+
+        // Create BlockClosure object
+        const closure = self.heap.allocateObject(Heap.CLASS_BLOCK_CLOSURE, Heap.BLOCK_NUM_FIELDS, .normal) catch {
+            self.dispatch_error = InterpreterError.OutOfMemory;
+            return .return_error;
+        };
+
+        closure.setField(Heap.BLOCK_FIELD_OUTER_CONTEXT, self.heap_context, Heap.BLOCK_NUM_FIELDS);
+        closure.setField(Heap.BLOCK_FIELD_START_PC, Value.fromSmallInt(@intCast(self.ip)), Heap.BLOCK_NUM_FIELDS);
+        closure.setField(Heap.BLOCK_FIELD_NUM_ARGS, Value.fromSmallInt(block_num_args), Heap.BLOCK_NUM_FIELDS);
+        closure.setField(Heap.BLOCK_FIELD_METHOD, Value.fromObject(@ptrCast(@alignCast(self.method))), Heap.BLOCK_NUM_FIELDS);
+        closure.setField(Heap.BLOCK_FIELD_RECEIVER, self.receiver, Heap.BLOCK_NUM_FIELDS);
+        closure.setField(Heap.BLOCK_FIELD_HOME_CONTEXT, self.home_heap_context, Heap.BLOCK_NUM_FIELDS);
+        closure.setField(Heap.BLOCK_FIELD_NUM_TEMPS, Value.fromSmallInt(block_num_temps), Heap.BLOCK_NUM_FIELDS);
+
+        self.stack[self.sp] = Value.fromObject(closure);
+        self.sp += 1;
+        self.ip += bytecode_size;
+
+        return .continue_dispatch;
+    }
+
+    fn handlePrimitive(self: *Interpreter) DispatchResult {
+        const bc = self.method.getBytecodes();
+        const prim_hi: u16 = bc[self.ip];
+        const prim_lo: u16 = bc[self.ip + 1];
+        self.ip += 2;
+        const prim_index = (prim_hi << 8) | prim_lo;
+
+        if (primitives.executePrimitive(self, prim_index)) |result| {
+            self.stack[self.sp] = result;
+            self.sp += 1;
+            return .continue_dispatch;
+        } else |err| {
+            if (err != InterpreterError.ContinueExecution) {
+                self.dispatch_error = err;
+                return .return_error;
+            }
+            return .continue_dispatch;
+        }
+    }
+
+    fn handleMakeArray(self: *Interpreter) DispatchResult {
+        const bc = self.method.getBytecodes();
+        const count = bc[self.ip];
+        self.ip += 1;
+
+        const array = self.heap.allocateObject(Heap.CLASS_ARRAY, count, .variable) catch {
+            self.dispatch_error = InterpreterError.OutOfMemory;
+            return .return_error;
+        };
+
+        var i: usize = count;
+        while (i > 0) {
+            i -= 1;
+            if (self.sp > 0) {
+                self.sp -= 1;
+                array.setField(i, self.stack[self.sp], count);
+            }
+        }
+
+        self.stack[self.sp] = Value.fromObject(array);
+        self.sp += 1;
+        return .continue_dispatch;
+    }
+
+    fn handleExtendedPush(self: *Interpreter) DispatchResult {
+        // Delegate to existing handler via interpretLoop fallback
+        // Extended push is rare enough that the overhead is acceptable
+        self.ip -= 1; // Rewind to let interpretLoop handle it
+        self.dispatch_error = InterpreterError.InvalidBytecode;
+        return .return_error;
+    }
+
+    fn handleExtendedStore(self: *Interpreter) DispatchResult {
+        const bc = self.method.getBytecodes();
+        const store_type = bc[self.ip];
+        const index = bc[self.ip + 1];
+        self.ip += 2;
+        const val = if (self.sp > 0) self.stack[self.sp - 1] else Value.nil;
+
+        switch (store_type) {
+            0 => {
+                // Store to temporary
+                self.stack[self.temp_base + 1 + index] = val;
+                if (!self.heap_context.isNil()) {
+                    setHeapContextTemp(self.heap_context.asObject(), index, val);
+                }
+            },
+            1 => {
+                // Store to instance variable
+                if (self.receiver.isObject()) {
+                    const recv_obj = self.receiver.asObject();
+                    const class = self.heap.classOf(self.receiver);
+                    var inst_size: usize = 0;
+                    if (class.isObject()) {
+                        const cls_obj = class.asObject();
+                        const format_val = cls_obj.getField(Heap.CLASS_FIELD_FORMAT, cls_obj.header.size);
+                        if (format_val.isSmallInt()) {
+                            inst_size = @intCast(format_val.asSmallInt() & 0xFF);
+                        }
+                    }
+                    recv_obj.setField(index, val, inst_size);
+                }
+            },
+            2 => {
+                // Store to class variable
+                const literals = self.method.getLiterals();
+                const literal = literals[index];
+                if (literal.isObject()) {
+                    const lit_obj = literal.asObject();
+                    if (lit_obj.header.class_index == Heap.CLASS_SYMBOL) {
+                        const name_bytes = lit_obj.bytes(lit_obj.header.size);
+                        if (!self.storeClassVariable(name_bytes, val)) {
+                            self.heap.setGlobal(name_bytes, val) catch {};
+                        }
+                    } else if (lit_obj.header.class_index == Heap.CLASS_ARRAY and lit_obj.header.size == 2) {
+                        lit_obj.setField(1, val, 2);
+                    }
+                }
+            },
+            else => {},
+        }
+        return .continue_dispatch;
+    }
+
+    fn handleExtendedSend(self: *Interpreter) DispatchResult {
+        // Extended send is rare - delegate to normal send handling
+        const bc = self.method.getBytecodes();
+        const selector_index = bc[self.ip];
+        const num_args = bc[self.ip + 1];
+        self.ip += 2;
+        if (self.sendMessage(selector_index, num_args, false, self.ip - 3)) {
+            return .continue_dispatch;
+        } else |err| {
+            return self.handleSendError(err);
+        }
+    }
+
+    // Handler generators for short-form opcodes
+    fn makeHandlerPushReceiverVar(comptime index: usize) DispatchHandler {
+        return struct {
+            fn handler(self: *Interpreter) DispatchResult {
+                if (self.receiver.isObject()) {
+                    const obj = self.receiver.asObject();
+                    var num_fields: usize = 16;
+                    const class = self.heap.classOf(self.receiver);
+                    if (class.isObject()) {
+                        const cls_obj = class.asObject();
+                        const format_val = cls_obj.getField(Heap.CLASS_FIELD_FORMAT, cls_obj.header.size);
+                        if (format_val.isSmallInt()) {
+                            num_fields = @intCast(format_val.asSmallInt() & 0xFF);
+                            if (num_fields == 0) num_fields = obj.header.size;
+                        }
+                    }
+                    self.stack[self.sp] = obj.getField(index, num_fields);
+                } else {
+                    self.stack[self.sp] = Value.nil;
+                }
+                self.sp += 1;
+                return .continue_dispatch;
+            }
+        }.handler;
+    }
+
+    fn makeHandlerPushTemp(comptime index: usize) DispatchHandler {
+        return struct {
+            fn handler(self: *Interpreter) DispatchResult {
+                // Fast path: always read from stack (store_outer_temp keeps stack in sync)
+                const slot = self.temp_base + 1 + index;
+                self.stack[self.sp] = self.stack[slot];
+                self.sp += 1;
+                return .continue_dispatch;
+            }
+        }.handler;
+    }
+
+    fn makeHandlerStoreReceiverVar(comptime index: usize) DispatchHandler {
+        return struct {
+            fn handler(self: *Interpreter) DispatchResult {
+                if (self.receiver.isObject()) {
+                    const obj = self.receiver.asObject();
+                    var num_fields: usize = 16;
+                    const class = self.heap.classOf(self.receiver);
+                    if (class.isObject()) {
+                        const cls_obj = class.asObject();
+                        const format_val = cls_obj.getField(Heap.CLASS_FIELD_FORMAT, cls_obj.header.size);
+                        if (format_val.isSmallInt()) {
+                            num_fields = @intCast(format_val.asSmallInt() & 0xFF);
+                            if (num_fields == 0) num_fields = obj.header.size;
+                        }
+                    }
+                    const val = if (self.sp > 0) self.stack[self.sp - 1] else Value.nil;
+                    obj.setField(index, val, num_fields);
+                }
+                return .continue_dispatch;
+            }
+        }.handler;
+    }
+
+    fn makeHandlerStoreTemp(comptime index: usize) DispatchHandler {
+        return struct {
+            fn handler(self: *Interpreter) DispatchResult {
+                const slot = self.temp_base + 1 + index;
+                const val = if (self.sp > 0) self.stack[self.sp - 1] else Value.nil;
+                self.stack[slot] = val;
+                if (!self.heap_context.isNil()) {
+                    setHeapContextTemp(self.heap_context.asObject(), index, val);
+                }
+                return .continue_dispatch;
+            }
+        }.handler;
+    }
+
+    fn makeHandlerPopStoreReceiverVar(comptime index: usize) DispatchHandler {
+        return struct {
+            fn handler(self: *Interpreter) DispatchResult {
+                if (self.receiver.isObject()) {
+                    const obj = self.receiver.asObject();
+                    var num_fields: usize = 16;
+                    const class = self.heap.classOf(self.receiver);
+                    if (class.isObject()) {
+                        const cls_obj = class.asObject();
+                        const format_val = cls_obj.getField(Heap.CLASS_FIELD_FORMAT, cls_obj.header.size);
+                        if (format_val.isSmallInt()) {
+                            num_fields = @intCast(format_val.asSmallInt() & 0xFF);
+                            if (num_fields == 0) num_fields = obj.header.size;
+                        }
+                    }
+                    const val = if (self.sp > 0) self.stack[self.sp - 1] else Value.nil;
+                    obj.setField(index, val, num_fields);
+                }
+                if (self.sp > 0) self.sp -= 1;
+                return .continue_dispatch;
+            }
+        }.handler;
+    }
+
+    fn makeHandlerPopStoreTemp(comptime index: usize) DispatchHandler {
+        return struct {
+            fn handler(self: *Interpreter) DispatchResult {
+                const slot = self.temp_base + 1 + index;
+                const val = if (self.sp > 0) self.stack[self.sp - 1] else Value.nil;
+                self.stack[slot] = val;
+                if (!self.heap_context.isNil()) {
+                    setHeapContextTemp(self.heap_context.asObject(), index, val);
+                }
+                if (self.sp > 0) self.sp -= 1;
+                return .continue_dispatch;
+            }
+        }.handler;
+    }
+
+    fn makeHandlerShortJump(comptime offset: usize) DispatchHandler {
+        return struct {
+            fn handler(self: *Interpreter) DispatchResult {
+                self.ip += offset;
+                return .continue_dispatch;
+            }
+        }.handler;
     }
 };
 

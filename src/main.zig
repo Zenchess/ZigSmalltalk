@@ -51,6 +51,8 @@ const banner =
 pub fn main() !void {
     const allocator = std.heap.c_allocator;
 
+    std.debug.print("VM start\n", .{});
+
     const stdout = std.fs.File.stdout();
     const stdin = std.fs.File.stdin();
 
@@ -298,6 +300,7 @@ pub fn main() !void {
     var load_order_path: ?[]const u8 = null;
     var repl_mode = true;
     var tui_mode = false;
+    var jit_requested = false;
     var arg_index: usize = 1;
     while (arg_index < args.len) : (arg_index += 1) {
         if (std.mem.eql(u8, args[arg_index], "--image") and arg_index + 1 < args.len) {
@@ -335,6 +338,8 @@ pub fn main() !void {
             repl_mode = false;
         } else if (std.mem.eql(u8, args[arg_index], "--tui")) {
             tui_mode = true;
+        } else if (std.mem.eql(u8, args[arg_index], "--jit")) {
+            jit_requested = true;
         }
     }
 
@@ -357,16 +362,6 @@ pub fn main() !void {
     heap.interpreter = &interp;
 
     // Check for --jit flag to enable JIT compilation
-    for (args) |arg| {
-        if (std.mem.eql(u8, arg, "--jit")) {
-            interp.enableJit() catch |err| {
-                std.debug.print("Warning: Failed to enable JIT: {any}\n", .{err});
-            };
-            std.debug.print("JIT compilation enabled\n", .{});
-            break;
-        }
-    }
-
     // Process load-order file if specified
     if (load_order_path) |order_path| {
         const order_file = std.fs.cwd().openFile(order_path, .{}) catch |err| {
@@ -407,6 +402,15 @@ pub fn main() !void {
                 continue;
             };
         }
+    }
+
+    // Enable JIT after core loads to avoid compiling transient boot code
+    if (jit_requested) {
+        std.debug.print("Enabling JIT after load-order processing\n", .{});
+        interp.enableJit() catch |err| {
+            std.debug.print("Warning: Failed to enable JIT: {any}\n", .{err});
+        };
+        std.debug.print("JIT compilation enabled\n", .{});
     }
 
     var skip_next: bool = false;

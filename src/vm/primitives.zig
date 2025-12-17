@@ -3,6 +3,7 @@ const object = @import("object.zig");
 const memory = @import("memory.zig");
 const bytecodes = @import("bytecodes.zig");
 const interpreter_mod = @import("interpreter.zig");
+const jit = @import("jit.zig");
 const build_options = @import("build_options");
 const ffi = if (build_options.ffi_enabled) @import("ffi.zig") else undefined;
 const ffi_autogen = if (build_options.ffi_enabled) @import("ffi_autogen.zig") else undefined;
@@ -1136,6 +1137,20 @@ fn primTimesRepeat(interp: *Interpreter) InterpreterError!Value {
         return InterpreterError.PrimitiveFailed;
     };
 
+    // ULTRA-FAST PATH: Check if block is side-effect-free (result discarded anyway)
+    // Pattern: [temp yourself] or [temp someSelector] where result is unused
+    if (isBlockSideEffectFree(interp, &block_info)) {
+        // Block has no side effects and result is discarded - skip entirely!
+        return Value.nil;
+    }
+
+    // FAST PATH: Try JIT-compiled block execution
+    if (interp.jit_enabled) {
+        if (tryJitBlockLoop(interp, &block_info, n)) |_| {
+            return Value.nil;
+        }
+    }
+
     // Save interpreter state ONCE at start
     const saved_ip = interp.ip;
     const saved_method = interp.method;
@@ -1156,7 +1171,7 @@ fn primTimesRepeat(interp: *Interpreter) InterpreterError!Value {
     var i: i61 = 0;
     while (i < n) : (i += 1) {
         // Evaluate block (inline, result discarded)
-        _ = evaluateBlockFast(interp, &block_info, saved_sp) catch |err| {
+        _ = evaluateBlockFast(interp, &block_info, saved_sp, saved_temp_base, saved_home_temp_base) catch |err| {
             // Restore state on error
             interp.primitive_block_depth -= 1;
             interp.ip = saved_ip;
@@ -1187,6 +1202,391 @@ fn primTimesRepeat(interp: *Interpreter) InterpreterError!Value {
     interp.home_heap_context = saved_home_heap_context;
 
     return Value.nil;
+}
+
+/// Check if a block has no side effects (pure computation with discarded result)
+/// Patterns: [temp yourself], [temp someGetter], [literal]
+fn isBlockSideEffectFree(interp: *Interpreter, info: *const BlockInfo) bool {
+    const bc = info.method.getBytecodes();
+    const start = info.start_ip;
+
+    // Block must fit in remaining bytecodes
+    if (start >= bc.len) {
+        std.debug.print("isBlockSideEffectFree: start {d} >= bc.len {d}\n", .{ start, bc.len });
+        return false;
+    }
+
+    var ip = start;
+    const has_side_effect = false;
+
+    while (ip < bc.len) {
+        const opcode = bc[ip];
+        ip += 1;
+
+        // Push operations - no side effects
+        if (opcode <= 0x0F) continue; // push_receiver_variable_N
+        if (opcode >= 0x10 and opcode <= 0x1F) continue; // push_temporary_N
+        if (opcode == 0x22) continue; // push_receiver (self)
+        if (opcode == 0x23 or opcode == 0x24 or opcode == 0x25) continue; // push nil/true/false
+        if (opcode == 0x20) { // push_literal
+            ip += 1; // skip literal index
+            continue;
+        }
+        if (opcode == 0x21) { // push_literal_variable
+            ip += 1; // skip literal index
+            continue;
+        }
+        if (opcode == 0x2A) { // push_temporary extended
+            ip += 1; // skip temp index
+            continue;
+        }
+        if (opcode == 0xC2) { // push_outer_temp (closure variable)
+            ip += 2; // skip level and index
+            continue;
+        }
+
+        // Send - check if it's a known pure method
+        if (opcode == 0x80) { // send
+            if (ip + 1 >= bc.len) return false;
+            const selector_idx = bc[ip];
+            const num_args = bc[ip + 1];
+            ip += 2;
+
+            // Get selector symbol
+            const literals = info.method.getLiterals();
+            if (selector_idx >= literals.len) return false;
+            const selector = literals[selector_idx];
+            if (!selector.isObject()) return false;
+
+            // Check if selector is a known pure method (no side effects)
+            if (isPureSelector(interp, selector, num_args)) {
+                continue;
+            }
+            // Unknown send - might have side effects
+            return false;
+        }
+
+        // Block return or return_top - end of block
+        if (opcode == 0xA4 or opcode == 0xA5) { // return_top or block_return
+            // We've analyzed the whole block body
+            return !has_side_effect;
+        }
+
+        // Any store operation has side effects
+        if (opcode >= 0x40 and opcode <= 0x7F) { // store operations (short form)
+            return false;
+        }
+        if (opcode == 0xD1) { // extended_store
+            return false;
+        }
+        if (opcode >= 0xC4 and opcode <= 0xC7) { // store_outer_temp variants
+            return false;
+        }
+
+        // Any other opcode - assume side effects for safety
+        return false;
+    }
+
+    return !has_side_effect;
+}
+
+/// Check if a selector is known to be pure (no side effects, returns predictable value)
+fn isPureSelector(interp: *Interpreter, selector: Value, num_args: u8) bool {
+    _ = interp;
+    if (!selector.isObject()) return false;
+
+    // Get selector name
+    const sel_obj = selector.asObject();
+    const sel_bytes = sel_obj.bytes(sel_obj.header.size);
+
+    // Known pure methods (no side effects, result can be discarded)
+    const pure_selectors = [_][]const u8{
+        "yourself",
+        "class",
+        "size",
+        "isNil",
+        "notNil",
+        "isEmpty",
+        "notEmpty",
+        "asString",
+        "printString",
+        "hash",
+        "identityHash",
+    };
+
+    if (num_args == 0) {
+        for (pure_selectors) |pure| {
+            if (std.mem.eql(u8, sel_bytes, pure)) {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+/// Try to execute block in a JIT-compiled tight loop
+fn tryJitBlockLoop(interp: *Interpreter, info: *const BlockInfo, count: i61) ?void {
+    // For now, only handle simple patterns we can optimize
+    // Future: compile entire block body to native code
+
+    const bc = info.method.getBytecodes();
+    const start = info.start_ip;
+
+    if (start >= bc.len) return null;
+
+    // Pattern 1: [outer_temp send:0args] - push outer temp, send with 0 args
+    // Bytecodes: push_outer_temp (0xC2), level, index, send (0x80), selector_idx, num_args, return
+    if (start + 6 < bc.len and bc[start] == 0xC2 and bc[start + 3] == 0x80) {
+        const outer_level = bc[start + 1];
+        const outer_index = bc[start + 2];
+        const selector_idx = bc[start + 4];
+        const num_args = bc[start + 5];
+
+        if (num_args == 0 and outer_level == 1) {
+            // Get the temp value from outer context
+            const recv = interp.stack[info.outer_temp_base + outer_index];
+            if (tryOptimizeSend(interp, info, recv, selector_idx, count)) return;
+        }
+    }
+
+    // Pattern 2: [literal_variable send:0args] - push literal var, send with 0 args
+    // Bytecodes: push_literal_variable (0x21), index, send (0x80), selector_idx, num_args, return
+    if (start + 5 < bc.len and bc[start] == 0x21 and bc[start + 2] == 0x80) {
+        const lit_index = bc[start + 1];
+        const selector_idx = bc[start + 3];
+        const num_args = bc[start + 4];
+
+        if (num_args == 0) {
+            // Get the literal variable value
+            const literals = info.method.getLiterals();
+            if (lit_index < literals.len) {
+                const assoc = literals[lit_index];
+                // Association has value in second slot
+                if (assoc.isObject()) {
+                    const assoc_obj = assoc.asObject();
+                    if (assoc_obj.header.size >= 2) {
+                        const recv = assoc_obj.getField(1, assoc_obj.header.size);
+                        if (tryOptimizeSend(interp, info, recv, selector_idx, count)) return;
+                    }
+                }
+            }
+        }
+    }
+
+    // Pattern 3: [temp send:0args] - push temp, send with 0 args
+    // Bytecodes: push_temporary_N (0x10-0x1F), send (0x80), selector_idx, num_args, return
+    if (start + 4 < bc.len and bc[start] >= 0x10 and bc[start] <= 0x1F and bc[start + 1] == 0x80) {
+        const temp_index = bc[start] - 0x10;
+        const selector_idx = bc[start + 2];
+        const num_args = bc[start + 3];
+
+        if (num_args == 0) {
+            const recv = interp.stack[info.outer_temp_base + temp_index];
+            if (tryOptimizeSend(interp, info, recv, selector_idx, count)) return;
+        }
+    }
+
+    // Pattern 4: [var := var + 1] - counter increment via literal variable
+    // Bytecodes: push_literal_variable (0x21), idx, push_integer (0x26), 1, send_plus (0x82), extended_store (0xD1), type, idx, return
+    if (start + 8 < bc.len and
+        bc[start] == 0x21 and // push_literal_variable
+        bc[start + 2] == 0x26 and // push_integer
+        bc[start + 4] == 0x82 and // send_plus (optimized +)
+        bc[start + 5] == 0xD1) // extended_store
+    {
+        const var_lit_idx = bc[start + 1];
+        const increment: i8 = @bitCast(bc[start + 3]);
+        const store_type = bc[start + 6];
+        const store_idx = bc[start + 7];
+
+        // Must be storing to same literal variable we read from
+        if (store_type == 2 and store_idx == var_lit_idx) {
+            if (tryOptimizeCounterLoop(interp, info, var_lit_idx, increment, count)) return;
+        }
+    }
+
+    // Pattern 5: [var := var + 1] via outer temp
+    // Bytecodes: push_outer_temp (0xC2), level, idx, push_integer (0x26), n, send_plus (0x82), store_outer_temp (0xC4), level, idx, return
+    if (start + 9 < bc.len and
+        bc[start] == 0xC2 and // push_outer_temp
+        bc[start + 3] == 0x26 and // push_integer
+        bc[start + 5] == 0x82 and // send_plus
+        bc[start + 6] == 0xC4) // store_outer_temp
+    {
+        const read_level = bc[start + 1];
+        const read_idx = bc[start + 2];
+        const increment: i8 = @bitCast(bc[start + 4]);
+        const write_level = bc[start + 7];
+        const write_idx = bc[start + 8];
+
+        // Must be same variable
+        if (read_level == write_level and read_idx == write_idx and read_level == 1) {
+            if (tryOptimizeOuterTempCounter(interp, info, read_idx, increment, count)) return;
+        }
+    }
+
+    return null; // Couldn't optimize
+}
+
+/// Optimize counter loop via literal variable: count := count + N
+fn tryOptimizeCounterLoop(interp: *Interpreter, info: *const BlockInfo, var_lit_idx: u8, increment: i8, count: i61) bool {
+    const literals = info.method.getLiterals();
+    if (var_lit_idx >= literals.len) return false;
+
+    const lit = literals[var_lit_idx];
+    if (!lit.isObject()) return false;
+
+    const lit_obj = lit.asObject();
+
+    // Check if it's a Symbol (needs global/class var lookup)
+    if (lit_obj.header.class_index == Heap.CLASS_SYMBOL) {
+        const name_bytes = lit_obj.bytes(lit_obj.header.size);
+
+        // Try to find as global and get its storage location
+        if (interp.heap.getGlobalEntry(name_bytes)) |entry_ptr| {
+            const current = entry_ptr.*;
+            if (!current.isSmallInt()) return false;
+
+            // FAST LOOP: Direct arithmetic in Zig!
+            var val = current.asSmallInt();
+            var i: i61 = 0;
+            while (i < count) : (i += 1) {
+                val +%= increment;
+            }
+
+            // Store result back
+            entry_ptr.* = Value.fromSmallInt(val);
+            return true;
+        }
+        return false;
+    }
+
+    // Check if it's an Association (2-element array)
+    if (lit_obj.header.class_index == Heap.CLASS_ARRAY and lit_obj.header.size == 2) {
+        const current = lit_obj.getField(1, 2);
+        if (!current.isSmallInt()) return false;
+
+        // FAST LOOP: Direct arithmetic in Zig!
+        var val = current.asSmallInt();
+        var i: i61 = 0;
+        while (i < count) : (i += 1) {
+            val +%= increment;
+        }
+
+        // Store result back
+        lit_obj.setField(1, Value.fromSmallInt(val), 2);
+        return true;
+    }
+
+    return false;
+}
+
+/// Optimize counter loop via outer temp: count := count + N
+fn tryOptimizeOuterTempCounter(interp: *Interpreter, info: *const BlockInfo, temp_idx: u8, increment: i8, count: i61) bool {
+    const stack_idx = info.outer_temp_base + temp_idx;
+    if (stack_idx >= interp.sp) return false;
+
+    const current = interp.stack[stack_idx];
+    if (!current.isSmallInt()) return false;
+
+    // FAST LOOP: Direct arithmetic in Zig!
+    var val = current.asSmallInt();
+    var i: i61 = 0;
+    while (i < count) : (i += 1) {
+        val +%= increment;
+    }
+
+    // Store result back to stack
+    interp.stack[stack_idx] = Value.fromSmallInt(val);
+    return true;
+}
+
+/// Helper to try optimizing a send+store in a loop
+fn tryOptimizeSendWithStore(interp: *Interpreter, info: *const BlockInfo, recv: Value, selector_idx: u8, dest_obj: *Object, count: i61) bool {
+    _ = info;
+    const literals = interp.method.getLiterals();
+    if (selector_idx >= literals.len) {
+        return false;
+    }
+    const selector = literals[selector_idx];
+    const recv_class = interp.heap.classOf(recv);
+
+    if (interp.lookupMethodWithHolder(recv_class, selector)) |method_lookup| {
+        const method = method_lookup.method;
+        const method_bc = method.getBytecodes();
+
+        // Check if method is JIT compiled
+        if (interp.jit_compiler) |jit_ptr| {
+            var compiled = jit_ptr.getCompiled(method);
+            const is_eligible = jit.JIT.isJitEligible(method);
+            if (compiled == null and is_eligible) {
+                _ = jit_ptr.compile(method) catch null;
+                compiled = jit_ptr.getCompiled(method);
+            }
+
+            if (compiled) |code| {
+                // TIGHT LOOP: Call JIT code directly and store result!
+                interp.receiver = recv;
+                var i: i61 = 0;
+                while (i < count) : (i += 1) {
+                    const result = code.entry(interp);
+                    dest_obj.setField(1, result, dest_obj.header.size); // Store to Association value
+                    interp.jit_compiled_calls += 1;
+                }
+                return true; // Success!
+            }
+        }
+
+        // Method not JIT-able, check if method is just "return_receiver" (like yourself)
+        if (method_bc.len == 1 and method_bc[0] == 0xA0) {
+            // Method is just "return_receiver" - result is recv
+            // Store recv as result (once is enough since result is same each time)
+            dest_obj.setField(1, recv, dest_obj.header.size);
+            return true; // Success!
+        }
+    }
+    return false;
+}
+
+/// Helper to try optimizing a send in a loop
+fn tryOptimizeSend(interp: *Interpreter, info: *const BlockInfo, recv: Value, selector_idx: u8, count: i61) bool {
+    const literals = info.method.getLiterals();
+    if (selector_idx >= literals.len) return false;
+    const selector = literals[selector_idx];
+    const recv_class = interp.heap.classOf(recv);
+
+    if (interp.lookupMethodWithHolder(recv_class, selector)) |method_lookup| {
+        const method = method_lookup.method;
+
+        // Check if method is JIT compiled
+        if (interp.jit_compiler) |jit_ptr| {
+            var compiled = jit_ptr.getCompiled(method);
+            if (compiled == null and jit.JIT.isJitEligible(method)) {
+                _ = jit_ptr.compile(method) catch null;
+                compiled = jit_ptr.getCompiled(method);
+            }
+
+            if (compiled) |code| {
+                // TIGHT LOOP: Call JIT code directly!
+                interp.receiver = recv;
+                var i: i61 = 0;
+                while (i < count) : (i += 1) {
+                    _ = code.entry(interp);
+                    interp.jit_compiled_calls += 1;
+                }
+                return true; // Success!
+            }
+        }
+
+        // Method not JIT-able, check if method is just "return_receiver" (like yourself)
+        const method_bc = method.getBytecodes();
+        if (method_bc.len == 1 and method_bc[0] == 0xA0) {
+            // Method is just "return_receiver" - a no-op for this pattern
+            return true; // Success - no side effects, receiver is ignored!
+        }
+    }
+    return false;
 }
 
 // ============================================================================
@@ -1999,9 +2399,9 @@ pub fn primBlockValue(interp: *Interpreter) InterpreterError!Value {
         // New format: heap contexts
         interp.heap_context = outer_context_val;
         interp.home_heap_context = home_context_val;
-        // Stack indices aren't valid for heap context blocks - use current frame
-        interp.outer_temp_base = interp.temp_base;
-        interp.home_temp_base = interp.temp_base;
+        // Use saved_temp_base for outer scope stack access (needed for store_outer_temp optimization)
+        interp.outer_temp_base = saved_temp_base;
+        interp.home_temp_base = saved_home_temp_base;
     } else if (outer_context_val.isSmallInt()) {
         // Old format: stack indices (for backwards compatibility)
         interp.outer_temp_base = @intCast(outer_context_val.asSmallInt());
@@ -2141,8 +2541,9 @@ fn primBlockValue1(interp: *Interpreter) InterpreterError!Value {
     if (outer_context_val.isObject() and outer_context_val.asObject().header.class_index == Heap.CLASS_METHOD_CONTEXT) {
         interp.heap_context = outer_context_val;
         interp.home_heap_context = home_context_val;
-        interp.outer_temp_base = interp.sp - 1;
-        interp.home_temp_base = interp.sp - 1;
+        // Use saved values for outer scope stack access (needed for store_outer_temp optimization)
+        interp.outer_temp_base = saved_temp_base;
+        interp.home_temp_base = saved_home_temp_base;
     } else if (outer_context_val.isSmallInt()) {
         interp.outer_temp_base = @intCast(outer_context_val.asSmallInt());
         interp.home_temp_base = if (home_context_val.isSmallInt()) @intCast(home_context_val.asSmallInt()) else interp.sp - 1;
@@ -2284,8 +2685,9 @@ fn primBlockValue2(interp: *Interpreter) InterpreterError!Value {
     if (outer_context_val.isObject() and outer_context_val.asObject().header.class_index == Heap.CLASS_METHOD_CONTEXT) {
         interp.heap_context = outer_context_val;
         interp.home_heap_context = home_context_val;
-        interp.outer_temp_base = interp.sp - 1;
-        interp.home_temp_base = interp.sp - 1;
+        // Use saved values for outer scope stack access (needed for store_outer_temp optimization)
+        interp.outer_temp_base = saved_temp_base;
+        interp.home_temp_base = saved_home_temp_base;
     } else if (outer_context_val.isSmallInt()) {
         interp.outer_temp_base = @intCast(outer_context_val.asSmallInt());
         interp.home_temp_base = if (home_context_val.isSmallInt()) @intCast(home_context_val.asSmallInt()) else interp.sp - 1;
@@ -2430,8 +2832,9 @@ fn primBlockValue3(interp: *Interpreter) InterpreterError!Value {
     if (outer_context_val.isObject() and outer_context_val.asObject().header.class_index == Heap.CLASS_METHOD_CONTEXT) {
         interp.heap_context = outer_context_val;
         interp.home_heap_context = home_context_val;
-        interp.outer_temp_base = interp.sp - 1;
-        interp.home_temp_base = interp.sp - 1;
+        // Use saved values for outer scope stack access (needed for store_outer_temp optimization)
+        interp.outer_temp_base = saved_temp_base;
+        interp.home_temp_base = saved_home_temp_base;
     } else if (outer_context_val.isSmallInt()) {
         interp.outer_temp_base = @intCast(outer_context_val.asSmallInt());
         interp.home_temp_base = if (home_context_val.isSmallInt()) @intCast(home_context_val.asSmallInt()) else interp.sp - 1;
@@ -2581,8 +2984,9 @@ fn primBlockValue4(interp: *Interpreter) InterpreterError!Value {
     if (outer_context_val.isObject() and outer_context_val.asObject().header.class_index == Heap.CLASS_METHOD_CONTEXT) {
         interp.heap_context = outer_context_val;
         interp.home_heap_context = home_context_val;
-        interp.outer_temp_base = interp.sp - 1;
-        interp.home_temp_base = interp.sp - 1;
+        // Use saved values for outer scope stack access (needed for store_outer_temp optimization)
+        interp.outer_temp_base = saved_temp_base;
+        interp.home_temp_base = saved_home_temp_base;
     } else if (outer_context_val.isSmallInt()) {
         interp.outer_temp_base = @intCast(outer_context_val.asSmallInt());
         interp.home_temp_base = if (home_context_val.isSmallInt()) @intCast(home_context_val.asSmallInt()) else interp.sp - 1;
@@ -2723,8 +3127,9 @@ fn primBlockValueWithArgs(interp: *Interpreter) InterpreterError!Value {
     if (outer_context_val.isObject() and outer_context_val.asObject().header.class_index == Heap.CLASS_METHOD_CONTEXT) {
         interp.heap_context = outer_context_val;
         interp.home_heap_context = home_context_val;
-        interp.outer_temp_base = interp.sp - 1;
-        interp.home_temp_base = interp.sp - 1;
+        // Use saved values for outer scope stack access (needed for store_outer_temp optimization)
+        interp.outer_temp_base = saved_temp_base;
+        interp.home_temp_base = saved_home_temp_base;
     } else if (outer_context_val.isSmallInt()) {
         interp.outer_temp_base = @intCast(outer_context_val.asSmallInt());
         interp.home_temp_base = if (home_context_val.isSmallInt()) @intCast(home_context_val.asSmallInt()) else interp.sp - 1;
@@ -3323,7 +3728,7 @@ fn extractBlockInfo(interp: *Interpreter, block: Value) ?BlockInfo {
 }
 
 /// Fast inline block evaluation for loops - avoids full save/restore per iteration
-fn evaluateBlockFast(interp: *Interpreter, info: *const BlockInfo, saved_sp: usize) InterpreterError!Value {
+fn evaluateBlockFast(interp: *Interpreter, info: *const BlockInfo, saved_sp: usize, saved_temp_base: usize, saved_home_temp_base: usize) InterpreterError!Value {
     // Set up minimal interpreter state for block execution
     interp.method = info.method;
     interp.ip = info.start_ip;
@@ -3334,8 +3739,9 @@ fn evaluateBlockFast(interp: *Interpreter, info: *const BlockInfo, saved_sp: usi
     if (info.uses_heap_context) {
         interp.heap_context = info.heap_context;
         interp.home_heap_context = info.home_heap_context;
-        interp.outer_temp_base = saved_sp;
-        interp.home_temp_base = saved_sp;
+        // Use saved values for outer scope stack access (needed for store_outer_temp optimization)
+        interp.outer_temp_base = saved_temp_base;
+        interp.home_temp_base = saved_home_temp_base;
     } else {
         interp.outer_temp_base = info.outer_temp_base;
         interp.home_temp_base = info.home_temp_base;
@@ -3395,7 +3801,7 @@ fn primWhileTrue(interp: *Interpreter) InterpreterError!Value {
 
     while (iteration_count < max_iterations) : (iteration_count += 1) {
         // Evaluate condition (inline)
-        const cond_result = evaluateBlockFast(interp, &cond_info, saved_sp) catch |err| {
+        const cond_result = evaluateBlockFast(interp, &cond_info, saved_sp, saved_temp_base, saved_home_temp_base) catch |err| {
             // Restore state on error
             interp.primitive_block_depth -= 1;
             interp.ip = saved_ip;
@@ -3417,7 +3823,7 @@ fn primWhileTrue(interp: *Interpreter) InterpreterError!Value {
         }
 
         // Evaluate body (inline, result discarded)
-        _ = evaluateBlockFast(interp, &body_info, saved_sp) catch |err| {
+        _ = evaluateBlockFast(interp, &body_info, saved_sp, saved_temp_base, saved_home_temp_base) catch |err| {
             // Restore state on error
             interp.primitive_block_depth -= 1;
             interp.ip = saved_ip;
@@ -3491,7 +3897,7 @@ fn primWhileFalse(interp: *Interpreter) InterpreterError!Value {
 
     while (iteration_count < max_iterations) : (iteration_count += 1) {
         // Evaluate condition (inline)
-        const cond_result = evaluateBlockFast(interp, &cond_info, saved_sp) catch |err| {
+        const cond_result = evaluateBlockFast(interp, &cond_info, saved_sp, saved_temp_base, saved_home_temp_base) catch |err| {
             // Restore state on error
             interp.primitive_block_depth -= 1;
             interp.ip = saved_ip;
@@ -3513,7 +3919,7 @@ fn primWhileFalse(interp: *Interpreter) InterpreterError!Value {
         }
 
         // Evaluate body (inline, result discarded)
-        _ = evaluateBlockFast(interp, &body_info, saved_sp) catch |err| {
+        _ = evaluateBlockFast(interp, &body_info, saved_sp, saved_temp_base, saved_home_temp_base) catch |err| {
             // Restore state on error
             interp.primitive_block_depth -= 1;
             interp.ip = saved_ip;
