@@ -337,6 +337,9 @@ fn linkFFILibraries(b: *std.Build, exe: *std.Build.Step.Compile, target: std.Bui
     const libs = root.object.get("libraries") orelse return;
     if (libs != .array) return;
 
+    // Track libraries to disable due to missing files
+    var libs_to_disable = std.ArrayListUnmanaged([]const u8){};
+
     for (libs.array.items) |lib| {
         if (lib != .object) continue;
 
@@ -409,6 +412,21 @@ fn linkFFILibraries(b: *std.Build, exe: *std.Build.Step.Compile, target: std.Bui
 
         // Link the library
         if (isFullPath(link.string)) {
+            // Check if the library file actually exists before linking
+            const file_exists = blk: {
+                std.fs.cwd().access(link.string, .{}) catch {
+                    break :blk false;
+                };
+                break :blk true;
+            };
+
+            if (!file_exists) {
+                std.debug.print("FFI: WARNING - Library file not found: '{s}'\n", .{link.string});
+                std.debug.print("FFI: Disabling library '{s}' and updating ffi-config.json\n", .{lib_name});
+                libs_to_disable.append(b.allocator, lib_name) catch {};
+                continue;
+            }
+
             // It's a full path - extract directory and library name
             if (std.fs.path.dirname(link.string)) |dir| {
                 exe.addLibraryPath(.{ .cwd_relative = dir });
@@ -428,6 +446,135 @@ fn linkFFILibraries(b: *std.Build, exe: *std.Build.Step.Compile, target: std.Bui
             std.debug.print("FFI: Linking system library '{s}'\n", .{link.string});
         }
     }
+
+    // If we found missing libraries, update the config file to disable them
+    if (libs_to_disable.items.len > 0) {
+        updateFFIConfigDisableLibs(b.allocator, libs_to_disable.items);
+    }
+}
+
+/// Update ffi-config.json to disable libraries with missing files
+fn updateFFIConfigDisableLibs(allocator: std.mem.Allocator, libs_to_disable: []const []const u8) void {
+    const config_content = std.fs.cwd().readFileAlloc(allocator, "ffi-config.json", 1024 * 1024) catch {
+        return;
+    };
+    defer allocator.free(config_content);
+
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, config_content, .{}) catch {
+        return;
+    };
+    defer parsed.deinit();
+
+    const root = parsed.value;
+    if (root != .object) return;
+
+    const libs = root.object.get("libraries") orelse return;
+    if (libs != .array) return;
+
+    // Build a new JSON string with the disabled libraries
+    var output = std.ArrayListUnmanaged(u8){};
+
+    output.appendSlice(allocator, "{\n  \"libraries\": [\n") catch return;
+
+    var first = true;
+    for (libs.array.items) |lib| {
+        if (lib != .object) continue;
+
+        const lib_name = if (lib.object.get("name")) |n| (if (n == .string) n.string else null) else null;
+        const lib_headers = lib.object.get("headers");
+        const lib_link = lib.object.get("link");
+        const lib_enabled = lib.object.get("enabled");
+
+        // Check if this library should be disabled
+        var should_disable = false;
+        if (lib_name) |name| {
+            for (libs_to_disable) |disable_name| {
+                if (std.mem.eql(u8, name, disable_name)) {
+                    should_disable = true;
+                    break;
+                }
+            }
+        }
+
+        if (!first) {
+            output.appendSlice(allocator, ",\n") catch return;
+        }
+        first = false;
+
+        output.appendSlice(allocator, "    {\n") catch return;
+
+        // Name
+        output.appendSlice(allocator, "      \"name\": \"") catch return;
+        if (lib_name) |name| {
+            output.appendSlice(allocator, name) catch return;
+        }
+        output.appendSlice(allocator, "\",\n") catch return;
+
+        // Headers
+        output.appendSlice(allocator, "      \"headers\": [") catch return;
+        if (lib_headers != null and lib_headers.? == .array) {
+            var header_first = true;
+            for (lib_headers.?.array.items) |header| {
+                if (header != .string) continue;
+                if (!header_first) {
+                    output.appendSlice(allocator, ", ") catch return;
+                }
+                header_first = false;
+                output.appendSlice(allocator, "\"") catch return;
+                // Escape backslashes in paths
+                for (header.string) |c| {
+                    if (c == '\\') {
+                        output.appendSlice(allocator, "\\\\") catch return;
+                    } else {
+                        output.append(allocator, c) catch return;
+                    }
+                }
+                output.appendSlice(allocator, "\"") catch return;
+            }
+        }
+        output.appendSlice(allocator, "],\n") catch return;
+
+        // Link
+        output.appendSlice(allocator, "      \"link\": \"") catch return;
+        if (lib_link != null and lib_link.? == .string) {
+            // Escape backslashes in paths
+            for (lib_link.?.string) |c| {
+                if (c == '\\') {
+                    output.appendSlice(allocator, "\\\\") catch return;
+                } else {
+                    output.append(allocator, c) catch return;
+                }
+            }
+        }
+        output.appendSlice(allocator, "\",\n") catch return;
+
+        // Enabled - disable if in our list
+        output.appendSlice(allocator, "      \"enabled\": ") catch return;
+        if (should_disable) {
+            output.appendSlice(allocator, "false") catch return;
+            std.debug.print("FFI: Disabled library '{s}' in ffi-config.json\n", .{lib_name orelse "unknown"});
+        } else if (lib_enabled != null and lib_enabled.? == .bool) {
+            output.appendSlice(allocator, if (lib_enabled.?.bool) "true" else "false") catch return;
+        } else {
+            output.appendSlice(allocator, "true") catch return;
+        }
+        output.appendSlice(allocator, "\n    }") catch return;
+    }
+
+    output.appendSlice(allocator, "\n  ]\n}\n") catch return;
+
+    // Write the updated config
+    const file = std.fs.cwd().createFile("ffi-config.json", .{}) catch {
+        std.debug.print("FFI: Failed to update ffi-config.json\n", .{});
+        return;
+    };
+    defer file.close();
+    file.writeAll(output.items) catch {
+        std.debug.print("FFI: Failed to write ffi-config.json\n", .{});
+        return;
+    };
+
+    std.debug.print("FFI: Updated ffi-config.json - disabled libraries with missing files\n", .{});
 }
 
 /// Check if a string looks like a full file path

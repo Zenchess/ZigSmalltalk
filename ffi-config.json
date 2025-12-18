@@ -11,12 +11,6 @@
       "headers": [],
       "link": "",
       "enabled": true
-    },
-    {
-      "name": "Raylib",
-      "headers": ["/home/jacob/raylib/include/raylib.h"],
-      "link": "/home/jacob/raylib/lib/libraylib.so",
-      "enabled": true
     }
   ]
 }
