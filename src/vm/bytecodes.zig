@@ -654,6 +654,7 @@ pub const Primitive = enum(u16) {
     subclass_create = 796, // Class >> subclass: #Name - create a new subclass dynamically
     compile_method = 797, // Class >> compile: 'source' - compile and install method
     load_obj_file = 798, // OBJLoader >> load: 'path' - load OBJ file, returns {vertexData. indexData. vertexCount. indexCount}
+    ffi_create_struct_class = 799, // FFILibrary createStructClass: #Name for: 'LibName' - create struct subclass with accessor methods
 
     // Reflection primitives (900+)
     class_selectors = 900, // Behavior >> selectors
@@ -677,6 +678,34 @@ pub const Primitive = enum(u16) {
     image_file_name = 931, // SessionManager >> imageFileName - full path with extension
     image_directory = 932, // SessionManager >> imageDirectory - directory only
     image_path_set = 933, // SessionManager >> imagePath: aString - set the image path
+
+    // ========================================================================
+    // Terminal primitives for Smalltalk TUI (940-970)
+    // ========================================================================
+    terminal_init = 940, // Terminal >> initialize - enter raw/alternate screen mode
+    terminal_deinit = 941, // Terminal >> shutdown - restore normal terminal mode
+    terminal_write = 942, // Terminal >> write: aString - write string at cursor
+    terminal_clear = 943, // Terminal >> clear - clear entire screen
+    terminal_set_cursor = 944, // Terminal >> setCursorRow: row col: col - move cursor
+    terminal_get_cursor = 945, // Terminal >> cursorPosition - returns Point
+    terminal_set_fg_color = 946, // Terminal >> foregroundColor: r:g:b: - set fg RGB
+    terminal_set_bg_color = 947, // Terminal >> backgroundColor: r:g:b: - set bg RGB
+    terminal_reset_style = 948, // Terminal >> resetStyle - reset colors/attributes
+    terminal_poll_key = 949, // Terminal >> pollKey - non-blocking key check, nil if none
+    terminal_read_key = 950, // Terminal >> readKey - blocking key read
+    terminal_get_size = 951, // Terminal >> size - returns Point (cols @ rows)
+    terminal_flush = 952, // Terminal >> flush - flush output buffer
+    terminal_set_bold = 953, // Terminal >> bold: aBoolean
+    terminal_set_italic = 954, // Terminal >> italic: aBoolean
+    terminal_set_underline = 955, // Terminal >> underline: aBoolean
+    terminal_hide_cursor = 956, // Terminal >> hideCursor
+    terminal_show_cursor = 957, // Terminal >> showCursor
+    terminal_clear_line = 958, // Terminal >> clearLine - clear current line
+    terminal_clear_to_eol = 959, // Terminal >> clearToEndOfLine
+    terminal_set_fg_indexed = 960, // Terminal >> foregroundIndex: anInteger (0-255)
+    terminal_set_bg_indexed = 961, // Terminal >> backgroundIndex: anInteger (0-255)
+    terminal_draw_box = 962, // Terminal >> drawBoxAt: origin extent: size - draw box chars
+    terminal_fill_rect = 963, // Terminal >> fillRectAt: origin extent: size char: char
 
     _,
 };

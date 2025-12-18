@@ -388,6 +388,7 @@ pub fn executePrimitive(interp: *Interpreter, prim_index: u16) InterpreterError!
         .subclass_create => primSubclassCreate(interp),
         .compile_method => primCompileMethod(interp),
         .load_obj_file => primLoadOBJFile(interp),
+        .ffi_create_struct_class => primFFICreateStructClass(interp),
 
         // UI Process primitives (920-921)
         .ui_process_iteration => primUIProcessIteration(interp),
@@ -8981,9 +8982,10 @@ fn primGlobalAtIfAbsent(interp: *Interpreter) InterpreterError!Value {
 
     const key_size = key_obj.header.size;
     const key_bytes = key_obj.bytes(@intCast(key_size));
+    const key_slice = key_bytes[0..@intCast(key_size)];
 
     // Look up in globals
-    if (interp.heap.getGlobal(key_bytes[0..@intCast(key_size)])) |val| {
+    if (interp.heap.getGlobal(key_slice)) |val| {
         return val;
     }
 
@@ -10327,7 +10329,6 @@ fn primFFIStructInfo(interp: *Interpreter) InterpreterError!Value {
 
     // Get struct info from ffi_generated
     const info = ffi_generated.getStructInfo(lib_name, struct_name) orelse {
-        // Struct not found
         return Value.nil;
     };
 
@@ -10774,6 +10775,100 @@ fn primLoadOBJFile(interp: *Interpreter) InterpreterError!Value {
     fields[3] = Value.fromSmallInt(@intCast(mesh.indices.len));
 
     return result;
+}
+
+/// Primitive 799: FFILibrary createStructClass: #StructName for: 'LibName'
+/// Creates an ExternalStructure subclass with accessor methods for the struct's fields.
+/// Returns the new class object.
+fn primFFICreateStructClass(interp: *Interpreter) InterpreterError!Value {
+    // Stack order: receiver, structName, libraryName
+    const lib_name_val = try interp.pop(); // libraryName (arg2)
+    const struct_name_val = try interp.pop(); // structName (arg1)
+    _ = try interp.pop(); // receiver (FFILibrary class)
+
+    if (!ffi_enabled) {
+        return Value.nil;
+    }
+
+    const lib_name = getStringFromValue(interp.heap, lib_name_val) orelse {
+        return InterpreterError.PrimitiveFailed;
+    };
+
+    const struct_name = getStringFromValue(interp.heap, struct_name_val) orelse {
+        return InterpreterError.PrimitiveFailed;
+    };
+
+    // Get struct info from ffi_generated
+    const info = ffi_generated.getStructInfo(lib_name, struct_name) orelse {
+        return Value.nil;
+    };
+
+    // Look up ExternalStructure in globals
+    const ext_struct_class = interp.heap.getGlobal("ExternalStructure") orelse {
+        return InterpreterError.PrimitiveFailed;
+    };
+    if (!ext_struct_class.isObject()) {
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    // Create the new subclass
+    const new_class = filein.createDynamicClass(
+        interp.heap,
+        struct_name,
+        ext_struct_class.asObject(),
+        "", // inst_var_names
+        "", // class_var_names
+        "", // pool_dict_names
+        "", // class_inst_var_names
+        .normal, // class_format
+        null, // existing_class
+        "FFI-Structs", // category
+    ) catch {
+        return InterpreterError.PrimitiveFailed;
+    };
+
+    // Get the metaclass for class-side methods (stored in CLASS_FIELD_METACLASS)
+    const metaclass_val = new_class.getField(Heap.CLASS_FIELD_METACLASS, Heap.CLASS_NUM_FIELDS);
+    if (!metaclass_val.isObject()) {
+        return InterpreterError.PrimitiveFailed;
+    }
+    const metaclass = metaclass_val.asObject();
+
+    // Compile byteSize class method
+    var bytesize_buf: [64]u8 = undefined;
+    const bytesize_src = std.fmt.bufPrint(&bytesize_buf, "byteSize ^{d}", .{info.size}) catch {
+        return InterpreterError.PrimitiveFailed;
+    };
+    filein.compileAndInstallMethod(interp.heap, metaclass, bytesize_src) catch {
+        // Continue even if this fails
+    };
+
+    // Compile accessor methods for each field
+    for (info.fields) |field| {
+        // Generate getter: fieldName ^self <type>At: <offset>
+        var getter_buf: [128]u8 = undefined;
+        const getter_src = std.fmt.bufPrint(&getter_buf, "{s} ^self {s}At: {d}", .{ field.name, field.accessor_type, field.offset }) catch {
+            continue;
+        };
+        filein.compileAndInstallMethod(interp.heap, new_class, getter_src) catch {
+            continue;
+        };
+
+        // Generate setter: fieldName: value self <type>At: <offset> put: value
+        var setter_buf: [128]u8 = undefined;
+        const setter_src = std.fmt.bufPrint(&setter_buf, "{s}: value self {s}At: {d} put: value", .{ field.name, field.accessor_type, field.offset }) catch {
+            continue;
+        };
+        filein.compileAndInstallMethod(interp.heap, new_class, setter_src) catch {
+            continue;
+        };
+    }
+
+    // Invalidate caches since we added methods
+    interp.invalidateInlineCache();
+    interp.flushMethodCache();
+
+    return Value.fromObject(new_class);
 }
 
 // ============================================================================
