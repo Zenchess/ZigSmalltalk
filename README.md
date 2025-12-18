@@ -22,10 +22,7 @@ This project was inspired by limitations encountered when attempting to load an 
 Requires Zig 0.13+ and a C compiler.
 
 ```bash
-# Generate FFI bindings (required before first build)
-zig build gen-ffi
-
-# Build the project
+# Build the project (FFI bindings generated automatically)
 zig build
 
 # Run the REPL
@@ -129,17 +126,16 @@ The easiest way to configure FFI bindings is through the **FFI Config** tab (`F4
 1. Press `F4` to open the FFI Config tab
 2. Press `A` to add a new library
 3. Enter the library name (e.g., `Raylib`)
-4. Enter the **full path** to the header file (e.g., `C:\raylib\include\raylib.h` or `/usr/include/raylib.h`)
-5. Enter the **full path** to the library file (e.g., `C:\raylib\lib\libraylib.dll.a` or `/usr/lib/libraylib.so`)
+4. Enter the **full path** to the header file (e.g., `c:/raylib/include/raylib.h` or `/usr/include/raylib.h`)
+5. Enter the **full path** to the static library (e.g., `c:/raylib/lib/libraylib.a` or `/usr/lib/libraylib.a`)
 6. Press `Enter` to add, then `Ctrl+S` to save
-7. Regenerate bindings and rebuild:
+7. Rebuild (bindings are generated automatically):
 
 ```bash
-zig build gen-ffi
 zig build
 ```
 
-**Note (Windows):** Ensure the DLL file is in your PATH at runtime.
+**Note:** Using the static library (`.a`) is recommended as it links Raylib directly into the executable with no runtime dependencies.
 
 ### Advanced: Direct JSON Configuration
 
@@ -150,18 +146,21 @@ The configuration is stored in `ffi-config.json`:
   "libraries": [
     {
       "name": "Raylib",
-      "headers": ["C:\\raylib\\include\\raylib.h"],
-      "link": "C:\\raylib\\lib\\libraylib.dll.a",
-      "enabled": true
+      "headers": ["c:/raylib/include/raylib.h"],
+      "link": "c:/raylib/lib/libraylib.a",
+      "enabled": true,
+      "functions": ["InitWindow", "CloseWindow", "BeginDrawing", "EndDrawing", "ClearBackground"],
+      "structs": ["Vector2", "Vector3", "Color", "Rectangle", "Camera3D"]
     }
   ]
 }
 ```
 
-After editing, regenerate bindings:
+The `functions` array lists C functions to expose, and `structs` lists C structures to generate Smalltalk wrapper classes for.
+
+After editing, rebuild:
 
 ```bash
-zig build gen-ffi
 zig build
 ```
 
