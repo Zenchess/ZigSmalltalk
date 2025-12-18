@@ -741,6 +741,7 @@ pub const App = struct {
     fn loadClasses(self: *App) !void {
         // Iterate through class table and add to browser
         const class_table = self.heap.class_table.items;
+        std.debug.print("DEBUG loadClasses: class_table has {} entries\n", .{class_table.len});
 
         for (class_table) |class_val| {
             if (class_val.isNil() or !class_val.isObject()) continue;
@@ -811,6 +812,10 @@ pub const App = struct {
                 // Check if this class belongs to a defined package
                 if (packages_mod.SystemPackageDefinitions.getPackageForClass(name)) |pkg_name| {
                     self.package_registry.addClassToPackage(pkg_name, name) catch {};
+                } else if (parent_name != null and std.mem.eql(u8, parent_name.?, "ExternalStructure")) {
+                    // ExternalStructure subclasses go in FFI package
+                    std.debug.print("DEBUG: Adding ExternalStructure subclass '{s}' to FFI package\n", .{name});
+                    self.package_registry.addClassToPackage("FFI", name) catch {};
                 } else {
                     self.package_registry.addClassToPackage(category_name, name) catch {};
                 }

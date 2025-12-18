@@ -19,6 +19,10 @@ activeProcess
 isActiveMain
     ^true!
 
+yield
+    "Give other processes a chance to run - stub does nothing"
+    ^self!
+
 ! !
 
 !MinimalProcess methodsFor: 'exception handling'!

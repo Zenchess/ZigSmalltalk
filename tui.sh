@@ -21,9 +21,8 @@ FFI_CLASSES="src/image/ffi.st"
 FFI="ffi-test.st"
 STRUCTS="external-structure.st"
 FFI_STRUCTS="load-ffi-structs.st"
-CHESS="packages/ChessScene3D.st"
 
 # Load ANSI files first, then ffi.st (FFILibrary, ExternalStructure class definitions),
 # then external-structure.st (additional methods), then auto-generate FFI structs last
 # Pass through any command line arguments (like --image)
-./zig-out/bin/zig-smalltalk --tui "$@" $FILES $STUBS $FFI_CLASSES $STRUCTS $FFI $FFI_STRUCTS $CHESS
+./zig-out/bin/zig-smalltalk --tui "$@" $FILES $STUBS $FFI_CLASSES $STRUCTS $FFI $FFI_STRUCTS

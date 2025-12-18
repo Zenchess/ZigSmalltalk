@@ -6,6 +6,12 @@ This project was inspired by limitations encountered when attempting to load an 
 
 **Note:** This project is not based on or related to "Zag Smalltalk." The goal is not to load Squeak/Pharo images, but to provide a clean 64-bit Smalltalk with excellent FFI capabilities.
 
+Currently working:  Terminal editor with workspace/transcript/ffi page/browser.  FFI auto generation works, tested on OpenGL and Raylib.  
+
+Benchmarks are around 20,000 message sends/second on some benchmarks, still slower than Cog/Visualworks but this is the current focus of development for more speed, utilizing more advanced Jit compilation techniques.
+
+
+
 ## Features
 
 - **64-bit tagged pointer VM** with 61-bit SmallIntegers
@@ -13,26 +19,22 @@ This project was inspired by limitations encountered when attempting to load an 
 - **Terminal UI (TUI)** with mouse support, multiple tabs, and syntax highlighting
 - **Compile-time C FFI generation** configurable through the TUI
 - **Automatic C struct bindings** with getter/setter method generation
-- **OBJ file loader** for 3D model loading
-- **ANSI Smalltalk compliance** (~88% of ANSI test suite passing)
-- **Supports both Dolphin and ANSI Smalltalk syntax**
+- **ANSI Smalltalk compliance** (~100% of ANSI test suite passing)
+- **Supports ANSI Smalltalk syntax**
 
 ## Building
 
-Requires Zig 0.13+ and a C compiler.
+Requires Zig 0.15+ and a C compiler.
 
 ```bash
 # Build the project (FFI bindings generated automatically)
 zig build
 
 # Run the REPL
-zig build run
+./tui.bat (windows)  ./tui.sh (Linux)
 
-# Run the TUI
-zig build run -- --tui
 
-# Run the TUI with ANSI classes pre-loaded
-./tui.sh
+
 
 # Load Smalltalk files
 zig build run -- file1.st file2.st
@@ -44,23 +46,7 @@ zig build run -- --load-order files.txt
 zig build run -- --image snapshot.img
 ```
 
-### Dependencies
 
-System libraries that may need to be installed:
-- `libffi` - For runtime FFI calls
-- `glfw` - For OpenGL windowing (optional, for graphics demos)
-- `glew` - OpenGL extension loading (optional)
-- `raylib` - Alternative graphics library (optional)
-
-On Arch Linux:
-```bash
-pacman -S libffi glfw glew
-```
-
-On Ubuntu/Debian:
-```bash
-apt install libffi-dev libglfw3-dev libglew-dev
-```
 
 ## Terminal UI
 
@@ -102,18 +88,7 @@ You can also use `Ctrl+1` through `Ctrl+4` to switch tabs.
 | Arrow keys | Navigate lists |
 | `Escape` | Exit browser |
 
-### Text Editor Shortcuts
 
-| Shortcut | Action |
-|----------|--------|
-| `Ctrl+A` | Select all |
-| `Ctrl+C` | Copy selection |
-| `Ctrl+X` | Cut selection |
-| `Ctrl+V` | Paste |
-| `Ctrl+Arrow` | Word-based navigation |
-| `Shift+Arrow` | Extend selection |
-| `Home` / `End` | Line start/end |
-| `Page Up` / `Page Down` | Scroll |
 
 ## FFI System
 
@@ -132,6 +107,7 @@ The easiest way to configure FFI bindings is through the **FFI Config** tab (`F4
 7. Rebuild (bindings are generated automatically):
 
 ```bash
+zig build gen-ffi
 zig build
 ```
 
@@ -158,113 +134,16 @@ The configuration is stored in `ffi-config.json`:
 
 The `functions` array lists C functions to expose, and `structs` lists C structures to generate Smalltalk wrapper classes for.
 
-After editing, rebuild:
 
-```bash
-zig build
-```
 
 ### Calling C Functions from Smalltalk
 
-```smalltalk
-"Call a C function"
-'GLFW' ffiCall: #glfwInit with: {}.
+Example with Raylib
 
-"Call with arguments"
-'LibC' ffiCall: #puts with: { 'Hello from C!' }.
+Raylib InitWindow: 800 with: 600 and: 'Raylib Window'.
+Check the FFI package for methods generated on your library name, and External Structures you can use (variables generated, for instance you can send a Vector2 to raylib with:
+Vector2 new x: 500; y: 500; yourself
 
-"Store returned pointer"
-window := 'GLFW' ffiCall: #glfwCreateWindow with: { 800. 600. 'Window'. 0. 0 }.
-```
-
-### C Struct Support
-
-Generate Smalltalk wrapper classes for C structures:
-
-```bash
-zig build run -- --gen-structs GLFW > glfw-structs.st
-```
-
-This generates ExternalStructure subclasses with accessor methods:
-
-```smalltalk
-"Access struct fields"
-pos := GLFWvidmode new.
-width := pos width.    "Getter"
-pos width: 1920.       "Setter"
-```
-
-The struct wrappers use ByteArray primitives for field access:
-- `uint8At:`, `uint16At:`, `uint32At:`, `uint64At:` - Unsigned reads
-- `int8At:`, `int16At:`, `int32At:`, `int64At:` - Signed reads
-- `float32At:`, `float64At:` - Floating point reads
-- Corresponding `put:` variants for writes
-- `address` - Get pointer to ByteArray data for passing to C
-
-## VM Architecture
-
-### Value Encoding
-
-64-bit tagged pointers using the lowest 3 bits:
-- `xxx000` - Heap object pointer (8-byte aligned)
-- `xxx001` - SmallInteger (61-bit signed)
-- `xxx010` - Character (Unicode codepoint)
-- `xxx110` - Special constants (nil, true, false)
-
-### Object Layout
-
-Objects have a 16-byte header followed by fields or bytes:
-```
-| class_index (4) | hash (4) | flags (1) | padding (3) | size (4) |
-| field_0 | field_1 | ... | field_n |
-```
-
-### Garbage Collector
-
-Semi-space copying collector using Cheney's algorithm:
-- Two equal-sized memory spaces (default 256MB each)
-- Traces interpreter stack, contexts, exception handlers as roots
-- Forwarding pointers for object relocation
-- C pointers stored as SmallInts are not traced (safe for FFI)
-
-### Bytecode Interpreter
-
-Stack-based interpreter with ~180 opcodes:
-- Push/store operations for variables and literals
-- Message sends with selector lookup
-- Block closure creation and evaluation
-- Non-local returns
-- Exception handling
-
-### Primitives
-
-150+ primitives including:
-- Arithmetic: `+`, `-`, `*`, `/`, `//`, `\\`, `bitAnd:`, `bitOr:`, `bitShift:`
-- Comparison: `<`, `>`, `<=`, `>=`, `=`, `~=`
-- Object: `at:`, `at:put:`, `size`, `basicNew`, `basicNew:`, `class`, `hash`
-- Block: `value`, `value:`, `whileTrue:`, `whileFalse:`
-- Collection: `do:`, `collect:`, `select:`, `inject:into:`
-- FFI: ByteArray access primitives for struct manipulation
-
-## Implemented Features
-
-### Core Classes (50+)
-- Object, Class, Metaclass, Behavior
-- SmallInteger, Float, String, Symbol, Character
-- Array, ByteArray, OrderedCollection, Set, Dictionary
-- CompiledMethod, BlockClosure, Context
-- True, False, UndefinedObject
-- Exception, Error hierarchy
-- ReadStream, WriteStream, FileStream
-- Association, Message
-
-### Smalltalk Syntax
-- Class definitions with instance/class variables
-- Method definitions with primitives
-- Block closures with parameters
-- Cascade messages (`;`)
-- Non-local returns (`^`)
-- Exception handling (`on:do:`)
 
 ### File Format
 
@@ -316,13 +195,6 @@ src/
 tools/
   gen_ffi.zig         - FFI binding generator
 ```
-
-## Future Plans
-
-- **JIT Compilation** - Compile hot methods to native code
-- Improved debugging tools
-- Image snapshots and persistence
-- Additional ANSI Smalltalk compliance
 
 ## Contributing
 

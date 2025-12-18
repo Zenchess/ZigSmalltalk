@@ -100,7 +100,7 @@ pub const SystemPackageDefinitions = struct {
     pub const FFI = [_][]const u8{
         "FFILibrary", "ExternalStructure", "ExternalAddress",
         "ExternalData", "ExternalFunction", "ExternalType",
-        "RaylibColor", "RaylibVector2", "RaylibVector3", "RaylibRectangle",
+        "ExternalPointer", "ExternalLibrary", "LibC", "LibMath", "GL",
     };
 
     pub const Testing = [_][]const u8{

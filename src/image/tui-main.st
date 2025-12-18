@@ -102,8 +102,4 @@ testTerminal
     Transcript show: 'Terminal test complete'; cr
 ! !
 
-"Show usage"
-Transcript show: 'Smalltalk TUI loaded. Commands:'; cr.
-Transcript show: '  TUIApp start           - Start the TUI application'; cr.
-Transcript show: '  SmalltalkTUI demo      - Run a demo'; cr.
-Transcript show: '  SmalltalkTUI testTerminal - Test terminal'; cr.
+Transcript show: 'Smalltalk TUI loaded. Type: TUIApp start'; cr!

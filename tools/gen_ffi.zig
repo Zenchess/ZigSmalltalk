@@ -100,6 +100,8 @@ pub fn main() !void {
             allocator.free(lib.headers);
             for (lib.functions) |f| allocator.free(f);
             allocator.free(lib.functions);
+            for (lib.structs) |s| allocator.free(s);
+            allocator.free(lib.structs);
         }
         libraries.deinit(allocator);
     }
@@ -160,11 +162,24 @@ pub fn main() !void {
             }
         }
 
-        std.debug.print("gen-ffi: Including {s}\n", .{name_val.string});
+        // Parse structs array (explicit list of structs to export)
+        var structs: std.ArrayList([]u8) = .empty;
+        if (lib_val.object.get("structs")) |structs_val| {
+            if (structs_val == .array) {
+                for (structs_val.array.items) |s| {
+                    if (s == .string) {
+                        try structs.append(allocator, try allocator.dupe(u8, s.string));
+                    }
+                }
+            }
+        }
+
+        std.debug.print("gen-ffi: Including {s} ({d} structs)\n", .{ name_val.string, structs.items.len });
         try libraries.append(allocator, .{
             .name = try allocator.dupe(u8, name_val.string),
             .headers = try headers.toOwnedSlice(allocator),
             .functions = try functions.toOwnedSlice(allocator),
+            .structs = try structs.toOwnedSlice(allocator),
             .auto_discover = auto_discover,
             .glew = glew,
         });
@@ -184,6 +199,7 @@ const Library = struct {
     name: []u8,
     headers: [][]u8,
     functions: [][]u8,
+    structs: [][]u8, // Explicit list of struct names to export
     auto_discover: bool, // If true, auto-discover all functions at compile time
     glew: bool, // If true, add GLEW helper functions
 };
@@ -449,6 +465,21 @@ fn generateFile(allocator: std.mem.Allocator, libraries: []const Library) !void 
     }
     try file.writeAll("};\n\n");
 
+    // Generate struct lists for each library
+    try file.writeAll("/// Struct lists for each library (explicit list of structs to export)\npub const library_structs = struct {\n");
+    for (libraries) |lib| {
+        var buf: [256]u8 = undefined;
+        var len = std.fmt.bufPrint(&buf, "    pub const {s} = [_][]const u8{{\n", .{lib.name}) catch continue;
+        try file.writeAll(len);
+
+        for (lib.structs) |s| {
+            len = std.fmt.bufPrint(&buf, "        \"{s}\",\n", .{s}) catch continue;
+            try file.writeAll(len);
+        }
+        try file.writeAll("    };\n");
+    }
+    try file.writeAll("};\n\n");
+
     // Generate library binding instantiations
     try file.writeAll("// ============================================================================\n");
     try file.writeAll("// Auto-generated library bindings\n");
@@ -457,16 +488,18 @@ fn generateFile(allocator: std.mem.Allocator, libraries: []const Library) !void 
 
     for (libraries) |lib| {
         var buf: [512]u8 = undefined;
-        if (lib.auto_discover) {
-            if (lib.glew) {
-                // GLEW has untranslatable macros, use FFILibraryAuto without struct support
-                const len = std.fmt.bufPrint(&buf, "pub const {s}_binding = ffi_autogen.FFILibraryAuto({s}, \"{s}\");\n", .{ lib.name, lib.name, lib.name }) catch continue;
-                try file.writeAll(len);
-            } else {
-                // Use auto-discovery with struct support
-                const len = std.fmt.bufPrint(&buf, "pub const {s}_binding = ffi_autogen.FFILibraryWithStructs({s}, \"{s}\");\n", .{ lib.name, lib.name, lib.name }) catch continue;
-                try file.writeAll(len);
-            }
+        // Libraries without headers use EmptyLibrary to avoid macro translation issues
+        if (lib.headers.len == 0) {
+            const len = std.fmt.bufPrint(&buf, "pub const {s}_binding = ffi_autogen.EmptyLibrary(\"{s}\");\n", .{ lib.name, lib.name }) catch continue;
+            try file.writeAll(len);
+        } else if (lib.structs.len > 0) {
+            // Use explicit struct list (avoids iterating over all declarations)
+            const len = std.fmt.bufPrint(&buf, "pub const {s}_binding = ffi_autogen.FFILibraryWithExplicitStructs({s}, \"{s}\", &library_structs.{s});\n", .{ lib.name, lib.name, lib.name, lib.name }) catch continue;
+            try file.writeAll(len);
+        } else if (lib.auto_discover) {
+            // Use auto-discovery for functions and structs
+            const len = std.fmt.bufPrint(&buf, "pub const {s}_binding = ffi_autogen.FFILibraryWithStructs({s}, \"{s}\");\n", .{ lib.name, lib.name, lib.name }) catch continue;
+            try file.writeAll(len);
         } else {
             // Use explicit function list
             const len = std.fmt.bufPrint(&buf, "pub const {s}_binding = ffi_autogen.FFILibrary({s}, \"{s}\", &library_functions.{s});\n", .{ lib.name, lib.name, lib.name, lib.name }) catch continue;
@@ -489,7 +522,7 @@ fn generateFile(allocator: std.mem.Allocator, libraries: []const Library) !void 
     try file.writeAll("pub fn getLibraryFunctions(library: []const u8) ?[]const ffi_autogen.FFIFunction {\n");
     for (libraries) |lib| {
         var buf: [256]u8 = undefined;
-        const len = std.fmt.bufPrint(&buf, "    if (std.mem.eql(u8, library, \"{s}\")) return &{s}_binding.functions;\n", .{ lib.name, lib.name }) catch continue;
+        const len = std.fmt.bufPrint(&buf, "    if (std.mem.eql(u8, library, \"{s}\")) return {s}_binding.functions;\n", .{ lib.name, lib.name }) catch continue;
         try file.writeAll(len);
     }
     try file.writeAll("    return null;\n}\n\n");
@@ -507,7 +540,7 @@ fn generateFile(allocator: std.mem.Allocator, libraries: []const Library) !void 
     // Check if any library supports struct introspection
     var has_struct_support = false;
     for (libraries) |lib| {
-        if (lib.auto_discover and !lib.glew) {
+        if (lib.structs.len > 0 or (lib.auto_discover and !lib.glew and lib.headers.len > 0)) {
             has_struct_support = true;
             break;
         }
@@ -521,7 +554,7 @@ fn generateFile(allocator: std.mem.Allocator, libraries: []const Library) !void 
         try file.writeAll("pub fn getLibraryStructNames(_: []const u8) ?[]const []const u8 {\n");
     }
     for (libraries) |lib| {
-        if (lib.auto_discover and !lib.glew) {
+        if (lib.structs.len > 0 or (lib.auto_discover and !lib.glew and lib.headers.len > 0)) {
             var buf: [256]u8 = undefined;
             const len = std.fmt.bufPrint(&buf, "    if (std.mem.eql(u8, library, \"{s}\")) return {s}_binding.getStructNames();\n", .{ lib.name, lib.name }) catch continue;
             try file.writeAll(len);
@@ -537,7 +570,7 @@ fn generateFile(allocator: std.mem.Allocator, libraries: []const Library) !void 
         try file.writeAll("pub fn getStructInfo(_: []const u8, _: []const u8) ?ffi_autogen.StructInfo {\n");
     }
     for (libraries) |lib| {
-        if (lib.auto_discover and !lib.glew) {
+        if (lib.structs.len > 0 or (lib.auto_discover and !lib.glew and lib.headers.len > 0)) {
             var buf: [256]u8 = undefined;
             const len = std.fmt.bufPrint(&buf, "    if (std.mem.eql(u8, library, \"{s}\")) return {s}_binding.getStruct(struct_name);\n", .{ lib.name, lib.name }) catch continue;
             try file.writeAll(len);
@@ -553,7 +586,7 @@ fn generateFile(allocator: std.mem.Allocator, libraries: []const Library) !void 
         try file.writeAll("pub fn generateStructCode(_: []const u8, _: anytype) !bool {\n");
     }
     for (libraries) |lib| {
-        if (lib.auto_discover and !lib.glew) {
+        if (lib.structs.len > 0 or (lib.auto_discover and !lib.glew and lib.headers.len > 0)) {
             var buf: [256]u8 = undefined;
             const len = std.fmt.bufPrint(&buf, "    if (std.mem.eql(u8, library, \"{s}\")) {{\n        try {s}_binding.generateStructCode(writer);\n        return true;\n    }}\n", .{ lib.name, lib.name }) catch continue;
             try file.writeAll(len);

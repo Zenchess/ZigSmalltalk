@@ -15,3 +15,5 @@ Dolphin/
 
 # Demo files (user-specific paths)
 chess-opengl.st
+packages/ChessScene3D/
+OpenGLDolphin/

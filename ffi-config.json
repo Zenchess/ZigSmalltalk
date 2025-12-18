@@ -2,30 +2,21 @@
   "libraries": [
     {
       "name": "LibC",
-      "headers": ["stdio.h", "stdlib.h", "string.h", "time.h"],
-      "link": "c",
-      "enabled": true,
-      "functions": [
-        "puts", "putchar", "getchar", "strlen", "strcmp", "strncmp",
-        "memset", "memcpy", "memmove", "memcmp",
-        "malloc", "calloc", "realloc", "free",
-        "atoi", "atol", "atof", "abs", "labs",
-        "rand", "srand", "time", "clock", "system", "getenv", "exit"
-      ],
-      "structs": []
+      "headers": [],
+      "link": "",
+      "enabled": true
     },
     {
       "name": "LibMath",
-      "headers": ["math.h"],
-      "link": "m",
-      "enabled": true,
-      "functions": [
-        "sin", "cos", "tan", "asin", "acos", "atan", "atan2",
-        "sinh", "cosh", "tanh", "exp", "log", "log10", "log2",
-        "pow", "sqrt", "cbrt", "ceil", "floor", "round", "trunc",
-        "fabs", "fmod", "fmin", "fmax", "hypot"
-      ],
-      "structs": []
+      "headers": [],
+      "link": "",
+      "enabled": true
+    },
+    {
+      "name": "Raylib",
+      "headers": ["/home/jacob/raylib/include/raylib.h"],
+      "link": "/home/jacob/raylib/lib/libraylib.so",
+      "enabled": true
     }
   ]
 }

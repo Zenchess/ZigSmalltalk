@@ -1088,6 +1088,10 @@ pub fn installCoreMethods(heap: *Heap) !void {
     try installMethod(heap, dictionary_class, "at:", try createPrimitiveMethod(heap, 1, @intFromEnum(Primitive.dict_at)));
     try installMethod(heap, dictionary_class, "at:put:", try createPrimitiveMethod(heap, 2, @intFromEnum(Primitive.dict_at_put)));
     try installMethod(heap, dictionary_class, "at:ifAbsent:", try createPrimitiveMethod(heap, 2, @intFromEnum(Primitive.dict_at_if_absent)));
+    try installMethod(heap, dictionary_class, "keys", try createPrimitiveMethod(heap, 0, @intFromEnum(Primitive.dict_keys)));
+
+    // Object reflection methods
+    try installMethod(heap, object_class, "isKindOf:", try createPrimitiveMethod(heap, 1, @intFromEnum(Primitive.is_kind_of)));
 
     // ========================================================================
     // Class-side methods (installed on metaclasses)

@@ -71,6 +71,11 @@ size
     ^lastIndex - firstIndex
 !
 
+isEmpty
+    "Return true if the collection has no elements"
+    ^self size = 0
+!
+
 at: index
     "Return element at index (1-based)"
     | array firstIndex |
@@ -86,6 +91,23 @@ at: index put: anObject
     firstIndex := self instVarAt: 2.
     array at: firstIndex + index - 1 put: anObject.
     ^anObject
+! !
+
+"Add String class >> with: method"
+!String class methodsFor: 'instance creation'!
+with: aCharacter
+    "Create a string containing a single character"
+    | str |
+    str := String new: 1.
+    str at: 1 put: aCharacter.
+    ^str
+! !
+
+"Add Array >> isEmpty"
+!Array methodsFor: 'testing'!
+isEmpty
+    "Return true if the array has no elements"
+    ^self size = 0
 ! !
 
 Object subclass: #Widget

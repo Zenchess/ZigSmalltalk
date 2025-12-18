@@ -340,10 +340,12 @@ fn linkFFILibraries(b: *std.Build, exe: *std.Build.Step.Compile, target: std.Bui
     for (libs.array.items) |lib| {
         if (lib != .object) continue;
 
-        const enabled = lib.object.get("enabled");
-        if (enabled != null and enabled.? == .bool and !enabled.?.bool) continue;
-
         const lib_name = if (lib.object.get("name")) |n| (if (n == .string) n.string else "unknown") else "unknown";
+
+        const enabled = lib.object.get("enabled");
+        if (enabled) |en| {
+            if (en == .bool and !en.bool) continue;
+        }
 
         // Process header paths - add include directories
         const headers = lib.object.get("headers");
@@ -389,14 +391,18 @@ fn linkFFILibraries(b: *std.Build, exe: *std.Build.Step.Compile, target: std.Bui
         if (std.mem.eql(u8, link.string, "c") or std.mem.eql(u8, link.string, "m")) continue;
 
         // Skip platform-incompatible libraries
-        const is_windows_lib = isWindowsPath(link.string) or std.mem.endsWith(u8, link.string, ".dll") or std.mem.endsWith(u8, link.string, ".lib");
-        const is_unix_lib = std.mem.endsWith(u8, link.string, ".so") or std.mem.endsWith(u8, link.string, ".dylib") or std.mem.endsWith(u8, link.string, ".a");
+        // Note: .a files can be valid on both Unix and Windows (MinGW), so we check the path prefix
+        const is_windows_path = isWindowsPath(link.string);
+        const is_windows_lib = is_windows_path or std.mem.endsWith(u8, link.string, ".dll") or std.mem.endsWith(u8, link.string, ".lib");
+        // .so and .dylib are Unix-only; .a files with Unix paths are Unix-only
+        const is_unix_only_lib = std.mem.endsWith(u8, link.string, ".so") or std.mem.endsWith(u8, link.string, ".dylib") or
+            (std.mem.endsWith(u8, link.string, ".a") and !is_windows_path);
 
         if (is_windows_lib and !target_is_windows) {
             std.debug.print("FFI: Skipping Windows library '{s}' ({s}) for non-Windows target\n", .{ lib_name, link.string });
             continue;
         }
-        if (is_unix_lib and target_is_windows) {
+        if (is_unix_only_lib and target_is_windows) {
             std.debug.print("FFI: Skipping Unix library '{s}' ({s}) for Windows target\n", .{ lib_name, link.string });
             continue;
         }
@@ -436,7 +442,15 @@ fn isFullPath(path: []const u8) bool {
 
 /// Check if a path looks like a Windows path (has drive letter like C:\)
 fn isWindowsPath(path: []const u8) bool {
-    if (path.len >= 3 and path[1] == ':' and (path[2] == '\\' or path[2] == '/')) return true;
+    // A Windows path has a drive letter pattern: X:\ or X:/
+    // where X is a letter (a-z or A-Z)
+    if (path.len >= 3) {
+        const first_char = path[0];
+        const is_letter = (first_char >= 'a' and first_char <= 'z') or (first_char >= 'A' and first_char <= 'Z');
+        if (is_letter and path[1] == ':' and (path[2] == '\\' or path[2] == '/')) {
+            return true;
+        }
+    }
     return false;
 }
 

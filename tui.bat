@@ -34,14 +34,14 @@ for /f "usebackq eol=# tokens=*" %%a in ("load-order-tui.txt") do (
 )
 
 set "STUBS=dolphin-core/stubs/sunit-stubs.st"
+set "FFI_CLASSES=src/image/ffi.st"
 set "FFI=ffi-test.st"
 set "STRUCTS=external-structure.st"
 set "FFI_STRUCTS=load-ffi-structs.st"
-set "CHESS=packages/ChessScene3D.st"  REM ChessScene3D package
 
-REM Load ANSI files first, then external-structure.st (so our Class>>subclass: and Class>>compile:
-REM primitives override any ANSI definitions), then auto-generate FFI structs last
+REM Load ANSI files first, then ffi.st (FFILibrary, ExternalStructClass definitions),
+REM then external-structure.st (additional methods), then auto-generate FFI structs last
 REM Pass through any command line arguments (like --image)
-zig-out\bin\zig-smalltalk.exe --tui %* %FILES% %STUBS% %STRUCTS% %FFI% %FFI_STRUCTS% %CHESS%
+zig-out\bin\zig-smalltalk.exe --tui %* %FILES% %STUBS% %FFI_CLASSES% %STRUCTS% %FFI% %FFI_STRUCTS%
 
 endlocal

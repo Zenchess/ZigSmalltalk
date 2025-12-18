@@ -92,6 +92,29 @@ The JIT IS working correctly for eligible methods (e.g., Transcript methods duri
 
 ---
 
+## Architectural Decision: Zig-Native JIT
+
+For Phases 2-4, we commit to a **Zig-native optimization approach**:
+
+### Why Not LLVM ORC?
+
+| Concern | Impact |
+|---------|--------|
+| **Latency** | LLVM optimizations take 10-100ms per method; Smalltalk's interactive nature requires sub-millisecond JIT response |
+| **Memory** | LLVM's infrastructure is heavyweight vs our lean ~2600 LOC JIT |
+| **Debugging** | Zig-native keeps stack traces and profiling coherent |
+| **Precedent** | Cog achieves 100M+ sends/sec with hand-written optimizations, no LLVM |
+
+### Zig's Strengths
+
+- **Compile-time metaprogramming** (`comptime`) for specialized code stencils
+- **Direct control** over register allocation and memory layout
+- **Zero-overhead abstractions** - no runtime cost for type safety
+
+LLVM remains a theoretical option for a hypothetical Phase 5+ "background compilation" tier (compiling in background after 100K+ invocations), but is **out of scope** for the current roadmap.
+
+---
+
 ## Optimization Phases (Revised Roadmap)
 
 ### Phase 0: Platform & Stability (CURRENT PRIORITY)
@@ -149,14 +172,51 @@ if (receiver.isSmallInt() and selector == self.specialSelectors.plus) {
 
 ---
 
-### Phase 2: Inline Caching Improvements
+### Phase 2: Register & Cache Optimizations
 
-**Goal**: Additional 2-4x speedup
+**Goal**: 20-30M sends/sec (2-3x improvement)
+
+#### 2.0 TOS/NOS Registerization (PRIORITY)
+
+**Rationale**: SP registerization (Phase 1.3) alone gave 12x speedup. TOS/NOS registerization is the next highest-impact optimization with relatively low complexity.
+
+Keep top-of-stack and next-on-stack in registers:
+- **TOS** in `r14` (callee-saved)
+- **NOS** in `r15` (callee-saved)
+- Spill to memory only at calls/returns
+- Reload after calls return
+
+**Implementation in `src/vm/jit.zig`**:
+```
+Prologue changes:
+- push r14, r15 (save callee-saved registers)
+- Load TOS/NOS from stack[sp-1], stack[sp-2] into r14/r15
+
+Push operation:
+- mov [r13 + r12*8], r15    ; spill NOS to stack
+- mov r15, r14              ; NOS = old TOS
+- mov r14, <new value>      ; TOS = new value
+- add r12, 1                ; sp++
+
+Pop operation:
+- mov r14, r15              ; TOS = old NOS
+- sub r12, 1                ; sp--
+- mov r15, [r13 + r12*8 - 8] ; reload NOS from stack
+
+Before calls:
+- mov [r13 + r12*8 - 8], r14  ; spill TOS
+- mov [r13 + r12*8 - 16], r15 ; spill NOS
+
+After calls:
+- reload r14/r15 from stack
+```
+
+**Expected speedup**: 2-3x (target 15-20M sends/sec from this alone)
 
 #### 2.1 JIT: Inline Monomorphic Send Fast Path
 For each send site in JIT code, emit:
 ```
-load receiver (from stack via sp register)
+load receiver (from TOS register r14)
 classOf(receiver)  // inline tag check or helper call
 compare with cache.expected_class and cache.version
 on hit: call cached target entry directly
@@ -166,57 +226,125 @@ on miss: call runtime_patch_send() to update cache
 #### 2.2 JIT: Inline SmallInt Ops
 - Emit inline +, -, *, <, <=, >, >=, =, ≠ for SmallInts
 - Tag checks with slow-path guards (call runtime on overflow/type mismatch)
+- Use TOS/NOS registers directly for operands
 
 #### 2.3 JIT: Inline Boolean ifTrue:/ifFalse:
-- Check receiver == true/false
+- Check receiver (TOS) == true/false
 - Inline the chosen branch
 - Slow path for non-boolean receivers
 
-#### 2.4 PIC Light (2-3 entry cache)
-- Expand call-site cache to hold 2-3 entries
+#### 2.4 2-Entry PIC
+- Start with 2-entry polymorphic inline cache (not 3)
 - Chain class/version checks before miss
-- Still indirect calls (no self-modifying code yet)
+- Add branch prediction hints where beneficial
+- Expand to 3-4 entries only if profiling shows benefit
 
 ---
 
-### Phase 3: Broader JIT Coverage
+### Phase 3: Blocks & Broader Coverage
 
-**Goal**: JIT handles more code patterns
+**Goal**: 50M sends/sec
 
 #### 3.1 More Inline Primitives
 - `at:`, `at:put:` for Arrays/ByteArrays (with bounds checks)
-- Block `value`/`value:` when arity matches and no captured temps
+- Block `value`/`value:` when arity matches
 
-#### 3.2 Stack Registerization Deeper
-- Keep TOS/NOS in registers where profitable
-- Spill around calls
+#### 3.2 Block Specialization (KEY BOTTLENECK)
 
-#### 3.3 Blocks and Non-Local Return
+Blocks are fundamental to Smalltalk's control flow. This is a critical optimization target.
+
+- **JIT-compile blocks as inline functions** where possible
+- **Captured variables in registers** when block doesn't escape
+- **Eliminate closure allocation** for non-escaping blocks (escape analysis lite)
+- **Specialize common patterns**: `timesRepeat:`, `do:`, `collect:`, `select:`
+
+**Implementation approach**:
+```
+When compiling a method with a non-escaping block:
+1. Detect block doesn't escape (not stored, not returned)
+2. Inline block bytecodes directly at call site
+3. Map block temps to caller's temp space or registers
+4. Emit guard for arity mismatch (deopt to interpreter)
+```
+
+#### 3.3 Profile-Based Invocation Counting (NEW)
+
+Foundation for tiered compilation in Phase 4:
+- **Count method invocations** at call sites (lightweight counter per CallSiteCache)
+- **Mark methods as "hot"** after ~1000 invocations
+- **Backedge counting** for hot loop detection
+- **Profile data storage**: Extend CallSiteCache or separate profile table
+
+This enables Phase 4's speculative inlining to target the right methods.
+
+#### 3.4 Safe Non-Local Return
 - JIT block creation and invocation
-- Safe path for NLR (deopt to interpreter)
+- Deopt path for NLR (non-local return)
+- Track home context for proper unwinding
 
-#### 3.4 OSR Lite
+#### 3.5 OSR Lite
 - Allow jumping into JITted loops from interpreter when loop is hot
+- Requires stack frame translation
 
 ---
 
-### Phase 4: Polish & Advanced
+### Phase 4: Tiered JIT & Advanced Optimizations
 
-**Goal**: Production-quality JIT
+**Goal**: 100M+ sends/sec (Cog-level performance)
 
-#### 4.1 Code Cache Management
-- Eviction/aging policies
+#### 4.1 Lightweight Sea-of-Nodes IR
+
+A minimal intermediate representation for optimization passes:
+- **~500 lines of Zig code** - intentionally simple
+- **Enables**: speculative inlining, escape analysis, global value numbering (GVN)
+- **Compilation target** for hot methods (Tier 1)
+
+**Design**:
+```zig
+const IRNode = struct {
+    op: Op,           // phi, const, add, call, guard, etc.
+    inputs: []u16,    // indices of input nodes
+    type_info: Type,  // inferred type (SmallInt, Object, etc.)
+};
+
+const IRGraph = struct {
+    nodes: []IRNode,
+    // Sea-of-nodes: no explicit control flow graph
+    // Control dependencies are just another edge type
+};
+```
+
+This is NOT LLVM - it's a focused IR for the specific optimizations we need.
+
+#### 4.2 Speculative Inlining with Guards
+
+Use profile data from Phase 3.3 to inline hot monomorphic sends:
+- **Inline callee code** at call site
+- **Emit type guard** before inlined code
+- **Deoptimization stub** on guard failure (fall back to interpreter)
+- **Profile-guided site selection** - only inline proven-hot sites
+
+**Example transformation**:
+```
+Before (send):
+  call runtime_send(selector: #foo)
+
+After (inlined with guard):
+  cmp [receiver].class, ExpectedClass
+  jne deopt_stub
+  ; inlined body of ExpectedClass>>foo
+  ...
+```
+
+#### 4.3 Code Cache Management
+- Eviction/aging policies for JIT code
 - Per-class versioning for invalidation (instead of global bumps)
+- LRU or frequency-based eviction
 
-#### 4.2 Patch-in-Place
+#### 4.4 Patch-in-Place
 - For hottest monomorphic sites, patch direct call/jump once stable
-
-#### 4.3 Optimizing JIT (Far Future)
-- Profile-guided optimization
-- Inlining of hot sends
-- Type specialization
-- Escape analysis
-- Deoptimization support
+- Self-modifying code for ultimate performance
+- Requires careful cache invalidation on class changes
 
 ---
 
@@ -308,11 +436,14 @@ if (receiver.isSmallInt() and argCount == 1) {
 | Phase 1.2 | - | - | ✓ JIT jumps & backpatching |
 | Phase 1.3 | **9,000,000** | **51x** | ✓ **SP registerization** |
 | Compiler | - | - | ✓ **ifTrue:/ifFalse: inlining** |
-| Phase 2 | 20,000,000+ | 100x+ | ⟳ Inline caching improvements |
-| Phase 3 | 50,000,000+ | 250x+ | Broader coverage (blocks) |
-| Phase 4 | 100,000,000+ | 500x+ | Production polish (Cog-level) |
+| **Phase 2.0** | **15-20,000,000** | **85-113x** | ⟳ **TOS/NOS registerization (NEXT)** |
+| Phase 2.1-2.4 | 25-30,000,000 | 140-170x | Inline caching improvements |
+| Phase 3 | 50,000,000+ | 280x+ | Blocks & broader coverage |
+| Phase 4 | 100,000,000+ | 560x+ | Tiered JIT (Cog-level) |
 
 **Current**: ~9,000,000 sends/sec (51x improvement from baseline, 1.5x faster than VisualWorks 3.0!)
+
+**Next milestone**: Phase 2.0 TOS/NOS registerization - expected 2-3x improvement
 
 ### Compiler Optimizations Completed
 

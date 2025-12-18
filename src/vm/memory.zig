@@ -418,9 +418,9 @@ pub const Heap = struct {
 
     /// Set a global variable
     pub fn setGlobal(self: *Heap, name: []const u8, value: Value) !void {
-        const result = try self.globals.getOrPut(self.allocator, try self.allocator.dupe(u8, name));
-        if (result.found_existing) {
-            self.allocator.free(result.key_ptr.*);
+        const result = try self.globals.getOrPut(self.allocator, name);
+        if (!result.found_existing) {
+            // Only dupe the key for new entries
             result.key_ptr.* = try self.allocator.dupe(u8, name);
         }
         result.value_ptr.* = value;

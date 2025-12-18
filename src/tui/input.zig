@@ -405,15 +405,16 @@ pub const InputReader = struct {
     pub var debug_last_bytes: [32]u8 = undefined;
     pub var debug_last_len: usize = 0;
 
-    // Debug: log key bytes to file (use absolute path for reliability)
-    const log_path = "C:\\programming\\ZigSmalltalk\\keylog.txt";
+    // Debug: log key bytes to file
+    const log_path = "keylog.txt";
 
     fn logKeyToFile(self: *InputReader, key: Key) void {
+        const cwd = std.fs.cwd();
         // Open for append, or create if doesn't exist
-        const file = std.fs.openFileAbsolute(log_path, .{ .mode = .write_only }) catch |err| {
+        const file = cwd.openFile(log_path, .{ .mode = .write_only }) catch |err| {
             if (err == error.FileNotFound) {
                 // Create the file if it doesn't exist
-                return if (std.fs.createFileAbsolute(log_path, .{})) |f| {
+                return if (cwd.createFile(log_path, .{})) |f| {
                     self.writeKeyLog(f, key);
                     f.close();
                 } else |_| {};

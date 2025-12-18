@@ -11216,7 +11216,7 @@ const TerminalState = struct {
             const TIOCGWINSZ: u32 = 0x5413;
             const result = std.posix.system.ioctl(std.fs.File.stdout().handle, TIOCGWINSZ, @intFromPtr(&ws));
             if (result == 0) {
-                return .{ .cols = ws.ws_col, .rows = ws.ws_row };
+                return .{ .cols = ws.col, .rows = ws.row };
             }
         }
         // Default fallback

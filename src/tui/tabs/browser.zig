@@ -235,6 +235,13 @@ pub const BrowserTab = struct {
     }
 
     pub fn addClass(self: *BrowserTab, name: []const u8, parent_name: ?[]const u8) !void {
+        // Check if class already exists in the tree to avoid duplicates
+        for (self.all_class_roots.items) |root| {
+            if (self.findNode(root, name) != null) {
+                return; // Class already exists, skip adding
+            }
+        }
+
         const node = try TreeNode.init(self.allocator, name, null);
 
         if (parent_name) |pname| {
