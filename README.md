@@ -1,4 +1,4 @@
-# ZigSmalltalk
+# Zig Smalltalk
 
 A 64-bit Smalltalk implementation written in Zig, featuring a terminal-based development environment with mouse support, automatic C library binding generation at compile time, and a semi-space garbage collector.
 
