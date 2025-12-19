@@ -538,12 +538,33 @@ values
 	| answer |
 	answer := OrderedCollection new: self size.
 	self do: [:value | answer addLast: value].
-	^answer! !
+	^answer!
+
+allClasses
+	"Answer an Array of all classes in the system using VM primitive 964"
+
+	<primitive: 964>
+	^self primitiveFailed!
+
+allClassesDo: aBlock
+	"Iterate over all classes in the Smalltalk dictionary.
+	This is used by the test framework to find test classes."
+
+	| classes i size |
+	classes := self allClasses.
+	size := classes basicSize.
+	i := 1.
+	[i <= size] whileTrue:
+			[aBlock value: (classes basicAt: i).
+			i := i + 1].
+	^self! !
 
 !Dictionary categoriesForMethods!
 _deepCopyElementsInto:trail:!copying!private! !
 =!comparing!public! !
 add:!adding!public! !
+allClasses!enumerating!public! !
+allClassesDo:!enumerating!public! !
 asSet!converting!public! !
 associationAt:!accessing!public! !
 associationAt:ifAbsent:!accessing!public! !

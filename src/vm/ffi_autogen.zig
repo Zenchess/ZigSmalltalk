@@ -501,7 +501,7 @@ fn shouldSkipDecl(name: []const u8) bool {
 
 /// Count all wrappable functions in a @cImport (auto-discovery)
 fn countAllWrappableFunctions(comptime CImport: type) usize {
-    @setEvalBranchQuota(10000000);
+    @setEvalBranchQuota(100000000); // Increased from 10M to 100M for large headers like OpenXR
     const decls = @typeInfo(CImport).@"struct".decls;
     comptime var count: usize = 0;
 
@@ -521,7 +521,7 @@ fn countAllWrappableFunctions(comptime CImport: type) usize {
 
 /// Auto-discover and generate registry for ALL wrappable functions in a @cImport
 pub fn generateRegistryAuto(comptime CImport: type) [countAllWrappableFunctions(CImport)]FFIFunction {
-    @setEvalBranchQuota(10000000);
+    @setEvalBranchQuota(100000000); // Increased from 10M to 100M for large headers like OpenXR
     const count = countAllWrappableFunctions(CImport);
     const decls = @typeInfo(CImport).@"struct".decls;
 
@@ -903,8 +903,8 @@ fn isWrappableStruct(comptime T: type) bool {
     // Skip empty structs
     if (struct_info.fields.len == 0) return false;
 
-    // Skip very large structs
-    if (@sizeOf(T) > 256) return false;
+    // Skip very large structs (increased from 256 to 512 bytes for OpenXR)
+    if (@sizeOf(T) > 512) return false;
 
     // Skip packed/extern structs with complex layouts? No, we want those
     // Skip structs with function pointers or other complex types
@@ -926,7 +926,7 @@ fn isWrappableStruct(comptime T: type) bool {
 
 /// Count wrappable structs in a @cImport
 fn countWrappableStructs(comptime CImport: type) usize {
-    @setEvalBranchQuota(10000000);
+    @setEvalBranchQuota(100000000); // Increased from 10M to 100M for large headers like OpenXR
     const decls = @typeInfo(CImport).@"struct".decls;
     comptime var count: usize = 0;
 
@@ -948,7 +948,7 @@ fn countWrappableStructs(comptime CImport: type) usize {
 
 /// Get all struct infos from a @cImport
 pub fn getStructInfos(comptime CImport: type) [countWrappableStructs(CImport)]StructInfo {
-    @setEvalBranchQuota(10000000);
+    @setEvalBranchQuota(100000000); // Increased from 10M to 100M for large headers like OpenXR
     const count = countWrappableStructs(CImport);
     const decls = @typeInfo(CImport).@"struct".decls;
 

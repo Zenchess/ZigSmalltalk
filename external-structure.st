@@ -1,5 +1,14 @@
 "Dynamic class and method creation primitives"
 
+"Add primitiveFailed to Object for ByteArray primitive methods"
+!Object methodsFor!
+
+primitiveFailed
+    "Handle primitive failure - default implementation"
+    ^nil!
+
+!
+
 "SmallInteger printString - needed for FFI struct generation"
 !SmallInteger methodsFor!
 

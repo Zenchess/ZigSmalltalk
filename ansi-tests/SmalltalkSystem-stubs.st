@@ -1,13 +1,37 @@
 !SmalltalkSystem methodsFor: 'enumerating'!
-allClassesDo: aBlock
-    "Stub - iterating all classes not implemented yet.
-     TODO: Add primitive to get all class globals."
-    "Do nothing for now - tests that need this will be skipped"
-    ^self!
-
 allClasses
-    "Return empty array - proper implementation needs VM primitive"
-    ^#()!
+    "Return an Array of all classes in the system using VM primitive"
+    <primitive: 964>
+    Transcript show: 'allClasses primitive failed!'; cr.
+    self primitiveFailed!
+
+allClassesDo: aBlock
+    "Iterate over all classes in the Smalltalk dictionary"
+    | classes i size |
+    Transcript show: '>>> ENTERED allClassesDo <<<'; cr.
+    Transcript show: 'About to call allClasses...'; cr.
+    classes := self allClasses.
+    Transcript show: 'allClasses returned, checking size...'; cr.
+    size := classes basicSize.
+    Transcript show: 'allClassesDo: got '; show: size printString; show: ' classes from primitive'; cr.
+    i := 1.
+    [i <= size] whileTrue: [
+        aBlock value: (classes basicAt: i).
+        i := i + 1
+    ].
+    Transcript show: '>>> EXITING allClassesDo <<<'; cr.
+    ^self!
+!
+
+!String methodsFor: 'comparing'!
+beginsWith: aCollection
+    "Answer whether the receiver begins with aCollection - simple implementation"
+    | size |
+    size := aCollection size.
+    self size < size ifTrue: [^false].
+    1 to: size do: [:i |
+        (self at: i) = (aCollection at: i) ifFalse: [^false]].
+    ^true!
 !
 
 !SUnitNameResolver class methodsFor: 'resolving'!
@@ -153,13 +177,88 @@ allTestSelectors
     ^self testSelectors asOrderedCollection!
 
 testSelectors
-    "Override to avoid asSortedCollection which needs DefaultSortAlgorithm"
-    | result |
+    "Override to avoid asSortedCollection which needs DefaultSortAlgorithm.
+    Use manual indexed loop because Array>>do: is broken."
+    | result str startsWithTest sels size each |
     result := OrderedCollection new.
-    self selectors do: [:each |
-        ((each beginsWith: 'test') and: [each numArgs isZero])
+    sels := self selectors.
+    size := sels size.
+    1 to: size do: [:i |
+        each := sels at: i.
+        str := each asString.
+        startsWithTest := false.
+        (str size >= 4) ifTrue: [
+            ((str at: 1) = $t and: [(str at: 2) = $e and: [(str at: 3) = $s and: [(str at: 4) = $t]]])
+                ifTrue: [startsWithTest := true]
+        ].
+        (startsWithTest and: [each numArgs isZero])
             ifTrue: [result add: each]].
     ^result!
+!
+
+!TestSuite methodsFor: 'running'!
+run: aResult
+    "Override to avoid using do: which is broken - use indexed loop instead"
+    | start tests size |
+    Transcript show: 'TestSuite>>run: called'; cr.
+    start := Delay microsecondClockValue.
+    [tests := self tests.
+    size := tests size.
+    Transcript show: '  Running '; show: size printString; show: ' tests'; cr.
+    1 to: size do: [:i |
+        Transcript show: '    Test '; show: i printString; cr.
+        self changed: (tests at: i).
+        (tests at: i) run: aResult]]
+        ensure: [aResult duration: (Delay microsecondClockValue - start) microseconds]!
+!
+
+!TestCase class methodsFor: 'instance creation'!
+selector: aSymbol
+    "Create a test case with the given selector"
+    ^self new setTestSelector: aSymbol!
+!
+
+!TestCase class methodsFor: 'building suites'!
+buildSuiteFromSelectors
+    "Override to add debugging and ensure it works"
+    | result |
+    Transcript show: 'STUB buildSuiteFromSelectors for '; show: self name; cr.
+    result := self shouldInheritSelectors
+        ifTrue: [
+            Transcript show: '  STUB using allSelectors'; cr.
+            self buildSuiteFromAllSelectors]
+        ifFalse: [
+            Transcript show: '  STUB using localSelectors'; cr.
+            self buildSuiteFromLocalSelectors].
+    Transcript show: '  STUB result has '; show: result tests size printString; show: ' tests'; cr.
+    ^result!
+
+buildSuiteFromAllSelectors
+    ^self buildSuiteFromMethods: self allTestSelectors!
+
+buildSuiteFromLocalSelectors
+    ^self buildSuiteFromMethods: self testSelectors!
+
+!
+buildSuiteFromMethods: testMethods
+    "Override to avoid using inject:into: which uses do: - use indexed loop instead"
+    | suite size |
+    Transcript show: 'buildSuiteFromMethods for '; show: self name;
+        show: ' with '; show: testMethods size printString; show: ' methods'; cr.
+    suite := TestSuite new.
+    suite name: self name asString.
+    size := testMethods size.
+    1 to: size do: [:i |
+        suite addTest: (self selector: (testMethods at: i))].
+    Transcript show: '  Suite built with '; show: suite tests size printString; show: ' tests'; cr.
+    ^suite!
+!
+
+!ArrayedCollection methodsFor: 'enumerating'!
+do: operation
+    "Evaluate the operation block for each element using VM primitive."
+    <primitive: 530>
+    1 to: self size do: [:i | operation value: (self at: i)]!
 !
 
 !OrderedCollection methodsFor: 'converting'!

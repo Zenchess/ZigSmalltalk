@@ -11,6 +11,30 @@
       "headers": [],
       "link": "",
       "enabled": true
+    },
+    {
+      "name": "Raylib",
+      "headers": ["C:\\raylib\\include\\raylib.h"],
+      "link": "c:\\raylib\\lib\\libraylib.a",
+      "enabled": true
+    },
+    {
+      "name": "GLFW",
+      "headers": ["C:\\programming\\ZigSmalltalk\\vendor\\glfw\\glfw-3.4.bin.WIN64\\include\\GLFW\\glfw3.h"],
+      "link": "C:\\programming\\ZigSmalltalk\\vendor\\glfw\\glfw-3.4.bin.WIN64\\lib-mingw-w64\\libglfw3.a",
+      "enabled": true
+    },
+    {
+      "name": "OpenGL",
+      "headers": [],
+      "link": "opengl32",
+      "enabled": true
+    },
+    {
+      "name": "OpenXR",
+      "headers": ["C:\\programming\\ZigSmalltalk\\vendor\\openxr-loader\\include\\openxr\\openxr.h"],
+      "link": "C:\\programming\\ZigSmalltalk\\vendor\\openxr-loader\\x64\\lib\\openxr_loader.lib",
+      "enabled": true
     }
   ]
 }

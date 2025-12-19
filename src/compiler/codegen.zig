@@ -455,6 +455,20 @@ pub const CodeGenerator = struct {
                             try self.compileNode(node.data.message.receiver);
                             try self.compileInlineIfFalse(block);
                             return;
+                        } else if (std.mem.eql(u8, selector, "and:")) {
+                            // Pattern: receiver and: [block]
+                            // Short-circuit: if receiver is false, return false without evaluating block
+                            // Compile as: <receiver>; jump_if_false end; <block body>; end:
+                            try self.compileNode(node.data.message.receiver);
+                            try self.compileInlineAnd(block);
+                            return;
+                        } else if (std.mem.eql(u8, selector, "or:")) {
+                            // Pattern: receiver or: [block]
+                            // Short-circuit: if receiver is true, return true without evaluating block
+                            // Compile as: <receiver>; jump_if_true end; <block body>; end:
+                            try self.compileNode(node.data.message.receiver);
+                            try self.compileInlineOr(block);
+                            return;
                         }
                     }
                 } else if (num_args == 2 and args[0].node_type == .block and args[1].node_type == .block) {
@@ -867,6 +881,80 @@ pub const CodeGenerator = struct {
 
         // Else branch: push nil
         try self.emit(.push_nil);
+
+        // Patch jump to end
+        const end_pos = self.bytecodes_buf.items.len;
+        const end_offset: i16 = @intCast(@as(isize, @intCast(end_pos)) - @as(isize, @intCast(jump_to_end_pos + 2)));
+        self.bytecodes_buf.items[jump_to_end_pos] = @intCast((@as(u16, @bitCast(end_offset)) >> 8) & 0xFF);
+        self.bytecodes_buf.items[jump_to_end_pos + 1] = @intCast(@as(u16, @bitCast(end_offset)) & 0xFF);
+    }
+
+    /// Compile: and: [block]
+    /// Short-circuit AND: if receiver is false, return false without evaluating block
+    /// If receiver is true, evaluate block and return its result
+    /// Generated: jump_if_false else; <block body>; jump end; else: push false; end:
+    fn compileInlineAnd(self: *CodeGenerator, block: *ASTNode) CompileError!void {
+        // Emit jump_if_false to else (push false)
+        try self.emit(.jump_if_false);
+        const jump_to_else_pos = self.bytecodes_buf.items.len;
+        try self.emitByte(0);
+        try self.emitByte(0);
+
+        // Compile block body inline (true case - evaluate block)
+        try self.compileInlineBlockBody(block);
+
+        // Jump over the else branch
+        try self.emit(.jump);
+        const jump_to_end_pos = self.bytecodes_buf.items.len;
+        try self.emitByte(0);
+        try self.emitByte(0);
+
+        // Patch jump_if_false to here (else branch)
+        // NOTE: Interpreter reads big-endian (hi byte first, lo byte second)
+        const else_pos = self.bytecodes_buf.items.len;
+        const else_offset: i16 = @intCast(@as(isize, @intCast(else_pos)) - @as(isize, @intCast(jump_to_else_pos + 2)));
+        self.bytecodes_buf.items[jump_to_else_pos] = @intCast((@as(u16, @bitCast(else_offset)) >> 8) & 0xFF);
+        self.bytecodes_buf.items[jump_to_else_pos + 1] = @intCast(@as(u16, @bitCast(else_offset)) & 0xFF);
+
+        // Else branch: push false (short-circuit result)
+        try self.emit(.push_false);
+
+        // Patch jump to end
+        const end_pos = self.bytecodes_buf.items.len;
+        const end_offset: i16 = @intCast(@as(isize, @intCast(end_pos)) - @as(isize, @intCast(jump_to_end_pos + 2)));
+        self.bytecodes_buf.items[jump_to_end_pos] = @intCast((@as(u16, @bitCast(end_offset)) >> 8) & 0xFF);
+        self.bytecodes_buf.items[jump_to_end_pos + 1] = @intCast(@as(u16, @bitCast(end_offset)) & 0xFF);
+    }
+
+    /// Compile: or: [block]
+    /// Short-circuit OR: if receiver is true, return true without evaluating block
+    /// If receiver is false, evaluate block and return its result
+    /// Generated: jump_if_true else; <block body>; jump end; else: push true; end:
+    fn compileInlineOr(self: *CodeGenerator, block: *ASTNode) CompileError!void {
+        // Emit jump_if_true to else (push true)
+        try self.emit(.jump_if_true);
+        const jump_to_else_pos = self.bytecodes_buf.items.len;
+        try self.emitByte(0);
+        try self.emitByte(0);
+
+        // Compile block body inline (false case - evaluate block)
+        try self.compileInlineBlockBody(block);
+
+        // Jump over the else branch
+        try self.emit(.jump);
+        const jump_to_end_pos = self.bytecodes_buf.items.len;
+        try self.emitByte(0);
+        try self.emitByte(0);
+
+        // Patch jump_if_true to here (else branch)
+        // NOTE: Interpreter reads big-endian (hi byte first, lo byte second)
+        const else_pos = self.bytecodes_buf.items.len;
+        const else_offset: i16 = @intCast(@as(isize, @intCast(else_pos)) - @as(isize, @intCast(jump_to_else_pos + 2)));
+        self.bytecodes_buf.items[jump_to_else_pos] = @intCast((@as(u16, @bitCast(else_offset)) >> 8) & 0xFF);
+        self.bytecodes_buf.items[jump_to_else_pos + 1] = @intCast(@as(u16, @bitCast(else_offset)) & 0xFF);
+
+        // Else branch: push true (short-circuit result)
+        try self.emit(.push_true);
 
         // Patch jump to end
         const end_pos = self.bytecodes_buf.items.len;

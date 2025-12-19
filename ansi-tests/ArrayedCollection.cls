@@ -98,10 +98,10 @@ decodeNextFrom: aReadStream
 	^aReadStream basicNextAvailable!
 
 do: operation
-	"Evaluate the <monadicValuable> argument, operation, for each of the elements of the 
+	"Evaluate the <monadicValuable> argument, operation, for each of the elements of the
 	receiver. Answers the receiver. The elements are evaluated in index order.
 	Implementation Note: Override the superclass for efficiency."
-
+	<primitive: 530>
 	1 to: self size do: [:i | operation value: (self at: i)]!
 
 do: aMonadicValuable separatedBy: aNiladicValuable

@@ -1572,11 +1572,8 @@ pub const Interpreter = struct {
                         if (!sender.isNil() and sender.isObject()) {
                             // Use the sender (outer) context instead
                             heap_ctx = sender;
-                        } else {
-                            // Block has temps but outer method uses stack temps (no heap context)
-                            // Must fall back to stack-based access for the outer temp
-                            heap_ctx = Value.nil;
                         }
+                        // If sender is nil, keep current heap_ctx - it's the method's own context
                     }
 
                     if (!heap_ctx.isNil()) {
@@ -1618,11 +1615,8 @@ pub const Interpreter = struct {
                         if (!sender.isNil() and sender.isObject()) {
                             // Use the sender (outer) context instead
                             heap_ctx = sender;
-                        } else {
-                            // Block has temps but outer method uses stack temps
-                            // Stack write above handles it, no heap context to update
-                            heap_ctx = Value.nil;
                         }
+                        // If sender is nil, keep current heap_ctx - it's the method's own context
                     }
 
                     if (!heap_ctx.isNil()) {
@@ -1853,13 +1847,20 @@ pub const Interpreter = struct {
     }
 
     fn pushTemporary(self: *Interpreter, index: u8) InterpreterError!void {
-        // Fast path: always read from stack (store_outer_temp keeps stack in sync)
-        // temp_base points to receiver slot, temps start at temp_base + 1
-        const stack_index = self.temp_base + 1 + index;
-        if (stack_index < self.sp) {
-            try self.push(self.stack[stack_index]);
+        // If heap context exists, read from it (for proper closure variable sharing)
+        // Otherwise read from stack
+        if (!self.heap_context.isNil()) {
+            const ctx_obj = self.heap_context.asObject();
+            const val = getHeapContextTemp(ctx_obj, index);
+            try self.push(val);
         } else {
-            try self.push(Value.nil);
+            // temp_base points to receiver slot, temps start at temp_base + 1
+            const stack_index = self.temp_base + 1 + index;
+            if (stack_index < self.sp) {
+                try self.push(self.stack[stack_index]);
+            } else {
+                try self.push(Value.nil);
+            }
         }
     }
 
@@ -4177,10 +4178,8 @@ pub const Interpreter = struct {
             const sender = ctx_obj.getField(Heap.CONTEXT_FIELD_SENDER, ctx_obj.header.size);
             if (!sender.isNil() and sender.isObject()) {
                 heap_ctx = sender;
-            } else {
-                // Block has temps but outer method uses stack temps
-                heap_ctx = Value.nil;
             }
+            // If sender is nil, keep current heap_ctx - it's the method's own context
         }
 
         if (!heap_ctx.isNil()) {
@@ -4217,10 +4216,8 @@ pub const Interpreter = struct {
             const sender = ctx_obj.getField(Heap.CONTEXT_FIELD_SENDER, ctx_obj.header.size);
             if (!sender.isNil() and sender.isObject()) {
                 heap_ctx = sender;
-            } else {
-                // Block has temps but outer method uses stack temps
-                heap_ctx = Value.nil;
             }
+            // If sender is nil, keep current heap_ctx - it's the method's own context
         }
 
         if (!heap_ctx.isNil()) {

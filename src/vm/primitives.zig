@@ -426,6 +426,8 @@ pub fn executePrimitive(interp: *Interpreter, prim_index: u16) InterpreterError!
         .terminal_draw_box => primTerminalDrawBox(interp),
         .terminal_fill_rect => primTerminalFillRect(interp),
 
+        .all_classes => primAllClasses(interp),
+
         else => InterpreterError.PrimitiveFailed,
     };
 }
@@ -4220,6 +4222,16 @@ fn primToDo(interp: *Interpreter) InterpreterError!Value {
             if (interp.home_heap_context.isNil()) {
                 interp.home_heap_context = outer_ctx;
             }
+
+            // Copy argument and temps from stack into heap context
+            // Stack layout: [...saved_sp] [arg] [temp0] [temp1] ...
+            // Heap context fields: [0-4: fixed fields] [5: arg] [6: temp0] [7: temp1] ...
+            var field_idx: usize = Heap.CONTEXT_NUM_FIXED_FIELDS;
+            var stack_idx: usize = saved_sp;
+            while (field_idx < Heap.CONTEXT_NUM_FIXED_FIELDS + 1 + num_temps) : ({field_idx += 1; stack_idx += 1;}) {
+                const val = interp.stack[stack_idx];
+                heap_ctx.setField(field_idx, val, heap_ctx.header.size);
+            }
         }
 
         // Execute the block
@@ -4457,15 +4469,16 @@ fn evaluateBlockWith1(interp: *Interpreter, block: Value, arg: Value) Interprete
         return InterpreterError.PrimitiveFailed;
     }
 
-    // Get block data: [outerTempBase, startPC, numArgs, method, receiver, homeTempBase]
-    const outer_temp_base_val = block_obj.getField(0, 6);
-    const start_pc = block_obj.getField(1, 6);
-    const num_args_val = block_obj.getField(2, 6);
-    const method_val = block_obj.getField(3, 6);
-    const block_receiver = block_obj.getField(4, 6);
-    const home_temp_base_val = block_obj.getField(5, 6);
+    // Get block data: [outerContext, startPC, numArgs, method, receiver, homeContext, numTemps]
+    const outer_context_val = block_obj.getField(Heap.BLOCK_FIELD_OUTER_CONTEXT, Heap.BLOCK_NUM_FIELDS);
+    const start_pc = block_obj.getField(Heap.BLOCK_FIELD_START_PC, Heap.BLOCK_NUM_FIELDS);
+    const num_args_val = block_obj.getField(Heap.BLOCK_FIELD_NUM_ARGS, Heap.BLOCK_NUM_FIELDS);
+    const method_val = block_obj.getField(Heap.BLOCK_FIELD_METHOD, Heap.BLOCK_NUM_FIELDS);
+    const block_receiver = block_obj.getField(Heap.BLOCK_FIELD_RECEIVER, Heap.BLOCK_NUM_FIELDS);
+    const home_context_val = block_obj.getField(Heap.BLOCK_FIELD_HOME_CONTEXT, Heap.BLOCK_NUM_FIELDS);
+    const num_temps_val = block_obj.getField(Heap.BLOCK_FIELD_NUM_TEMPS, Heap.BLOCK_NUM_FIELDS);
 
-    if (!outer_temp_base_val.isSmallInt() or !start_pc.isSmallInt() or !num_args_val.isSmallInt() or !method_val.isObject()) {
+    if (!start_pc.isSmallInt() or !num_args_val.isSmallInt() or !method_val.isObject()) {
         return InterpreterError.PrimitiveFailed;
     }
 
@@ -4474,8 +4487,7 @@ fn evaluateBlockWith1(interp: *Interpreter, block: Value, arg: Value) Interprete
         return InterpreterError.PrimitiveFailed;
     }
 
-    const outer_base: usize = @intCast(outer_temp_base_val.asSmallInt());
-
+    // Save interpreter state
     const saved_ip = interp.ip;
     const saved_method = interp.method;
     const saved_sp = interp.sp;
@@ -4484,75 +4496,72 @@ fn evaluateBlockWith1(interp: *Interpreter, block: Value, arg: Value) Interprete
     const saved_home_temp_base = interp.home_temp_base;
     const saved_receiver = interp.receiver;
     const saved_context_ptr = interp.context_ptr;
-    
-    const block_method_ptr: *CompiledMethod = @ptrCast(@alignCast(method_val.asObject()));
-    interp.method = block_method_ptr;
+    const saved_heap_context = interp.heap_context;
+    const saved_home_heap_context = interp.home_heap_context;
+
+    interp.method = @ptrCast(@alignCast(method_val.asObject()));
     interp.ip = @intCast(start_pc.asSmallInt());
     interp.receiver = block_receiver;
-    interp.outer_temp_base = @intCast(outer_temp_base_val.asSmallInt());
-    interp.home_temp_base = if (home_temp_base_val.isSmallInt()) @intCast(home_temp_base_val.asSmallInt()) else interp.temp_base;
-    interp.temp_base = interp.sp;
+
+    // Push a placeholder for the receiver slot
+    try interp.push(block_receiver);
+    interp.temp_base = interp.sp - 1;
+
+    // Restore heap contexts from block for cross-process variable access
+    // Check if block has heap contexts (new format) or stack indices (old format)
+    if (outer_context_val.isObject() and outer_context_val.asObject().header.class_index == Heap.CLASS_METHOD_CONTEXT) {
+        // New format: heap contexts
+        interp.heap_context = outer_context_val;
+        interp.home_heap_context = home_context_val;
+        interp.outer_temp_base = saved_temp_base;
+        interp.home_temp_base = saved_home_temp_base;
+    } else if (outer_context_val.isSmallInt()) {
+        // Old format: stack indices (for backwards compatibility)
+        interp.outer_temp_base = @intCast(outer_context_val.asSmallInt());
+        interp.home_temp_base = if (home_context_val.isSmallInt()) @intCast(home_context_val.asSmallInt()) else saved_home_temp_base;
+        interp.heap_context = Value.nil;
+        interp.home_heap_context = Value.nil;
+    } else {
+        // Neither format - use saved values to access outer scope temps
+        interp.outer_temp_base = saved_temp_base;
+        interp.home_temp_base = saved_home_temp_base;
+        interp.heap_context = Value.nil;
+        interp.home_heap_context = Value.nil;
+    }
+
     interp.primitive_block_bases[interp.primitive_block_depth] = interp.context_ptr;
     interp.primitive_block_depth += 1;
 
-    const home_from_block = if (home_temp_base_val.isSmallInt()) home_temp_base_val.asSmallInt() else -999;
-    if (DEBUG_VERBOSE) std.debug.print("DEBUG evaluateBlockWith1: saved_temp_base={} block_stored_home={} interp.home_temp_base={} depth={}\n", .{ saved_temp_base, home_from_block, interp.home_temp_base, interp.primitive_block_depth });
-
-    // Push receiver and argument
-    try interp.push(block_receiver);
+    // Push the argument
     try interp.push(arg);
-    const total_temps = interp.method.header.num_temps;
-    const local_temps = if (total_temps > 1) total_temps - 1 else 0;
-    var k: usize = 0;
-    while (k < local_temps) : (k += 1) {
+
+    // Allocate space for block temporaries by pushing nil values
+    const num_temps: usize = if (num_temps_val.isSmallInt() and num_temps_val.asSmallInt() > 0)
+        @intCast(num_temps_val.asSmallInt())
+    else
+        0;
+    var ti: usize = 0;
+    while (ti < num_temps) : (ti += 1) {
         try interp.push(Value.nil);
     }
 
-    // Targeted debug for captured temps in problematic methods
-    const block_lits_dbg = block_method_ptr.getLiterals();
-    if (block_lits_dbg.len > 0 and block_lits_dbg[block_lits_dbg.len - 1].isObject()) {
-        const src_obj = block_lits_dbg[block_lits_dbg.len - 1].asObject();
-        if (src_obj.header.class_index == Heap.CLASS_STRING) {
-            const src_bytes = src_obj.bytes(src_obj.header.size);
-            if (std.mem.indexOf(u8, src_bytes, "basicBeginsWith") != null and outer_base + 2 < interp.stack.len) {
-                const slot0 = interp.stack[outer_base + 1];
-                const slot1 = interp.stack[outer_base + 2];
-                const name0 = blk: {
-                    const cls = interp.heap.classOf(slot0);
-                    if (cls.isObject()) {
-                        const cls_obj = cls.asObject();
-                        const name_val = cls_obj.getField(Heap.CLASS_FIELD_NAME, cls_obj.header.size);
-                        if (name_val.isObject() and name_val.asObject().header.class_index == Heap.CLASS_SYMBOL) {
-                            break :blk name_val.asObject().bytes(name_val.asObject().header.size);
-                        }
-                    }
-                    if (slot0.isSmallInt()) break :blk "SmallInteger";
-                    if (slot0.isNil()) break :blk "nil";
-                    break :blk "<?>";
-                };
-                const name1 = blk: {
-                    const cls = interp.heap.classOf(slot1);
-                    if (cls.isObject()) {
-                        const cls_obj = cls.asObject();
-                        const name_val = cls_obj.getField(Heap.CLASS_FIELD_NAME, cls_obj.header.size);
-                        if (name_val.isObject() and name_val.asObject().header.class_index == Heap.CLASS_SYMBOL) {
-                            break :blk name_val.asObject().bytes(name_val.asObject().header.size);
-                        }
-                    }
-                    if (slot1.isSmallInt()) break :blk "SmallInteger";
-                    if (slot1.isNil()) break :blk "nil";
-                    break :blk "<?>";
-                };
-                if (DEBUG_VERBOSE) std.debug.print("DEBUG block capture outer_base={} slot0={s} slot1={s} sp={}\n", .{
-                    outer_base, name0, name1, interp.sp,
-                });
-            }
+    // If the block has temps, create a new heap context for them
+    if (num_temps > 0) {
+        const outer_ctx = interp.heap_context;
+        const heap_ctx = try interp.createHeapContext(1 + num_temps); // 1 arg + temps
+        // Store the outer context in SENDER field so push_outer_temp can follow the chain
+        if (!outer_ctx.isNil()) {
+            heap_ctx.setField(Heap.CONTEXT_FIELD_SENDER, outer_ctx, heap_ctx.header.size);
+        }
+        interp.heap_context = Value.fromObject(heap_ctx);
+        if (interp.home_heap_context.isNil()) {
+            interp.home_heap_context = outer_ctx;
         }
     }
 
     const result = interp.interpretLoop() catch |err| {
         interp.primitive_block_depth -= 1;
-                interp.ip = saved_ip;
+        interp.ip = saved_ip;
         interp.method = saved_method;
 
         // For BlockNonLocalReturn, always propagate - let the .send bytecode handler intercept it
@@ -4564,11 +4573,13 @@ fn evaluateBlockWith1(interp: *Interpreter, block: Value, arg: Value) Interprete
         interp.home_temp_base = saved_home_temp_base;
         interp.receiver = saved_receiver;
         interp.context_ptr = saved_context_ptr;
+        interp.heap_context = saved_heap_context;
+        interp.home_heap_context = saved_home_heap_context;
         return err;
     };
 
     interp.primitive_block_depth -= 1;
-        interp.ip = saved_ip;
+    interp.ip = saved_ip;
     interp.method = saved_method;
     interp.sp = saved_sp;
     interp.temp_base = saved_temp_base;
@@ -4576,6 +4587,8 @@ fn evaluateBlockWith1(interp: *Interpreter, block: Value, arg: Value) Interprete
     interp.home_temp_base = saved_home_temp_base;
     interp.receiver = saved_receiver;
     interp.context_ptr = saved_context_ptr;
+    interp.heap_context = saved_heap_context;
+    interp.home_heap_context = saved_home_heap_context;
 
     return result;
 }
@@ -11671,4 +11684,33 @@ fn primTerminalFillRect(interp: *Interpreter) InterpreterError!Value {
         return receiver;
     }
     return InterpreterError.PrimitiveFailed;
+}
+
+// ============================================================================
+// System Introspection Primitives
+// ============================================================================
+
+/// Smalltalk >> allClasses
+/// Answer an Array containing all classes in the system
+fn primAllClasses(interp: *Interpreter) InterpreterError!Value {
+    std.debug.print("DEBUG: primAllClasses called\n", .{});
+
+    _ = try interp.pop(); // pop receiver (Smalltalk dictionary)
+
+    // Get number of classes in the class table
+    const num_classes: u32 = @intCast(interp.heap.class_table.items.len);
+    std.debug.print("DEBUG: class_table has {d} classes\n", .{num_classes});
+
+    // Allocate an Array to hold all classes
+    const array = try interp.heap.allocateObject(Heap.CLASS_ARRAY, num_classes, .variable);
+    const fields = array.fields(num_classes);
+    std.debug.print("DEBUG: allocated array, copying classes...\n", .{});
+
+    // Copy all class objects from class_table into the array
+    for (interp.heap.class_table.items, 0..) |class_obj, i| {
+        fields[i] = class_obj;
+    }
+
+    std.debug.print("DEBUG: primAllClasses returning array with {d} classes\n", .{num_classes});
+    return Value.fromObject(array);
 }

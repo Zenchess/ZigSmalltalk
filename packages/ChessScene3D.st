@@ -880,7 +880,12 @@ orthographicMatrix: left right: right bottom: bottom top: top near: near far: fa
 identityMatrix
     | m |
     m := ByteArray new: 64.  "16 floats * 4 bytes"
-    1 to: 16 do: [:i | m float32At: (i - 1) * 4 put: 0.0 ].
+    "Initialize all to 0.0"
+    m float32At: 0 put: 0.0. m float32At: 4 put: 0.0. m float32At: 8 put: 0.0. m float32At: 12 put: 0.0.
+    m float32At: 16 put: 0.0. m float32At: 20 put: 0.0. m float32At: 24 put: 0.0. m float32At: 28 put: 0.0.
+    m float32At: 32 put: 0.0. m float32At: 36 put: 0.0. m float32At: 40 put: 0.0. m float32At: 44 put: 0.0.
+    m float32At: 48 put: 0.0. m float32At: 52 put: 0.0. m float32At: 56 put: 0.0. m float32At: 60 put: 0.0.
+    "Set diagonal to 1.0"
     m float32At: 0 put: 1.0.
     m float32At: 20 put: 1.0.
     m float32At: 40 put: 1.0.

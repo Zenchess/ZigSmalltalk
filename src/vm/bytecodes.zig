@@ -707,5 +707,8 @@ pub const Primitive = enum(u16) {
     terminal_draw_box = 962, // Terminal >> drawBoxAt: origin extent: size - draw box chars
     terminal_fill_rect = 963, // Terminal >> fillRectAt: origin extent: size char: char
 
+    // System introspection
+    all_classes = 964, // Smalltalk >> allClasses - return array of all classes
+
     _,
 };

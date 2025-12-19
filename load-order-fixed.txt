@@ -1,6 +1,7 @@
 # Core Object hierarchy - load first
 ansi-tests/ProtoObject.cls
 ansi-tests/Object.cls
+ansi-tests/dnu-primitive-stub.st
 ansi-tests/Object-stubs.st
 ansi-tests/Processor-stub.st
 ansi-tests/Delay-stub.st
@@ -65,12 +66,17 @@ ansi-tests/WriteStream.cls
 ansi-tests/ReadWriteStream.cls
 
 # Core Message and Exception hierarchy
+# SKIP Exception classes - they break error handling with Dolphin-specific methods
 ansi-tests/Message.cls
-ansi-tests/Exception.cls
-ansi-tests/Error.cls
-ansi-tests/MessageNotUnderstood.cls
-ansi-tests/Notification.cls
-ansi-tests/Warning.cls
+# ansi-tests/Exception.cls
+# ansi-tests/Error.cls
+# ansi-tests/MessageNotUnderstood.cls
+# ansi-tests/Notification.cls
+# ansi-tests/Warning.cls
+
+# NOTE: External/FFI classes are NOT loaded from ansi-tests
+# because ffi.st provides working Zig Smalltalk implementations
+# The Dolphin versions (ExternalLibrary.cls, etc.) would overwrite them and break FFI
 
 # Block closure support
 ansi-tests/BlockClosure-multi-on.st

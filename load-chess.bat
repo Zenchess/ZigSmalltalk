@@ -9,8 +9,8 @@ REM Loads ChessScene3D package from packages/ directory
 echo Loading Chess Scene 3D demo (from packages/ChessScene3D.st)...
 echo.
 
-REM Run without TUI - load dependencies then ChessScene3D package
-echo ChessScene3D demo. | zig-out\bin\zig-smalltalk.exe external-structure.st src/image/ffi.st packages/ChessScene3D.st
+REM Run without TUI - load arithmetic patch for VM's Integer, then dependencies, then ChessScene3D
+echo ChessScene3D demo. | zig-out\bin\zig-smalltalk.exe integer-arithmetic-patch.st external-structure.st src/image/ffi.st packages/ChessScene3D.st
 
 echo.
 echo Demo finished.

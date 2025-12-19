@@ -280,21 +280,31 @@ buildSuiteFromAllSelectors
 buildSuiteFromLocalSelectors
 	^self buildSuiteFromMethods: self testSelectors!
 
-buildSuiteFromMethods: testMethods 
-	^testMethods asSortedCollection
-		inject: ((TestSuite new)
-				name: self name asString;
-				yourself)
-		into: 
-			[:suite :selector | 
-			suite
-				addTest: (self selector: selector);
-				yourself]!
+buildSuiteFromMethods: testMethods
+	"Fixed to avoid inject:into: which uses do: - use indexed loop instead"
+	| suite size |
+	Transcript show: '  buildSuiteFromMethods with '; show: testMethods size printString; show: ' methods'; cr.
+	suite := TestSuite new.
+	suite name: self name asString.
+	size := testMethods size.
+	1 to: size do: [:i |
+		suite addTest: (self selector: (testMethods at: i))].
+	Transcript show: '    Created suite with '; show: suite tests size printString; show: ' tests'; cr.
+	^suite!
 
 buildSuiteFromSelectors
-	^self shouldInheritSelectors
-		ifTrue: [self buildSuiteFromAllSelectors]
-		ifFalse: [self buildSuiteFromLocalSelectors]!
+	Transcript cr; show: '*** BUILDSUITEROMSELECTORS ***'; cr.
+	| result |
+	Transcript show: 'buildSuiteFromSelectors for '; show: self name; cr.
+	result := self shouldInheritSelectors
+		ifTrue: [
+			Transcript show: '  Using allSelectors'; cr.
+			self buildSuiteFromAllSelectors]
+		ifFalse: [
+			Transcript show: '  Using localSelectors'; cr.
+			self buildSuiteFromLocalSelectors].
+	Transcript show: '  Result has '; show: result tests size printString; show: ' tests'; cr.
+	^result!
 
 debug: aSymbol
 	^(self selector: aSymbol) debug!
@@ -321,7 +331,7 @@ suite
 
 testSelectors
 	^self selectors asSortedCollection asOrderedCollection
-		select: [:each | (each beginsWith: 'test') and: [each numArgs isZero]]!
+		select: [:each | (each asString beginsWith: 'test') and: [each numArgs isZero]]!
 
 version
 	^'3.1'! !
