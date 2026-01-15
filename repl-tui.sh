@@ -12,7 +12,7 @@ echo ""
 # Load files in dependency order (filter empty lines and comments)
 # Exclude ANSI ExternalStructure.cls since we have our own
 FILES=$(grep -v '^$' load-order-tui.txt | grep -v '^#' | grep -v 'ExternalStructure.cls' | tr '\n' ' ')
-STUBS="dolphin-core/stubs/sunit-stubs.st"
+STUBS="dolphin-core/stubs/sunit-stubs.st src/image/exception-stubs.st"
 FFI_CLASSES="src/image/ffi.st"
 FFI="ffi-test.st"
 STRUCTS="external-structure.st"
