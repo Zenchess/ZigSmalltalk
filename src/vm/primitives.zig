@@ -2777,11 +2777,16 @@ fn primBlockValue1(interp: *Interpreter) InterpreterError!Value {
 
     // Set temp_base so that temp_base + 1 + 0 points to the first argument
     // Arguments will be pushed starting at current sp
-    interp.temp_base = interp.sp - 1;
+    // BUG FIX: We need to set temp_base AFTER pushing the receiver placeholder,
+    // not before. The receiver slot should be at temp_base, and args at temp_base+1+.
+    // Push receiver placeholder first (for consistency with method invocation layout)
+    try interp.push(block_receiver);
+    interp.temp_base = interp.sp - 1; // temp_base points to receiver slot
+
     interp.primitive_block_bases[interp.primitive_block_depth] = interp.context_ptr;
     interp.primitive_block_depth += 1;
 
-    // Push the argument
+    // Push the argument - now at temp_base + 1
     try interp.push(arg);
 
     // Allocate space for block temporaries by pushing nil values
@@ -2794,19 +2799,31 @@ fn primBlockValue1(interp: *Interpreter) InterpreterError!Value {
         try interp.push(Value.nil);
     }
 
-    // If the block has temps, create a new heap context for them.
-    // The context needs slots for BOTH args and temps since bytecode indices are absolute
-    if (num_temps > 0) {
-        const outer_ctx = interp.heap_context;
-        const heap_ctx = try interp.createHeapContext(1 + num_temps); // 1 arg + temps
-        // Store the outer context in SENDER field so push_outer_temp can follow the chain
-        if (!outer_ctx.isNil()) {
-            heap_ctx.setField(Heap.CONTEXT_FIELD_SENDER, outer_ctx, heap_ctx.header.size);
-        }
-        interp.heap_context = Value.fromObject(heap_ctx);
-        if (interp.home_heap_context.isNil()) {
-            interp.home_heap_context = outer_ctx;
-        }
+    // ALWAYS create a new heap context for the block's args (and temps if any).
+    // This is necessary because the block's push_temporary bytecode needs to read the block's
+    // own args from heap_context, not from the outer context that was captured when the block was created.
+    // The context needs slots for BOTH args and temps since bytecode indices are absolute.
+    const outer_ctx = interp.heap_context;
+    const heap_ctx = try interp.createHeapContext(1 + num_temps); // 1 arg + temps
+    // Copy arg and temps from stack into the new heap context
+    // Stack layout at this point: [receiver] [arg] [temp0] [temp1] ...
+    // Heap context: [fixed fields] [arg] [temp0] [temp1] ...
+    var field_idx: usize = Heap.CONTEXT_NUM_FIXED_FIELDS;
+    var stack_idx: usize = interp.temp_base + 1; // Start at arg position
+    while (field_idx < Heap.CONTEXT_NUM_FIXED_FIELDS + 1 + num_temps) : ({
+        field_idx += 1;
+        stack_idx += 1;
+    }) {
+        const val = interp.stack[stack_idx];
+        heap_ctx.setField(field_idx, val, heap_ctx.header.size);
+    }
+    // Store the outer context in SENDER field so push_outer_temp can follow the chain
+    if (!outer_ctx.isNil()) {
+        heap_ctx.setField(Heap.CONTEXT_FIELD_SENDER, outer_ctx, heap_ctx.header.size);
+    }
+    interp.heap_context = Value.fromObject(heap_ctx);
+    if (interp.home_heap_context.isNil()) {
+        interp.home_heap_context = outer_ctx;
     }
 
     if (DEBUG_VERBOSE) std.debug.print("DEBUG primBlockValue1: saved_temp_base={} interp.home_temp_base={}\n", .{ saved_temp_base, interp.home_temp_base });
@@ -2932,12 +2949,14 @@ fn primBlockValue2(interp: *Interpreter) InterpreterError!Value {
         interp.home_heap_context = Value.nil;
     }
 
-    // Set temp_base so that temp_base + 1 + 0 points to the first argument
-    interp.temp_base = interp.sp - 1;
+    // Push receiver placeholder first, then set temp_base to point to it
+    try interp.push(block_receiver);
+    interp.temp_base = interp.sp - 1; // temp_base points to receiver slot
+
     interp.primitive_block_bases[interp.primitive_block_depth] = interp.context_ptr;
     interp.primitive_block_depth += 1;
 
-    // Push arguments
+    // Push arguments - at temp_base + 1 and temp_base + 2
     try interp.push(arg1);
     try interp.push(arg2);
 
@@ -2951,19 +2970,26 @@ fn primBlockValue2(interp: *Interpreter) InterpreterError!Value {
         try interp.push(Value.nil);
     }
 
-    // If the block has temps, create a new heap context for them.
-    // The context needs slots for BOTH args and temps since bytecode indices are absolute
-    if (num_temps > 0) {
-        const outer_ctx = interp.heap_context;
-        const heap_ctx = try interp.createHeapContext(2 + num_temps); // 2 args + temps
-        // Store the outer context in SENDER field so push_outer_temp can follow the chain
-        if (!outer_ctx.isNil()) {
-            heap_ctx.setField(Heap.CONTEXT_FIELD_SENDER, outer_ctx, heap_ctx.header.size);
-        }
-        interp.heap_context = Value.fromObject(heap_ctx);
-        if (interp.home_heap_context.isNil()) {
-            interp.home_heap_context = outer_ctx;
-        }
+    // ALWAYS create a new heap context for the block's args (and temps if any).
+    const outer_ctx = interp.heap_context;
+    const heap_ctx = try interp.createHeapContext(2 + num_temps); // 2 args + temps
+    // Copy args and temps from stack into the new heap context
+    var field_idx: usize = Heap.CONTEXT_NUM_FIXED_FIELDS;
+    var stack_idx: usize = interp.temp_base + 1; // Start at first arg position
+    while (field_idx < Heap.CONTEXT_NUM_FIXED_FIELDS + 2 + num_temps) : ({
+        field_idx += 1;
+        stack_idx += 1;
+    }) {
+        const val = interp.stack[stack_idx];
+        heap_ctx.setField(field_idx, val, heap_ctx.header.size);
+    }
+    // Store the outer context in SENDER field so push_outer_temp can follow the chain
+    if (!outer_ctx.isNil()) {
+        heap_ctx.setField(Heap.CONTEXT_FIELD_SENDER, outer_ctx, heap_ctx.header.size);
+    }
+    interp.heap_context = Value.fromObject(heap_ctx);
+    if (interp.home_heap_context.isNil()) {
+        interp.home_heap_context = outer_ctx;
     }
 
     const result = interp.interpretLoop() catch |err| {
@@ -3093,8 +3119,10 @@ fn primBlockValue3(interp: *Interpreter) InterpreterError!Value {
         interp.home_heap_context = Value.nil;
     }
 
-    // Set temp_base so that temp_base + 1 + 0 points to the first argument
-    interp.temp_base = interp.sp - 1;
+    // Push receiver placeholder first, then set temp_base to point to it
+    try interp.push(block_receiver);
+    interp.temp_base = interp.sp - 1; // temp_base points to receiver slot
+
     interp.primitive_block_bases[interp.primitive_block_depth] = interp.context_ptr;
     interp.primitive_block_depth += 1;
 
@@ -3112,19 +3140,26 @@ fn primBlockValue3(interp: *Interpreter) InterpreterError!Value {
         try interp.push(Value.nil);
     }
 
-    // If the block has temps, create a new heap context for them.
-    // The context needs slots for BOTH args and temps since bytecode indices are absolute
-    if (num_temps > 0) {
-        const outer_ctx = interp.heap_context;
-        const heap_ctx = try interp.createHeapContext(3 + num_temps); // 3 args + temps
-        // Store the outer context in SENDER field so push_outer_temp can follow the chain
-        if (!outer_ctx.isNil()) {
-            heap_ctx.setField(Heap.CONTEXT_FIELD_SENDER, outer_ctx, heap_ctx.header.size);
-        }
-        interp.heap_context = Value.fromObject(heap_ctx);
-        if (interp.home_heap_context.isNil()) {
-            interp.home_heap_context = outer_ctx;
-        }
+    // ALWAYS create a new heap context for the block's args (and temps if any).
+    const outer_ctx = interp.heap_context;
+    const heap_ctx = try interp.createHeapContext(3 + num_temps); // 3 args + temps
+    // Copy args and temps from stack into the new heap context
+    var field_idx: usize = Heap.CONTEXT_NUM_FIXED_FIELDS;
+    var stack_idx: usize = interp.temp_base + 1; // Start at first arg position
+    while (field_idx < Heap.CONTEXT_NUM_FIXED_FIELDS + 3 + num_temps) : ({
+        field_idx += 1;
+        stack_idx += 1;
+    }) {
+        const val = interp.stack[stack_idx];
+        heap_ctx.setField(field_idx, val, heap_ctx.header.size);
+    }
+    // Store the outer context in SENDER field so push_outer_temp can follow the chain
+    if (!outer_ctx.isNil()) {
+        heap_ctx.setField(Heap.CONTEXT_FIELD_SENDER, outer_ctx, heap_ctx.header.size);
+    }
+    interp.heap_context = Value.fromObject(heap_ctx);
+    if (interp.home_heap_context.isNil()) {
+        interp.home_heap_context = outer_ctx;
     }
 
     const result = interp.interpretLoop() catch |err| {
@@ -3260,8 +3295,10 @@ fn primBlockValue4(interp: *Interpreter) InterpreterError!Value {
         interp.home_heap_context = Value.nil;
     }
 
-    // Set temp_base so that temp_base + 1 + 0 points to the first argument
-    interp.temp_base = interp.sp - 1;
+    // Push receiver placeholder first, then set temp_base to point to it
+    try interp.push(block_receiver);
+    interp.temp_base = interp.sp - 1; // temp_base points to receiver slot
+
     interp.primitive_block_bases[interp.primitive_block_depth] = interp.context_ptr;
     interp.primitive_block_depth += 1;
 
@@ -3280,19 +3317,26 @@ fn primBlockValue4(interp: *Interpreter) InterpreterError!Value {
         try interp.push(Value.nil);
     }
 
-    // If the block has temps, create a new heap context for them.
-    // The context needs slots for BOTH args and temps since bytecode indices are absolute
-    if (num_temps > 0) {
-        const outer_ctx = interp.heap_context;
-        const heap_ctx = try interp.createHeapContext(4 + num_temps); // 4 args + temps
-        // Store the outer context in SENDER field so push_outer_temp can follow the chain
-        if (!outer_ctx.isNil()) {
-            heap_ctx.setField(Heap.CONTEXT_FIELD_SENDER, outer_ctx, heap_ctx.header.size);
-        }
-        interp.heap_context = Value.fromObject(heap_ctx);
-        if (interp.home_heap_context.isNil()) {
-            interp.home_heap_context = outer_ctx;
-        }
+    // ALWAYS create a new heap context for the block's args (and temps if any).
+    const outer_ctx = interp.heap_context;
+    const heap_ctx = try interp.createHeapContext(4 + num_temps); // 4 args + temps
+    // Copy args and temps from stack into the new heap context
+    var field_idx: usize = Heap.CONTEXT_NUM_FIXED_FIELDS;
+    var stack_idx: usize = interp.temp_base + 1; // Start at first arg position
+    while (field_idx < Heap.CONTEXT_NUM_FIXED_FIELDS + 4 + num_temps) : ({
+        field_idx += 1;
+        stack_idx += 1;
+    }) {
+        const val = interp.stack[stack_idx];
+        heap_ctx.setField(field_idx, val, heap_ctx.header.size);
+    }
+    // Store the outer context in SENDER field so push_outer_temp can follow the chain
+    if (!outer_ctx.isNil()) {
+        heap_ctx.setField(Heap.CONTEXT_FIELD_SENDER, outer_ctx, heap_ctx.header.size);
+    }
+    interp.heap_context = Value.fromObject(heap_ctx);
+    if (interp.home_heap_context.isNil()) {
+        interp.home_heap_context = outer_ctx;
     }
 
     const result = interp.interpretLoop() catch |err| {
@@ -3993,17 +4037,34 @@ fn extractBlockInfo(interp: *Interpreter, block: Value) ?BlockInfo {
     const uses_heap_context = outer_temp_base_val.isObject() and
         outer_temp_base_val.asObject().header.class_index == Heap.CLASS_METHOD_CONTEXT;
 
-    if (!outer_temp_base_val.isSmallInt() and !uses_heap_context) return null;
+    // Allow nil as valid outer_temp_base (block doesn't reference outer scope)
+    if (!outer_temp_base_val.isSmallInt() and !uses_heap_context and !outer_temp_base_val.isNil()) return null;
 
     const block_method: *CompiledMethod = @ptrCast(@alignCast(method_val.asObject()));
     const total_temps = block_method.header.num_temps;
+
+    // Handle outer_temp_base: could be SmallInt (stack offset), heap context object, or nil (no outer scope)
+    const outer_base: usize = if (uses_heap_context)
+        interp.sp
+    else if (outer_temp_base_val.isSmallInt())
+        @intCast(outer_temp_base_val.asSmallInt())
+    else
+        interp.temp_base; // nil case: use current temp_base
+
+    // Handle home_temp_base similarly
+    const home_base: usize = if (uses_heap_context)
+        interp.sp
+    else if (home_temp_base_val.isSmallInt())
+        @intCast(home_temp_base_val.asSmallInt())
+    else
+        interp.temp_base;
 
     return BlockInfo{
         .method = block_method,
         .start_ip = @intCast(start_pc.asSmallInt()),
         .receiver = block_receiver,
-        .outer_temp_base = if (uses_heap_context) interp.sp else @intCast(outer_temp_base_val.asSmallInt()),
-        .home_temp_base = if (uses_heap_context) interp.sp else if (home_temp_base_val.isSmallInt()) @intCast(home_temp_base_val.asSmallInt()) else interp.temp_base,
+        .outer_temp_base = outer_base,
+        .home_temp_base = home_base,
         .uses_heap_context = uses_heap_context,
         .heap_context = if (uses_heap_context) outer_temp_base_val else Value.nil,
         .home_heap_context = if (uses_heap_context) home_temp_base_val else Value.nil,
@@ -4338,11 +4399,11 @@ fn primToDo(interp: *Interpreter) InterpreterError!Value {
         interp.ip = @intCast(start_pc.asSmallInt());
         interp.receiver = block_receiver;
         interp.sp = saved_sp;
-        // Set temp_base so temp[1] = stack[temp_base + 1] = stack[saved_sp] is the argument
-        interp.temp_base = saved_sp - 1;
 
+        // Set up heap context first - we'll need the outer context for push_outer_temp
+        var outer_ctx = Value.nil;
         if (uses_heap_context) {
-            interp.heap_context = outer_context_val;
+            outer_ctx = outer_context_val;
             interp.home_heap_context = home_context_val;
             interp.outer_temp_base = saved_temp_base;
             interp.home_temp_base = saved_home_temp_base;
@@ -4350,9 +4411,15 @@ fn primToDo(interp: *Interpreter) InterpreterError!Value {
             // Stack-based temp access (legacy)
             interp.outer_temp_base = if (outer_context_val.isSmallInt()) @intCast(outer_context_val.asSmallInt()) else saved_temp_base;
             interp.home_temp_base = if (home_context_val.isSmallInt()) @intCast(home_context_val.asSmallInt()) else saved_temp_base;
+            interp.heap_context = Value.nil;
+            interp.home_heap_context = Value.nil;
         }
 
-        // Push the loop variable as argument
+        // Push receiver placeholder first, then set temp_base to point to it
+        try interp.push(block_receiver);
+        interp.temp_base = interp.sp - 1; // temp_base points to receiver slot
+
+        // Push the loop variable as argument - at temp_base + 1
         try interp.push(Value.fromSmallInt(i));
 
         // Allocate space for block temporaries
@@ -4361,41 +4428,38 @@ fn primToDo(interp: *Interpreter) InterpreterError!Value {
             try interp.push(Value.nil);
         }
 
-        // If block has temps, create heap context for them
-        if (num_temps > 0) {
-            const outer_ctx = interp.heap_context;
-            const heap_ctx = interp.createHeapContext(1 + num_temps) catch { // 1 arg + temps
-                interp.primitive_block_depth -= 1;
-                interp.ip = saved_ip;
-                interp.method = saved_method;
-                interp.sp = saved_sp;
-                interp.temp_base = saved_temp_base;
-                interp.outer_temp_base = saved_outer_temp_base;
-                interp.home_temp_base = saved_home_temp_base;
-                interp.receiver = saved_receiver;
-                interp.context_ptr = saved_context_ptr;
-                interp.heap_context = saved_heap_context;
-                interp.home_heap_context = saved_home_heap_context;
-                return InterpreterError.OutOfMemory;
-            };
-            // Store the outer context in SENDER field so push_outer_temp can follow the chain
-            if (!outer_ctx.isNil()) {
-                heap_ctx.setField(Heap.CONTEXT_FIELD_SENDER, outer_ctx, heap_ctx.header.size);
-            }
-            interp.heap_context = Value.fromObject(heap_ctx);
-            if (interp.home_heap_context.isNil()) {
-                interp.home_heap_context = outer_ctx;
-            }
-
-            // Copy argument and temps from stack into heap context
-            // Stack layout: [...saved_sp] [arg] [temp0] [temp1] ...
-            // Heap context fields: [0-4: fixed fields] [5: arg] [6: temp0] [7: temp1] ...
-            var field_idx: usize = Heap.CONTEXT_NUM_FIXED_FIELDS;
-            var stack_idx: usize = saved_sp;
-            while (field_idx < Heap.CONTEXT_NUM_FIXED_FIELDS + 1 + num_temps) : ({field_idx += 1; stack_idx += 1;}) {
-                const val = interp.stack[stack_idx];
-                heap_ctx.setField(field_idx, val, heap_ctx.header.size);
-            }
+        // ALWAYS create a new heap context for the block's arg (and temps if any)
+        const heap_ctx = interp.createHeapContext(1 + num_temps) catch { // 1 arg + temps
+            interp.primitive_block_depth -= 1;
+            interp.ip = saved_ip;
+            interp.method = saved_method;
+            interp.sp = saved_sp;
+            interp.temp_base = saved_temp_base;
+            interp.outer_temp_base = saved_outer_temp_base;
+            interp.home_temp_base = saved_home_temp_base;
+            interp.receiver = saved_receiver;
+            interp.context_ptr = saved_context_ptr;
+            interp.heap_context = saved_heap_context;
+            interp.home_heap_context = saved_home_heap_context;
+            return InterpreterError.OutOfMemory;
+        };
+        // Copy arg and temps from stack into the new heap context
+        var field_idx: usize = Heap.CONTEXT_NUM_FIXED_FIELDS;
+        var stack_idx: usize = interp.temp_base + 1; // Start at arg position
+        while (field_idx < Heap.CONTEXT_NUM_FIXED_FIELDS + 1 + num_temps) : ({
+            field_idx += 1;
+            stack_idx += 1;
+        }) {
+            const val = interp.stack[stack_idx];
+            heap_ctx.setField(field_idx, val, heap_ctx.header.size);
+        }
+        // Store the outer context in SENDER field so push_outer_temp can follow the chain
+        if (!outer_ctx.isNil()) {
+            heap_ctx.setField(Heap.CONTEXT_FIELD_SENDER, outer_ctx, heap_ctx.header.size);
+        }
+        interp.heap_context = Value.fromObject(heap_ctx);
+        if (interp.home_heap_context.isNil()) {
+            interp.home_heap_context = outer_ctx;
         }
 
         // Execute the block
