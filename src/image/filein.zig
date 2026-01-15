@@ -626,7 +626,7 @@ pub const FileIn = struct {
         // Lazily initialize interpreter
         if (self.interp == null) {
             const interp_ptr = self.allocator.create(interpreter.Interpreter) catch return;
-            interp_ptr.* = interpreter.Interpreter.init(self.heap, self.allocator);
+            interp_ptr.* = interpreter.Interpreter.init(self.heap, self.allocator) catch return;
             // Register interpreter with heap for GC stack tracing
             self.heap.interpreter = interp_ptr;
             self.interp = interp_ptr;

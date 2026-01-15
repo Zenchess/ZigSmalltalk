@@ -79,6 +79,18 @@ fn valueToCType(comptime T: type, val: Value, heap: *Heap, allocator: std.mem.Al
                         const arr_fields = obj.fields(obj.header.size);
                         // Allocate array of C string pointers
                         const c_strings = allocator.alloc([*c]const u8, arr_fields.len) catch return FFIError.AllocationFailed;
+                        // Track how many strings we've allocated for cleanup on error
+                        var strings_allocated: usize = 0;
+                        errdefer {
+                            // Free any allocated strings on error
+                            for (0..strings_allocated) |j| {
+                                // Calculate length from null terminator
+                                var len: usize = 0;
+                                while (c_strings[j][len] != 0) : (len += 1) {}
+                                allocator.free(c_strings[j][0 .. len + 1]);
+                            }
+                            allocator.free(c_strings);
+                        }
                         for (arr_fields, 0..) |elem, i| {
                             if (elem.isObject()) {
                                 const str_obj = elem.asObject();
@@ -89,6 +101,7 @@ fn valueToCType(comptime T: type, val: Value, heap: *Heap, allocator: std.mem.Al
                                     const c_str = allocator.allocSentinel(u8, str_bytes.len, 0) catch return FFIError.AllocationFailed;
                                     @memcpy(c_str, str_bytes);
                                     c_strings[i] = c_str.ptr;
+                                    strings_allocated += 1;
                                 } else {
                                     return FFIError.TypeMismatch;
                                 }
@@ -143,6 +156,7 @@ fn valueToCType(comptime T: type, val: Value, heap: *Heap, allocator: std.mem.Al
                 if (obj.header.class_index == Heap.CLASS_ARRAY) {
                     const arr_fields = obj.fields(obj.header.size);
                     const int_array = allocator.alloc(child, arr_fields.len) catch return FFIError.AllocationFailed;
+                    errdefer allocator.free(int_array);
                     for (arr_fields, 0..) |elem, i| {
                         if (elem.isSmallInt()) {
                             int_array[i] = @intCast(elem.asSmallInt());
@@ -168,6 +182,7 @@ fn valueToCType(comptime T: type, val: Value, heap: *Heap, allocator: std.mem.Al
                 if (obj.header.class_index == Heap.CLASS_ARRAY) {
                     const arr_fields = obj.fields(obj.header.size);
                     const float_array = allocator.alloc(child, arr_fields.len) catch return FFIError.AllocationFailed;
+                    errdefer allocator.free(float_array);
                     for (arr_fields, 0..) |elem, i| {
                         if (elem.isSmallInt()) {
                             float_array[i] = @floatFromInt(elem.asSmallInt());

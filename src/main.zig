@@ -355,7 +355,7 @@ pub fn main() !void {
     defer heap.deinit();
 
     // Create interpreter
-    var interp = Interpreter.init(heap, allocator);
+    var interp = try Interpreter.init(heap, allocator);
     defer interp.deinit();
     defer interp.deinitJit();
     // Register interpreter with heap for GC stack tracing

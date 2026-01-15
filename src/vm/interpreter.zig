@@ -694,6 +694,9 @@ pub const Interpreter = struct {
         const block_obj = suspended_frame.asObject();
         if (block_obj.header.class_index != Heap.CLASS_BLOCK_CLOSURE) return false;
 
+        // Validate that block has the expected number of fields to prevent out-of-bounds access
+        if (block_obj.header.size < Heap.BLOCK_NUM_FIELDS) return false;
+
         // Get block data: [outerContext, startPC, numArgs, method, receiver, homeContext, numTemps]
         const outer_context_val = block_obj.getField(Heap.BLOCK_FIELD_OUTER_CONTEXT, Heap.BLOCK_NUM_FIELDS);
         const start_pc = block_obj.getField(Heap.BLOCK_FIELD_START_PC, Heap.BLOCK_NUM_FIELDS);
@@ -1442,34 +1445,34 @@ pub const Interpreter = struct {
                 // Jumps
                 .jump => {
                     const offset = self.fetchSignedShort();
-                    self.ip = @intCast(@as(isize, @intCast(self.ip)) + offset);
+                    try self.safeJump(offset);
                 },
                 .jump_if_true => {
                     const offset = self.fetchSignedShort();
                     const val = try self.pop();
                     if (val.isTrue()) {
-                        self.ip = @intCast(@as(isize, @intCast(self.ip)) + offset);
+                        try self.safeJump(offset);
                     }
                 },
                 .jump_if_false => {
                     const offset = self.fetchSignedShort();
                     const val = try self.pop();
                     if (val.isFalse()) {
-                        self.ip = @intCast(@as(isize, @intCast(self.ip)) + offset);
+                        try self.safeJump(offset);
                     }
                 },
                 .jump_if_nil => {
                     const offset = self.fetchSignedShort();
                     const val = try self.pop();
                     if (val.isNil()) {
-                        self.ip = @intCast(@as(isize, @intCast(self.ip)) + offset);
+                        try self.safeJump(offset);
                     }
                 },
                 .jump_if_not_nil => {
                     const offset = self.fetchSignedShort();
                     const val = try self.pop();
                     if (!val.isNil()) {
-                        self.ip = @intCast(@as(isize, @intCast(self.ip)) + offset);
+                        try self.safeJump(offset);
                     }
                 },
 
@@ -1753,12 +1756,16 @@ pub const Interpreter = struct {
     }
 
     // Pop N values and push result (for N-ary operations returning 1 value)
-    inline fn popNPush1(self: *Interpreter, n: usize, value: Value) void {
+    inline fn popNPush1(self: *Interpreter, n: usize, value: Value) InterpreterError!void {
         // Bounds check to prevent underflow
         if (self.sp >= n) {
             self.sp -= n;
         } else {
             self.sp = 0;
+        }
+        // Bounds check to prevent overflow before writing
+        if (self.sp >= self.stack.len) {
+            return InterpreterError.StackOverflow;
         }
         self.stack[self.sp] = value;
         self.sp += 1;
@@ -1800,6 +1807,23 @@ pub const Interpreter = struct {
         const hi: u16 = self.fetchByte();
         const lo: u16 = self.fetchByte();
         return @bitCast((hi << 8) | lo);
+    }
+
+    /// Safely calculate a new IP after applying a signed offset.
+    /// Returns error if the result would be negative or overflow.
+    fn safeJump(self: *Interpreter, offset: i16) InterpreterError!void {
+        const current_ip: isize = @intCast(self.ip);
+        const new_ip = current_ip + offset;
+        if (new_ip < 0) {
+            return InterpreterError.InvalidBytecode;
+        }
+        const new_ip_usize: usize = @intCast(new_ip);
+        // Validate new IP is within bytecode bounds
+        const bytecodes_len = self.method.getBytecodes().len;
+        if (new_ip_usize > bytecodes_len) {
+            return InterpreterError.InvalidBytecode;
+        }
+        self.ip = new_ip_usize;
     }
 
     fn pushReceiverVariable(self: *Interpreter, index: u8) InterpreterError!void {
@@ -2420,7 +2444,7 @@ pub const Interpreter = struct {
                     }
                 }
                 // Execute method bytecode (inlined from below for speed)
-                if (self.context_ptr >= self.contexts.len - 1) {
+                if (self.context_ptr >= self.contexts.len) {
                     return InterpreterError.StackOverflow;
                 }
                 self.contexts[self.context_ptr] = .{
@@ -2584,7 +2608,7 @@ pub const Interpreter = struct {
 
             // Execute the method bytecode
             // Save current context
-            if (self.context_ptr >= self.contexts.len - 1) {
+            if (self.context_ptr >= self.contexts.len) {
             if (DEBUG_STACK) {
                 std.debug.print("STACK OVERFLOW at context_ptr={} method={s}\n", .{self.context_ptr, self.currentMethodSource()});
             }
@@ -2709,7 +2733,7 @@ pub const Interpreter = struct {
 
                 // Call doesNotUnderstand: with the Message (non-primitive case)
                 // Save context
-                if (self.context_ptr >= self.contexts.len - 1) {
+                if (self.context_ptr >= self.contexts.len) {
                     return InterpreterError.StackOverflow;
                 }
 
@@ -3161,7 +3185,7 @@ pub const Interpreter = struct {
                 }
 
                 // Execute method bytecode - save context and set up new frame
-                if (self.context_ptr >= self.contexts.len - 1) {
+                if (self.context_ptr >= self.contexts.len) {
                     return InterpreterError.StackOverflow;
                 }
 
@@ -3300,7 +3324,7 @@ pub const Interpreter = struct {
             }
 
             // Execute method bytecode - save context and set up new frame
-            if (self.context_ptr >= self.contexts.len - 1) {
+            if (self.context_ptr >= self.contexts.len) {
                 return InterpreterError.StackOverflow;
             }
 
@@ -3718,7 +3742,11 @@ pub const Interpreter = struct {
         const hi: u16 = bc[self.ip];
         const lo: u16 = bc[self.ip + 1];
         const offset: i16 = @bitCast((hi << 8) | lo);
-        self.ip = @intCast(@as(isize, @intCast(self.ip + 2)) + offset);
+        self.ip += 2;
+        self.safeJump(offset) catch |err| {
+            self.dispatch_error = err;
+            return .return_error;
+        };
         return .continue_dispatch;
     }
 
@@ -3735,7 +3763,10 @@ pub const Interpreter = struct {
         if (self.sp > 0) {
             self.sp -= 1;
             if (self.stack[self.sp].isTrue()) {
-                self.ip = @intCast(@as(isize, @intCast(self.ip)) + offset);
+                self.safeJump(offset) catch |err| {
+                    self.dispatch_error = err;
+                    return .return_error;
+                };
             }
         }
         return .continue_dispatch;
@@ -3754,7 +3785,10 @@ pub const Interpreter = struct {
         if (self.sp > 0) {
             self.sp -= 1;
             if (self.stack[self.sp].isFalse()) {
-                self.ip = @intCast(@as(isize, @intCast(self.ip)) + offset);
+                self.safeJump(offset) catch |err| {
+                    self.dispatch_error = err;
+                    return .return_error;
+                };
             }
         }
         return .continue_dispatch;
@@ -3773,7 +3807,10 @@ pub const Interpreter = struct {
         if (self.sp > 0) {
             self.sp -= 1;
             if (self.stack[self.sp].isNil()) {
-                self.ip = @intCast(@as(isize, @intCast(self.ip)) + offset);
+                self.safeJump(offset) catch |err| {
+                    self.dispatch_error = err;
+                    return .return_error;
+                };
             }
         }
         return .continue_dispatch;
@@ -3792,7 +3829,10 @@ pub const Interpreter = struct {
         if (self.sp > 0) {
             self.sp -= 1;
             if (!self.stack[self.sp].isNil()) {
-                self.ip = @intCast(@as(isize, @intCast(self.ip)) + offset);
+                self.safeJump(offset) catch |err| {
+                    self.dispatch_error = err;
+                    return .return_error;
+                };
             }
         }
         return .continue_dispatch;

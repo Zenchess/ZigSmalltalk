@@ -2202,7 +2202,14 @@ fn primAtPut(interp: *Interpreter) InterpreterError!Value {
     }
 
     const obj = recv.asObject();
-    const base_idx: usize = @intCast(index.asSmallInt() - 1);
+    const idx_val = index.asSmallInt();
+    if (idx_val < 1) {
+        try interp.push(recv);
+        try interp.push(index);
+        try interp.push(val);
+        return InterpreterError.PrimitiveFailed;
+    }
+    const base_idx: usize = @intCast(idx_val - 1); // Smalltalk is 1-indexed
     const format = obj.header.getFormat();
 
     // For bytes format objects (Strings, ByteArrays), store a single byte
@@ -2217,9 +2224,25 @@ fn primAtPut(interp: *Interpreter) InterpreterError!Value {
         // Value can be a Character or SmallInt representing a byte
         var byte_val: u8 = 0;
         if (val.isCharacter()) {
-            byte_val = @truncate(val.asCharacter());
+            const char_val = val.asCharacter();
+            // Character must be in byte range (0-255)
+            if (char_val > 255) {
+                try interp.push(recv);
+                try interp.push(index);
+                try interp.push(val);
+                return InterpreterError.PrimitiveFailed;
+            }
+            byte_val = @truncate(char_val);
         } else if (val.isSmallInt()) {
-            byte_val = @truncate(@as(u64, @intCast(val.asSmallInt())));
+            const int_val = val.asSmallInt();
+            // SmallInt must be in byte range (0-255), reject negatives and values > 255
+            if (int_val < 0 or int_val > 255) {
+                try interp.push(recv);
+                try interp.push(index);
+                try interp.push(val);
+                return InterpreterError.PrimitiveFailed;
+            }
+            byte_val = @intCast(int_val);
         } else {
             try interp.push(recv);
             try interp.push(index);
@@ -2443,7 +2466,9 @@ fn primCharFromCode(interp: *Interpreter) InterpreterError!Value {
 
     if (code.isSmallInt()) {
         const cp = code.asSmallInt();
-        if (cp >= 0 and cp <= 0x10FFFF) {
+        // Validate codepoint range (0 to 0x10FFFF) and reject surrogate codepoints (0xD800-0xDFFF)
+        // which are not valid Unicode scalar values
+        if (cp >= 0 and cp <= 0x10FFFF and !(cp >= 0xD800 and cp <= 0xDFFF)) {
             return Value.fromCharacter(@intCast(cp));
         }
     }
@@ -2455,7 +2480,64 @@ fn primCharFromCode(interp: *Interpreter) InterpreterError!Value {
 // Block Evaluation Primitives
 // ============================================================================
 
+/// Primitive 81 - Universal block value dispatcher
+/// In Dolphin Smalltalk, primitive 81 is used by ALL BlockClosure value methods:
+/// - BlockClosure >> value (0 args)
+/// - BlockClosure >> value: (1 arg)
+/// - BlockClosure >> value:value: (2 args)
+/// - etc.
+///
+/// This dispatcher examines the block's expected argument count and delegates
+/// to the appropriate specialized handler.
 pub fn primBlockValue(interp: *Interpreter) InterpreterError!Value {
+    // Peek at the top of stack to get the block without popping
+    // The block is always on top, with arguments below it
+    if (interp.sp == 0) {
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    const block = interp.stack[interp.sp - 1];
+
+    if (!block.isObject()) {
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    const block_obj = block.asObject();
+    if (block_obj.header.class_index != Heap.CLASS_BLOCK_CLOSURE) {
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    // Validate that block has the expected number of fields
+    if (block_obj.header.size < Heap.BLOCK_NUM_FIELDS) {
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    // Get the expected argument count from the block
+    const num_args_val = block_obj.getField(Heap.BLOCK_FIELD_NUM_ARGS, Heap.BLOCK_NUM_FIELDS);
+    if (!num_args_val.isSmallInt()) {
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    const expected_args = num_args_val.asSmallInt();
+
+    // Dispatch to the appropriate handler based on argument count
+    // Each handler will pop the block and the correct number of arguments
+    return switch (expected_args) {
+        0 => primBlockValueZero(interp),
+        1 => primBlockValue1(interp),
+        2 => primBlockValue2(interp),
+        3 => primBlockValue3(interp),
+        4 => primBlockValue4(interp),
+        else => {
+            // For 5+ args, use valueWithArguments: (primitive 82)
+            // For now, fail and let Smalltalk code handle it
+            return InterpreterError.PrimitiveFailed;
+        },
+    };
+}
+
+/// Handler for 0-argument blocks (formerly primBlockValue)
+fn primBlockValueZero(interp: *Interpreter) InterpreterError!Value {
     const block = try interp.pop();
 
     if (!block.isObject()) {
@@ -2465,6 +2547,12 @@ pub fn primBlockValue(interp: *Interpreter) InterpreterError!Value {
 
     const block_obj = block.asObject();
     if (block_obj.header.class_index != Heap.CLASS_BLOCK_CLOSURE) {
+        try interp.push(block);
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    // Validate that block has the expected number of fields to prevent out-of-bounds access
+    if (block_obj.header.size < Heap.BLOCK_NUM_FIELDS) {
         try interp.push(block);
         return InterpreterError.PrimitiveFailed;
     }
@@ -2622,6 +2710,13 @@ fn primBlockValue1(interp: *Interpreter) InterpreterError!Value {
         return InterpreterError.PrimitiveFailed;
     }
 
+    // Validate that block has the expected number of fields to prevent out-of-bounds access
+    if (block_obj.header.size < Heap.BLOCK_NUM_FIELDS) {
+        try interp.push(block);
+        try interp.push(arg);
+        return InterpreterError.PrimitiveFailed;
+    }
+
     // Get block data: [outerContext, startPC, numArgs, method, receiver, homeContext, numTemps]
     const outer_context_val = block_obj.getField(Heap.BLOCK_FIELD_OUTER_CONTEXT, Heap.BLOCK_NUM_FIELDS);
     const start_pc = block_obj.getField(Heap.BLOCK_FIELD_START_PC, Heap.BLOCK_NUM_FIELDS);
@@ -2764,6 +2859,14 @@ fn primBlockValue2(interp: *Interpreter) InterpreterError!Value {
 
     const block_obj = block.asObject();
     if (block_obj.header.class_index != Heap.CLASS_BLOCK_CLOSURE) {
+        try interp.push(block);
+        try interp.push(arg1);
+        try interp.push(arg2);
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    // Validate that block has the expected number of fields to prevent out-of-bounds access
+    if (block_obj.header.size < Heap.BLOCK_NUM_FIELDS) {
         try interp.push(block);
         try interp.push(arg1);
         try interp.push(arg2);
@@ -2913,6 +3016,15 @@ fn primBlockValue3(interp: *Interpreter) InterpreterError!Value {
 
     const block_obj = block.asObject();
     if (block_obj.header.class_index != Heap.CLASS_BLOCK_CLOSURE) {
+        try interp.push(block);
+        try interp.push(arg1);
+        try interp.push(arg2);
+        try interp.push(arg3);
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    // Validate that block has the expected number of fields to prevent out-of-bounds access
+    if (block_obj.header.size < Heap.BLOCK_NUM_FIELDS) {
         try interp.push(block);
         try interp.push(arg1);
         try interp.push(arg2);
@@ -3075,6 +3187,16 @@ fn primBlockValue4(interp: *Interpreter) InterpreterError!Value {
         return InterpreterError.PrimitiveFailed;
     }
 
+    // Validate that block has the expected number of fields to prevent out-of-bounds access
+    if (block_obj.header.size < Heap.BLOCK_NUM_FIELDS) {
+        try interp.push(block);
+        try interp.push(arg1);
+        try interp.push(arg2);
+        try interp.push(arg3);
+        try interp.push(arg4);
+        return InterpreterError.PrimitiveFailed;
+    }
+
     // Get block data: [outerContext, startPC, numArgs, method, receiver, homeContext, numTemps]
     const outer_context_val = block_obj.getField(Heap.BLOCK_FIELD_OUTER_CONTEXT, Heap.BLOCK_NUM_FIELDS);
     const start_pc = block_obj.getField(Heap.BLOCK_FIELD_START_PC, Heap.BLOCK_NUM_FIELDS);
@@ -3220,6 +3342,13 @@ fn primBlockValueWithArgs(interp: *Interpreter) InterpreterError!Value {
 
     const block_obj = block.asObject();
     if (block_obj.header.class_index != Heap.CLASS_BLOCK_CLOSURE) {
+        try interp.push(block);
+        try interp.push(args);
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    // Validate that block has the expected number of fields to prevent out-of-bounds access
+    if (block_obj.header.size < Heap.BLOCK_NUM_FIELDS) {
         try interp.push(block);
         try interp.push(args);
         return InterpreterError.PrimitiveFailed;
@@ -3598,6 +3727,11 @@ fn evaluateBlock(interp: *Interpreter, block: Value) InterpreterError!Value {
         return InterpreterError.PrimitiveFailed;
     }
 
+    // Validate that block has at least 6 fields to prevent out-of-bounds access
+    if (block_obj.header.size < 6) {
+        return InterpreterError.PrimitiveFailed;
+    }
+
     // Get block data: [outerTempBase, startPC, numArgs, method, receiver, homeTempBase]
     const outer_temp_base_val = block_obj.getField(0, 6);
     const start_pc = block_obj.getField(1, 6);
@@ -3842,6 +3976,9 @@ fn extractBlockInfo(interp: *Interpreter, block: Value) ?BlockInfo {
     if (!block.isObject()) return null;
     const block_obj = block.asObject();
     if (block_obj.header.class_index != Heap.CLASS_BLOCK_CLOSURE) return null;
+
+    // Validate that block has at least 6 fields to prevent out-of-bounds access
+    if (block_obj.header.size < 6) return null;
 
     const outer_temp_base_val = block_obj.getField(0, 6);
     const start_pc = block_obj.getField(1, 6);
@@ -4125,6 +4262,14 @@ fn primToDo(interp: *Interpreter) InterpreterError!Value {
         return InterpreterError.PrimitiveFailed;
     }
 
+    // Validate that block has the expected number of fields to prevent out-of-bounds access
+    if (block_obj.header.size < Heap.BLOCK_NUM_FIELDS) {
+        try interp.push(start);
+        try interp.push(limit);
+        try interp.push(block);
+        return InterpreterError.PrimitiveFailed;
+    }
+
     // Get block data using new layout:
     // Field 0: OUTER_CONTEXT (heap object or nil)
     // Field 1: START_PC (SmallInt)
@@ -4314,6 +4459,15 @@ fn primToByDo(interp: *Interpreter) InterpreterError!Value {
         return InterpreterError.PrimitiveFailed;
     }
 
+    // Validate that block has at least 6 fields to prevent out-of-bounds access
+    if (block_obj.header.size < 6) {
+        try interp.push(start);
+        try interp.push(limit);
+        try interp.push(step);
+        try interp.push(block);
+        return InterpreterError.PrimitiveFailed;
+    }
+
     // Get block data: [outerTempBase, startPC, numArgs, method, receiver]
     const outer_temp_base_val = block_obj.getField(0, 6);
     const start_pc = block_obj.getField(1, 6);
@@ -4488,6 +4642,11 @@ fn evaluateBlockWith1(interp: *Interpreter, block: Value, arg: Value) Interprete
         return InterpreterError.PrimitiveFailed;
     }
 
+    // Validate that block has the expected number of fields to prevent out-of-bounds access
+    if (block_obj.header.size < Heap.BLOCK_NUM_FIELDS) {
+        return InterpreterError.PrimitiveFailed;
+    }
+
     // Get block data: [outerContext, startPC, numArgs, method, receiver, homeContext, numTemps]
     const outer_context_val = block_obj.getField(Heap.BLOCK_FIELD_OUTER_CONTEXT, Heap.BLOCK_NUM_FIELDS);
     const start_pc = block_obj.getField(Heap.BLOCK_FIELD_START_PC, Heap.BLOCK_NUM_FIELDS);
@@ -4620,6 +4779,11 @@ fn evaluateBlockWith2(interp: *Interpreter, block: Value, arg1: Value, arg2: Val
 
     const block_obj = block.asObject();
     if (block_obj.header.class_index != Heap.CLASS_BLOCK_CLOSURE) {
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    // Validate that block has at least 6 fields to prevent out-of-bounds access
+    if (block_obj.header.size < 6) {
         return InterpreterError.PrimitiveFailed;
     }
 

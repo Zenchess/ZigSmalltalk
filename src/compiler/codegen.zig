@@ -733,9 +733,19 @@ pub const CodeGenerator = struct {
                 try self.emit(.return_top);
 
                 const block_end = self.bytecodes_buf.items.len;
-                const block_size: u16 = @intCast(block_end - block_start);
+                const block_size_raw = block_end - block_start;
+
+                // Check if block size exceeds u16 max value
+                if (block_size_raw > 65535) {
+                    return CompileError.BytecodeOverflow;
+                }
+                const block_size: u16 = @intCast(block_size_raw);
 
                 // Patch the bytecode length (after num_args and num_temps)
+                // Bounds check: patch_pos + 3 must be valid (we emitted 4 bytes after push_closure)
+                if (patch_pos + 3 >= self.bytecodes_buf.items.len) {
+                    return CompileError.BytecodeOverflow;
+                }
                 self.bytecodes_buf.items[patch_pos + 2] = @intCast(block_size >> 8);
                 self.bytecodes_buf.items[patch_pos + 3] = @intCast(block_size & 0xFF);
             },
