@@ -142,6 +142,10 @@ keyTab
     ^9
 !
 
+keyShiftTab
+    ^16r100B
+!
+
 keyBackspace
     ^127
 !

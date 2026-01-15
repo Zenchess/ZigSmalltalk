@@ -2,7 +2,7 @@
  Features: cursor movement, scrolling, selection, line numbers, syntax highlighting"
 
 TuiWidget subclass: #TuiTextArea
-    instanceVariableNames: 'lines cursorLine cursorCol scrollY scrollX lineNumbers syntaxHighlight readonly selectionStartLine selectionStartCol selectionEndLine selectionEndCol mouseSelecting onChange'
+    instanceVariableNames: 'lines cursorLine cursorCol scrollY scrollX lineNumbers syntaxHighlight readonly selectionStartLine selectionStartCol selectionEndLine selectionEndCol mouseSelecting onChange highlightCache highlightDirty'
     classVariableNames: ''
     poolDictionaries: ''
     category: 'TUI-Widgets'!
@@ -34,7 +34,9 @@ initialize
     selectionEndCol := nil.
     mouseSelecting := false.
     onChange := nil.
-    hasBorder := true
+    hasBorder := true.
+    highlightCache := Dictionary new.
+    highlightDirty := true
 ! !
 
 !TuiTextArea methodsFor: 'accessing'!
@@ -64,7 +66,8 @@ text: aString
     cursorCol := 1.
     scrollY := 0.
     scrollX := 0.
-    self clearSelection
+    self clearSelection.
+    self invalidateHighlight
 !
 
 currentLine
@@ -324,7 +327,14 @@ deleteForward
 
 textChanged
     "Called when text is modified"
+    self invalidateHighlight.
     onChange ifNotNil: [onChange value: self]
+!
+
+invalidateHighlight
+    "Mark highlight cache as dirty"
+    highlightCache := Dictionary new.
+    highlightDirty := true
 ! !
 
 !TuiTextArea methodsFor: 'selection'!
@@ -520,8 +530,8 @@ scrollDown: amount
 drawSelf: screen
     | content textRect |
 
-    "Draw border"
-    self drawBorder: screen.
+    "Draw border with rounded corners (matches Zig TUI)"
+    self drawBorderRounded: screen.
 
     "Get content areas"
     content := self contentRect.
@@ -535,6 +545,14 @@ drawSelf: screen
 
     "Draw text content"
     self drawTextContent: screen.
+
+    "Draw scrollbar if content exceeds visible area"
+    lines size > self visibleLines ifTrue: [
+        screen drawScrollbar: textRect
+               total: lines size
+               visible: self visibleLines
+               offset: scrollY
+    ].
 
     "Position cursor if focused"
     focused ifTrue: [
@@ -584,6 +602,11 @@ drawTextContent: screen
     lineNum := scrollY + 1.
     visibleWidth := textRect width.
 
+    "Build highlight cache for visible lines if needed"
+    syntaxHighlight ifTrue: [
+        self updateHighlightCache
+    ].
+
     1 to: self visibleLines do: [:i |
         lineNum <= lines size ifTrue: [
             self drawLine: lineNum at: row on: screen textRect: textRect
@@ -593,13 +616,39 @@ drawTextContent: screen
     ]
 !
 
+updateHighlightCache
+    "Update syntax highlight cache for all lines (with multi-line state tracking)"
+    | inComment inString |
+    highlightDirty ifFalse: [^self].
+
+    highlightCache := Dictionary new.
+    inComment := false.
+    inString := false.
+
+    1 to: lines size do: [:lineNum |
+        | line result |
+        line := lines at: lineNum.
+        result := SmalltalkHighlighter highlightLine: line inComment: inComment inString: inString.
+        highlightCache at: lineNum put: (result at: 1).
+        inComment := result at: 2.
+        inString := result at: 3
+    ].
+
+    highlightDirty := false
+!
+
 drawLine: lineNum at: row on: screen textRect: textRect
-    "Draw a single line with optional highlighting"
-    | line col visibleStart visibleEnd sel isLineInSelection |
+    "Draw a single line with token-based syntax highlighting (matches Zig TUI)"
+    | line col visibleStart visibleEnd sel isLineInSelection lineTokens |
     line := lines at: lineNum.
     col := textRect x.
     visibleStart := scrollX + 1.
     visibleEnd := scrollX + textRect width.
+
+    "Get highlight tokens for this line"
+    lineTokens := syntaxHighlight
+        ifTrue: [highlightCache at: lineNum ifAbsent: [nil]]
+        ifFalse: [nil].
 
     "Check selection"
     sel := self normalizedSelection.
@@ -608,7 +657,7 @@ drawLine: lineNum at: row on: screen textRect: textRect
     ].
 
     visibleStart to: visibleEnd do: [:charIdx |
-        | ch style inSelection |
+        | ch style inSelection tokenType |
         charIdx <= line size
             ifTrue: [ch := line at: charIdx]
             ifFalse: [ch := $ ].
@@ -627,27 +676,19 @@ drawLine: lineNum at: row on: screen textRect: textRect
             ]
         ].
 
-        style := inSelection
-            ifTrue: [TuiStyle selected]
-            ifFalse: [
-                syntaxHighlight
-                    ifTrue: [self styleForChar: ch]
-                    ifFalse: [TuiStyle normal]
-            ].
+        "Determine style"
+        inSelection ifTrue: [
+            style := TuiStyle selected
+        ] ifFalse: [
+            (lineTokens notNil and: [charIdx <= lineTokens size]) ifTrue: [
+                tokenType := lineTokens at: charIdx.
+                style := SmalltalkHighlighter styleForToken: tokenType
+            ] ifFalse: [
+                style := TuiStyle normal
+            ]
+        ].
 
         screen setChar: ch at: col y: row style: style.
         col := col + 1
     ]
-!
-
-styleForChar: ch
-    "Simple per-character syntax highlighting"
-    ch isDigit ifTrue: [^TuiStyle new foreground: Theme syntaxNumber].
-    (ch = $: or: [ch = $^ or: [ch = $[ or: [ch = $]]]]) ifTrue: [
-        ^TuiStyle new foreground: Theme syntaxKeyword
-    ].
-    ch = $' ifTrue: [^TuiStyle new foreground: Theme syntaxString].
-    ch = $" ifTrue: [^TuiStyle new foreground: Theme syntaxComment].
-    ch = $# ifTrue: [^TuiStyle new foreground: Theme syntaxSymbol].
-    ^TuiStyle normal
 ! !

@@ -1,4 +1,4 @@
-"UIWidgets - TabBar, StatusBar, ListView and other UI components"
+"UIWidgets - TabBar, StatusBar, ListView, TreeView and other UI components"
 
 "============================================================"
 "TuiTabBar - Tab switching widget"
@@ -73,11 +73,12 @@ previousTab
 
 !TuiTabBar methodsFor: 'key handling'!
 handleKey: keyCode
-    "F1-F4 switch tabs"
+    "F1-F5 switch tabs"
     keyCode = AnsiTerminal keyF1 ifTrue: [self activeTab: 1. ^true].
     keyCode = AnsiTerminal keyF2 ifTrue: [self activeTab: 2. ^true].
     keyCode = AnsiTerminal keyF3 ifTrue: [self activeTab: 3. ^true].
     keyCode = AnsiTerminal keyF4 ifTrue: [self activeTab: 4. ^true].
+    keyCode = AnsiTerminal keyF5 ifTrue: [self activeTab: 5. ^true].
 
     "Ctrl+1 through Ctrl+9"
     (keyCode >= 1 and: [keyCode <= 9]) ifTrue: [
@@ -92,7 +93,7 @@ handleKey: keyCode
 
 !TuiTabBar methodsFor: 'drawing'!
 drawSelf: screen
-    | x row |
+    | x row hChar |
     row := rect y.
     x := rect x.
 
@@ -121,6 +122,12 @@ drawSelf: screen
 
         x := x + tabWidth + 1.
         x > rect width ifTrue: [^self]
+    ].
+
+    "Draw bottom border line (matches Zig TUI)"
+    hChar := (BoxChars horizontalU) first.
+    rect x to: (rect x + rect width - 1) do: [:col |
+        screen setChar: hChar at: col y: row style: TuiStyle border
     ]
 ! !
 
@@ -168,12 +175,16 @@ items: anArray
 
 !TuiStatusBar methodsFor: 'drawing'!
 drawSelf: screen
-    | x itemsText |
+    | x maxMsgWidth clippedMsg |
     "Draw background"
     screen fillRect: rect char: $  style: TuiStyle status.
 
-    "Draw message on left"
-    screen drawText: message at: rect x + 1 y: rect y style: TuiStyle status.
+    "Draw message on left (clipped to 1/3 width, matches Zig TUI)"
+    maxMsgWidth := rect width // 3.
+    clippedMsg := message size <= maxMsgWidth
+        ifTrue: [message]
+        ifFalse: [message copyFrom: 1 to: maxMsgWidth].
+    screen drawText: clippedMsg at: rect x + 1 y: rect y style: TuiStyle status.
 
     "Draw items on right"
     items isEmpty ifFalse: [
@@ -329,9 +340,11 @@ handleKey: keyCode
 !TuiListView methodsFor: 'drawing'!
 drawSelf: screen
     | content row startIndex endIndex |
-    self drawBorder: screen.
+    self drawBorderRounded: screen.
 
     content := self contentRect.
+    self clearContent: screen.
+
     row := content y.
     startIndex := scrollTop + 1.
     endIndex := (scrollTop + self visibleItemCount) min: items size.
@@ -361,6 +374,14 @@ drawSelf: screen
         screen fillRect: (TuiRect x: content x y: row width: content width height: 1)
                char: $  style: TuiStyle normal.
         row := row + 1
+    ].
+
+    "Draw scrollbar if needed"
+    items size > self visibleItemCount ifTrue: [
+        screen drawScrollbar: content
+               total: items size
+               visible: self visibleItemCount
+               offset: scrollTop
     ]
 ! !
 
@@ -538,5 +559,420 @@ drawSelf: screen
         cursorX := rect x + prompt size + cursorPos - textStart.
         screen setCursor: cursorX y: rect y.
         screen cursorVisible: true
+    ]
+! !
+
+
+"============================================================"
+"TuiTreeNode - Node for hierarchical tree data"
+"============================================================"
+Object subclass: #TuiTreeNode
+    instanceVariableNames: 'text data children parent expanded level'
+    classVariableNames: ''
+    poolDictionaries: ''
+    category: 'TUI-Widgets'!
+
+!TuiTreeNode class methodsFor: 'instance creation'!
+new
+    ^super new initialize
+!
+
+text: aString
+    ^self new text: aString
+!
+
+text: aString data: anObject
+    ^self new text: aString; data: anObject
+! !
+
+!TuiTreeNode methodsFor: 'initialization'!
+initialize
+    text := ''.
+    data := nil.
+    children := OrderedCollection new.
+    parent := nil.
+    expanded := false.
+    level := 0
+! !
+
+!TuiTreeNode methodsFor: 'accessing'!
+text
+    ^text
+!
+
+text: aString
+    text := aString
+!
+
+data
+    ^data
+!
+
+data: anObject
+    data := anObject
+!
+
+children
+    ^children
+!
+
+parent
+    ^parent
+!
+
+parent: aNode
+    parent := aNode
+!
+
+expanded
+    ^expanded
+!
+
+expanded: aBoolean
+    expanded := aBoolean
+!
+
+level
+    ^level
+!
+
+level: anInteger
+    level := anInteger
+! !
+
+!TuiTreeNode methodsFor: 'tree operations'!
+addChild: aNode
+    aNode parent: self.
+    aNode level: level + 1.
+    children add: aNode
+!
+
+removeChild: aNode
+    children remove: aNode ifAbsent: [].
+    aNode parent: nil
+!
+
+hasChildren
+    ^children notEmpty
+!
+
+toggle
+    self hasChildren ifTrue: [
+        expanded := expanded not
+    ]
+!
+
+expand
+    expanded := true
+!
+
+collapse
+    expanded := false
+! !
+
+
+"============================================================"
+"TuiTreeView - Hierarchical tree widget (matches Zig TUI)"
+"============================================================"
+TuiWidget subclass: #TuiTreeView
+    instanceVariableNames: 'roots flatList selectedIndex scrollOffset onSelect onActivate'
+    classVariableNames: ''
+    poolDictionaries: ''
+    category: 'TUI-Widgets'!
+
+!TuiTreeView class methodsFor: 'instance creation'!
+new
+    ^super new initialize
+! !
+
+!TuiTreeView methodsFor: 'initialization'!
+initialize
+    super initialize.
+    roots := OrderedCollection new.
+    flatList := OrderedCollection new.
+    selectedIndex := nil.
+    scrollOffset := 0.
+    onSelect := nil.
+    onActivate := nil
+! !
+
+!TuiTreeView methodsFor: 'accessing'!
+roots
+    ^roots
+!
+
+flatList
+    ^flatList
+!
+
+selectedIndex
+    ^selectedIndex
+!
+
+scrollOffset
+    ^scrollOffset
+!
+
+scrollOffset: anInteger
+    scrollOffset := anInteger
+!
+
+onSelect: aBlock
+    onSelect := aBlock
+!
+
+onActivate: aBlock
+    onActivate := aBlock
+!
+
+getSelectedNode
+    selectedIndex ifNil: [^nil].
+    (selectedIndex > 0 and: [selectedIndex <= flatList size])
+        ifTrue: [^flatList at: selectedIndex].
+    ^nil
+! !
+
+!TuiTreeView methodsFor: 'tree operations'!
+clear
+    roots do: [:r | "Could deinit nodes here"].
+    roots := OrderedCollection new.
+    flatList := OrderedCollection new.
+    selectedIndex := nil.
+    scrollOffset := 0
+!
+
+addRoot: aNode
+    aNode level: 0.
+    roots add: aNode.
+    self rebuildFlatList
+!
+
+rebuildFlatList
+    flatList := OrderedCollection new.
+    roots do: [:root |
+        self addToFlatList: root
+    ]
+!
+
+addToFlatList: aNode
+    flatList add: aNode.
+    aNode expanded ifTrue: [
+        aNode children do: [:child |
+            self addToFlatList: child
+        ]
+    ]
+!
+
+findNode: aName
+    "Find a node by its text"
+    ^self findNode: aName in: roots
+!
+
+findNode: aName in: nodeList
+    nodeList do: [:node |
+        node text = aName ifTrue: [^node].
+        node children notEmpty ifTrue: [
+            | found |
+            found := self findNode: aName in: node children.
+            found ifNotNil: [^found]
+        ]
+    ].
+    ^nil
+! !
+
+!TuiTreeView methodsFor: 'selection'!
+selectIndex: index
+    (index > 0 and: [index <= flatList size]) ifTrue: [
+        selectedIndex := index.
+        self ensureVisible: index.
+        onSelect ifNotNil: [
+            onSelect value: (flatList at: index)
+        ]
+    ]
+!
+
+selectNode: aNode
+    1 to: flatList size do: [:i |
+        (flatList at: i) = aNode ifTrue: [
+            self selectIndex: i.
+            ^self
+        ]
+    ]
+!
+
+visibleCount
+    ^self contentRect height
+!
+
+ensureVisible: index
+    | visible |
+    visible := self visibleCount.
+    visible = 0 ifTrue: [^self].
+
+    index <= scrollOffset ifTrue: [
+        scrollOffset := (index - 1) max: 0
+    ].
+    index > (scrollOffset + visible) ifTrue: [
+        scrollOffset := index - visible
+    ]
+! !
+
+!TuiTreeView methodsFor: 'key handling'!
+handleKey: keyCode
+    flatList isEmpty ifTrue: [^false].
+
+    keyCode = AnsiTerminal keyUp ifTrue: [
+        selectedIndex ifNotNil: [:idx |
+            idx > 1 ifTrue: [self selectIndex: idx - 1]
+        ] ifNil: [self selectIndex: 1].
+        ^true
+    ].
+
+    keyCode = AnsiTerminal keyDown ifTrue: [
+        selectedIndex ifNotNil: [:idx |
+            idx < flatList size ifTrue: [self selectIndex: idx + 1]
+        ] ifNil: [self selectIndex: 1].
+        ^true
+    ].
+
+    keyCode = AnsiTerminal keyLeft ifTrue: [
+        self getSelectedNode ifNotNil: [:node |
+            (node expanded and: [node hasChildren]) ifTrue: [
+                node expanded: false.
+                self rebuildFlatList
+            ] ifFalse: [
+                node parent ifNotNil: [:p | self selectNode: p]
+            ]
+        ].
+        ^true
+    ].
+
+    keyCode = AnsiTerminal keyRight ifTrue: [
+        self getSelectedNode ifNotNil: [:node |
+            node hasChildren ifTrue: [
+                node expanded ifFalse: [
+                    node expanded: true.
+                    self rebuildFlatList
+                ] ifTrue: [
+                    node children notEmpty ifTrue: [
+                        self selectNode: (node children first)
+                    ]
+                ]
+            ]
+        ].
+        ^true
+    ].
+
+    keyCode = AnsiTerminal keyEnter ifTrue: [
+        self getSelectedNode ifNotNil: [:node |
+            node hasChildren ifTrue: [
+                node toggle.
+                self rebuildFlatList
+            ] ifFalse: [
+                onActivate ifNotNil: [onActivate value: node]
+            ]
+        ].
+        ^true
+    ].
+
+    keyCode = AnsiTerminal keyHome ifTrue: [
+        self selectIndex: 1.
+        ^true
+    ].
+
+    keyCode = AnsiTerminal keyEnd ifTrue: [
+        flatList notEmpty ifTrue: [
+            self selectIndex: flatList size
+        ].
+        ^true
+    ].
+
+    keyCode = AnsiTerminal keyPageUp ifTrue: [
+        | visible |
+        visible := self visibleCount.
+        selectedIndex ifNotNil: [:idx |
+            idx > visible
+                ifTrue: [self selectIndex: idx - visible]
+                ifFalse: [self selectIndex: 1]
+        ].
+        ^true
+    ].
+
+    keyCode = AnsiTerminal keyPageDown ifTrue: [
+        | visible |
+        visible := self visibleCount.
+        selectedIndex ifNotNil: [:idx |
+            | newIdx |
+            newIdx := idx + visible.
+            newIdx < flatList size
+                ifTrue: [self selectIndex: newIdx]
+                ifFalse: [flatList notEmpty ifTrue: [self selectIndex: flatList size]]
+        ].
+        ^true
+    ].
+
+    ^false
+! !
+
+!TuiTreeView methodsFor: 'drawing'!
+drawSelf: screen
+    | content row |
+    self drawBorderRounded: screen.
+
+    content := self contentRect.
+    self clearContent: screen.
+
+    "Draw nodes"
+    row := 0.
+    [row < content height] whileTrue: [
+        | nodeIdx |
+        nodeIdx := scrollOffset + row + 1.
+        nodeIdx > flatList size ifTrue: [^self].
+
+        self drawNode: (flatList at: nodeIdx) at: row on: screen content: content.
+        row := row + 1
+    ].
+
+    "Draw scrollbar if needed"
+    flatList size > content height ifTrue: [
+        screen drawScrollbar: content
+               total: flatList size
+               visible: content height
+               offset: scrollOffset
+    ]
+!
+
+drawNode: node at: row on: screen content: content
+    | isSelected itemStyle indent col indicator maxWidth |
+    isSelected := selectedIndex notNil and: [selectedIndex = (scrollOffset + row + 1)].
+    itemStyle := isSelected
+        ifTrue: [TuiStyle selected]
+        ifFalse: [TuiStyle normal].
+
+    "Fill background for selected item"
+    isSelected ifTrue: [
+        screen fillRect: (TuiRect x: content x y: content y + row width: content width height: 1)
+               char: $  style: itemStyle
+    ].
+
+    "Calculate indent"
+    indent := node level * 2.
+    col := content x + indent.
+
+    "Draw expand/collapse indicator"
+    node hasChildren ifTrue: [
+        indicator := node expanded
+            ifTrue: [BoxChars treeExpanded]
+            ifFalse: [BoxChars treeCollapsed].
+        screen drawText: indicator at: col y: content y + row style: itemStyle.
+        col := col + 2
+    ] ifFalse: [
+        col := col + 2
+    ].
+
+    "Draw node text"
+    maxWidth := content x + content width - col.
+    maxWidth > 0 ifTrue: [
+        screen drawTextClipped: node text at: col y: content y + row maxWidth: maxWidth style: itemStyle
     ]
 ! !

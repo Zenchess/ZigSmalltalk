@@ -593,6 +593,14 @@ treeCollapsed ^(String with: (Character value: 16r25B6))!
 treeExpanded ^(String with: (Character value: 16r25BC))!
 ! !
 
+!BoxChars class methodsFor: 'unicode T-junctions'!
+teeDownU ^(String with: (Character value: 16r252C))!
+teeUpU ^(String with: (Character value: 16r2534))!
+teeRightU ^(String with: (Character value: 16r251C))!
+teeLeftU ^(String with: (Character value: 16r2524))!
+crossU ^(String with: (Character value: 16r253C))!
+! !
+
 !BoxChars class methodsFor: 'icons'!
 checkMark ^(String with: (Character value: 16r2713))!
 crossMark ^(String with: (Character value: 16r2717))!
@@ -601,4 +609,289 @@ arrowLeft ^(String with: (Character value: 16r2190))!
 arrowUp ^(String with: (Character value: 16r2191))!
 arrowDown ^(String with: (Character value: 16r2193))!
 bullet ^(String with: (Character value: 16r2022))!
+circleEmpty ^(String with: (Character value: 16r25CB))!
+circleFilled ^(String with: (Character value: 16r25CF))!
+squareEmpty ^(String with: (Character value: 16r25A1))!
+squareFilled ^(String with: (Character value: 16r25A0))!
+folder ^(String with: (Character value: 16r1F4C1))!
+file ^(String with: (Character value: 16r1F4C4))!
+gear ^(String with: (Character value: 16r2699))!
+warning ^(String with: (Character value: 16r26A0))!
+info ^(String with: (Character value: 16r2139))!
+question ^$?!
+! !
+
+
+"============================================================"
+"SmalltalkHighlighter - Token-based syntax highlighting (matches Zig TUI)"
+"============================================================"
+Object subclass: #SmalltalkHighlighter
+    instanceVariableNames: ''
+    classVariableNames: ''
+    poolDictionaries: ''
+    category: 'TUI-Core'!
+
+!SmalltalkHighlighter class methodsFor: 'highlighting'!
+highlightLine: lineString inComment: inComment inString: inString
+    "Highlight a line of Smalltalk code. Returns array of token types.
+     Token types: #normal #comment #string #symbol #character #number
+                  #keyword #self #blockParam #className #operator #bracket"
+    | tokens i len ch stillInComment stillInString |
+    len := lineString size.
+    tokens := Array new: len withAll: #normal.
+    i := 1.
+    stillInComment := inComment.
+    stillInString := inString.
+
+    "Continue from previous line state"
+    stillInComment ifTrue: [
+        [i <= len] whileTrue: [
+            tokens at: i put: #comment.
+            (lineString at: i) = $" ifTrue: [
+                stillInComment := false.
+                i := i + 1.
+                i <= len ifFalse: [^Array with: tokens with: stillInComment with: stillInString]
+            ] ifFalse: [
+                i := i + 1
+            ]
+        ].
+        ^Array with: tokens with: stillInComment with: stillInString
+    ].
+
+    stillInString ifTrue: [
+        [i <= len] whileTrue: [
+            tokens at: i put: #string.
+            (lineString at: i) = $' ifTrue: [
+                "Check for escaped quote ''"
+                (i + 1 <= len and: [(lineString at: i + 1) = $']) ifTrue: [
+                    tokens at: i + 1 put: #string.
+                    i := i + 2
+                ] ifFalse: [
+                    stillInString := false.
+                    i := i + 1.
+                    i <= len ifFalse: [^Array with: tokens with: stillInComment with: stillInString]
+                ]
+            ] ifFalse: [
+                i := i + 1
+            ]
+        ].
+        ^Array with: tokens with: stillInComment with: stillInString
+    ].
+
+    [i <= len] whileTrue: [
+        ch := lineString at: i.
+
+        "Comment: \"...\""
+        ch = $" ifTrue: [
+            | start |
+            start := i.
+            tokens at: i put: #comment.
+            i := i + 1.
+            stillInComment := true.
+            [i <= len] whileTrue: [
+                tokens at: i put: #comment.
+                (lineString at: i) = $" ifTrue: [
+                    stillInComment := false.
+                    i := i + 1.
+                    i <= len ifFalse: [^Array with: tokens with: stillInComment with: stillInString]
+                ] ifFalse: [
+                    i := i + 1
+                ]
+            ].
+            ^Array with: tokens with: stillInComment with: stillInString
+        ].
+
+        "String: '...'"
+        ch = $' ifTrue: [
+            tokens at: i put: #string.
+            i := i + 1.
+            stillInString := true.
+            [i <= len] whileTrue: [
+                tokens at: i put: #string.
+                (lineString at: i) = $' ifTrue: [
+                    "Check for escaped quote ''"
+                    (i + 1 <= len and: [(lineString at: i + 1) = $']) ifTrue: [
+                        tokens at: i + 1 put: #string.
+                        i := i + 2
+                    ] ifFalse: [
+                        stillInString := false.
+                        i := i + 1.
+                        i <= len ifFalse: [^Array with: tokens with: stillInComment with: stillInString]
+                    ]
+                ] ifFalse: [
+                    i := i + 1
+                ]
+            ].
+            ^Array with: tokens with: stillInComment with: stillInString
+        ].
+
+        "Symbol: #word or #'string'"
+        ch = $# ifTrue: [
+            tokens at: i put: #symbol.
+            i := i + 1.
+            i <= len ifTrue: [
+                (lineString at: i) = $' ifTrue: [
+                    "Symbol string: #'...'"
+                    tokens at: i put: #symbol.
+                    i := i + 1.
+                    [i <= len and: [(lineString at: i) ~= $']] whileTrue: [
+                        tokens at: i put: #symbol.
+                        i := i + 1
+                    ].
+                    i <= len ifTrue: [
+                        tokens at: i put: #symbol.
+                        i := i + 1
+                    ]
+                ] ifFalse: [
+                    (lineString at: i) = $( ifTrue: [
+                        "Literal array: #(...)"
+                        tokens at: i put: #symbol.
+                        i := i + 1
+                    ] ifFalse: [
+                        (self isIdentStart: (lineString at: i)) ifTrue: [
+                            "Symbol identifier"
+                            [i <= len and: [self isIdentChar: (lineString at: i)]] whileTrue: [
+                                tokens at: i put: #symbol.
+                                i := i + 1
+                            ].
+                            "Allow colons in symbols"
+                            [i <= len and: [(lineString at: i) = $:]] whileTrue: [
+                                tokens at: i put: #symbol.
+                                i := i + 1.
+                                [i <= len and: [self isIdentChar: (lineString at: i)]] whileTrue: [
+                                    tokens at: i put: #symbol.
+                                    i := i + 1
+                                ]
+                            ]
+                        ]
+                    ]
+                ]
+            ]
+        ].
+
+        "Character literal: $a"
+        (ch = $$ and: [i + 1 <= len]) ifTrue: [
+            tokens at: i put: #character.
+            tokens at: i + 1 put: #character.
+            i := i + 2
+        ].
+
+        "Block parameter: :param (but not :=)"
+        (ch = $: and: [i + 1 <= len and: [(lineString at: i + 1) ~= $= and: [self isIdentStart: (lineString at: i + 1)]]]) ifTrue: [
+            tokens at: i put: #blockParam.
+            i := i + 1.
+            [i <= len and: [self isIdentChar: (lineString at: i)]] whileTrue: [
+                tokens at: i put: #blockParam.
+                i := i + 1
+            ]
+        ].
+
+        "Assignment: :="
+        (ch = $: and: [i + 1 <= len and: [(lineString at: i + 1) = $=]]) ifTrue: [
+            tokens at: i put: #operator.
+            tokens at: i + 1 put: #operator.
+            i := i + 2
+        ].
+
+        "Return: ^"
+        ch = $^ ifTrue: [
+            tokens at: i put: #operator.
+            i := i + 1
+        ].
+
+        "Brackets"
+        ('[](){}' includes: ch) ifTrue: [
+            tokens at: i put: #bracket.
+            i := i + 1
+        ].
+
+        "Cascade: ;"
+        ch = $; ifTrue: [
+            tokens at: i put: #operator.
+            i := i + 1
+        ].
+
+        "Period: ."
+        ch = $. ifTrue: [
+            tokens at: i put: #normal.
+            i := i + 1
+        ].
+
+        "Number"
+        (ch isDigit or: [ch = $- and: [i + 1 <= len and: [(lineString at: i + 1) isDigit]]]) ifTrue: [
+            [i <= len and: [
+                | c |
+                c := lineString at: i.
+                c isDigit or: [c = $. or: [c = $e or: [c = $E or: [c = $- or: [c = $+ or: [c = $r]]]]]]
+            ]] whileTrue: [
+                "Avoid treating method call . as part of number"
+                ((lineString at: i) = $. and: [i + 1 <= len and: [(lineString at: i + 1) isDigit not]]) ifTrue: [
+                    ^Array with: tokens with: stillInComment with: stillInString
+                ].
+                tokens at: i put: #number.
+                i := i + 1
+            ]
+        ].
+
+        "Identifier or keyword"
+        (self isIdentStart: ch) ifTrue: [
+            | start ident tokenType |
+            start := i.
+            [i <= len and: [self isIdentChar: (lineString at: i)]] whileTrue: [
+                i := i + 1
+            ].
+            ident := lineString copyFrom: start to: i - 1.
+            tokenType := self tokenTypeForIdent: ident.
+            start to: i - 1 do: [:j | tokens at: j put: tokenType]
+        ].
+
+        "Binary operators"
+        (self isBinaryChar: ch) ifTrue: [
+            [i <= len and: [self isBinaryChar: (lineString at: i)]] whileTrue: [
+                tokens at: i put: #operator.
+                i := i + 1
+            ]
+        ].
+
+        "Skip whitespace and other"
+        i := i + 1
+    ].
+
+    ^Array with: tokens with: stillInComment with: stillInString
+!
+
+isIdentStart: ch
+    ^(ch >= $a and: [ch <= $z]) or: [(ch >= $A and: [ch <= $Z]) or: [ch = $_]]
+!
+
+isIdentChar: ch
+    ^(self isIdentStart: ch) or: [ch isDigit]
+!
+
+isBinaryChar: ch
+    ^'+-*/\~<>=@%|&?!' includes: ch
+!
+
+tokenTypeForIdent: ident
+    "Determine token type for identifier"
+    (ident = 'self' or: [ident = 'super']) ifTrue: [^#self].
+    (ident = 'true' or: [ident = 'false' or: [ident = 'nil' or: [ident = 'thisContext']]]) ifTrue: [^#keyword].
+    (ident size > 0 and: [(ident first) isUppercase]) ifTrue: [^#className].
+    ^#normal
+!
+
+styleForToken: tokenType
+    "Return TuiStyle for token type (matches Zig TUI syntax colors)"
+    tokenType = #comment ifTrue: [^(TuiStyle new foreground: Theme syntaxComment) italic: true].
+    tokenType = #string ifTrue: [^TuiStyle new foreground: Theme syntaxString].
+    tokenType = #symbol ifTrue: [^TuiStyle new foreground: Theme syntaxSymbol].
+    tokenType = #character ifTrue: [^TuiStyle new foreground: Theme syntaxString].
+    tokenType = #number ifTrue: [^TuiStyle new foreground: Theme syntaxNumber].
+    tokenType = #keyword ifTrue: [^(TuiStyle new foreground: Theme syntaxKeyword) bold: true].
+    tokenType = #self ifTrue: [^(TuiStyle new foreground: Theme syntaxSelf) bold: true].
+    tokenType = #blockParam ifTrue: [^TuiStyle new foreground: Theme syntaxBlock].
+    tokenType = #className ifTrue: [^TuiStyle new foreground: Theme syntaxClassName].
+    tokenType = #operator ifTrue: [^TuiStyle new foreground: Theme syntaxOperator].
+    tokenType = #bracket ifTrue: [^TuiStyle new foreground: Theme syntaxBlock].
+    ^TuiStyle normal
 ! !

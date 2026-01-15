@@ -167,7 +167,7 @@ drawSelf: screen
 !
 
 drawBorder: screen
-    "Draw border if enabled"
+    "Draw border if enabled (uses ASCII characters)"
     | style |
     hasBorder ifFalse: [^self].
     style := focused ifTrue: [TuiStyle borderFocused] ifFalse: [TuiStyle border].
@@ -175,6 +175,24 @@ drawBorder: screen
     title ifNotNil: [
         screen drawTitle: title at: rect focused: focused
     ]
+!
+
+drawBorderRounded: screen
+    "Draw border with Unicode rounded corners - matches Zig TUI"
+    | style |
+    hasBorder ifFalse: [^self].
+    style := focused ifTrue: [TuiStyle borderFocused] ifFalse: [TuiStyle border].
+    screen drawBoxRounded: rect style: style.
+    title ifNotNil: [
+        screen drawTitle: title at: rect focused: focused
+    ]
+!
+
+clearContent: screen
+    "Clear the content area with normal style"
+    | content |
+    content := self contentRect.
+    screen fillRect: content char: $  style: TuiStyle normal
 !
 
 needsRedraw

@@ -341,7 +341,7 @@ drawVLine: length at: x y: y char: ch style: style
 !
 
 drawBox: rect style: style
-    "Draw box border"
+    "Draw box border with ASCII characters"
     rect width < 2 ifTrue: [^self].
     rect height < 2 ifTrue: [^self].
 
@@ -364,6 +364,72 @@ drawBox: rect style: style
     ]
 !
 
+drawBoxRounded: rect style: style
+    "Draw box border with Unicode rounded corners - matches Zig TUI"
+    | hChar vChar tlChar trChar blChar brChar |
+    rect width < 2 ifTrue: [^self].
+    rect height < 2 ifTrue: [^self].
+
+    "Use Unicode box drawing characters"
+    hChar := (BoxChars horizontalU) first.
+    vChar := (BoxChars verticalU) first.
+    tlChar := (BoxChars roundTopLeft) first.
+    trChar := (BoxChars roundTopRight) first.
+    blChar := (BoxChars roundBottomLeft) first.
+    brChar := (BoxChars roundBottomRight) first.
+
+    "Corners"
+    self setChar: tlChar at: rect x y: rect y style: style.
+    self setChar: trChar at: rect right y: rect y style: style.
+    self setChar: blChar at: rect x y: rect bottom style: style.
+    self setChar: brChar at: rect right y: rect bottom style: style.
+
+    "Top and bottom"
+    (rect x + 1) to: (rect right - 1) do: [:col |
+        self setChar: hChar at: col y: rect y style: style.
+        self setChar: hChar at: col y: rect bottom style: style
+    ].
+
+    "Left and right"
+    (rect y + 1) to: (rect bottom - 1) do: [:row |
+        self setChar: vChar at: rect x y: row style: style.
+        self setChar: vChar at: rect right y: row style: style
+    ]
+!
+
+drawBoxUnicode: rect style: style
+    "Draw box border with Unicode single-line characters"
+    | hChar vChar tlChar trChar blChar brChar |
+    rect width < 2 ifTrue: [^self].
+    rect height < 2 ifTrue: [^self].
+
+    "Use Unicode box drawing characters"
+    hChar := (BoxChars horizontalU) first.
+    vChar := (BoxChars verticalU) first.
+    tlChar := (BoxChars topLeftU) first.
+    trChar := (BoxChars topRightU) first.
+    blChar := (BoxChars bottomLeftU) first.
+    brChar := (BoxChars bottomRightU) first.
+
+    "Corners"
+    self setChar: tlChar at: rect x y: rect y style: style.
+    self setChar: trChar at: rect right y: rect y style: style.
+    self setChar: blChar at: rect x y: rect bottom style: style.
+    self setChar: brChar at: rect right y: rect bottom style: style.
+
+    "Top and bottom"
+    (rect x + 1) to: (rect right - 1) do: [:col |
+        self setChar: hChar at: col y: rect y style: style.
+        self setChar: hChar at: col y: rect bottom style: style
+    ].
+
+    "Left and right"
+    (rect y + 1) to: (rect bottom - 1) do: [:row |
+        self setChar: vChar at: rect x y: row style: style.
+        self setChar: vChar at: rect right y: row style: style
+    ]
+!
+
 drawTitle: title at: rect focused: isFocused
     "Draw title in top border"
     | style x |
@@ -373,6 +439,45 @@ drawTitle: title at: rect focused: isFocused
         self drawText: ' ' at: x y: rect y style: style.
         self drawText: title at: x + 1 y: rect y style: style.
         self drawText: ' ' at: x + 1 + title size y: rect y style: style
+    ]
+!
+
+drawScrollbar: contentRect total: totalItems visible: visibleItems offset: scrollOffset
+    "Draw vertical scrollbar matching Zig TUI style"
+    | scrollbarX thumbSize thumbPos trackStyle thumbStyle thumbChar trackChar row |
+    totalItems <= visibleItems ifTrue: [^self].
+    contentRect height = 0 ifTrue: [^self].
+
+    scrollbarX := contentRect x + contentRect width - 1.
+
+    "Calculate thumb size - at least 1"
+    thumbSize := ((visibleItems * visibleItems) / totalItems) max: 1.
+    thumbSize := thumbSize min: visibleItems.
+
+    "Calculate thumb position"
+    thumbPos := 0.
+    (totalItems - visibleItems) > 0 ifTrue: [
+        | trackRange |
+        trackRange := contentRect height - thumbSize.
+        trackRange > 0 ifTrue: [
+            thumbPos := (scrollOffset * trackRange / (totalItems - visibleItems)) min: trackRange
+        ]
+    ].
+
+    "Draw scrollbar"
+    trackStyle := TuiStyle dim.
+    thumbStyle := TuiStyle dim.
+    thumbChar := (BoxChars blockFull) first.
+    trackChar := (BoxChars blockLight) first.
+
+    row := 0.
+    [row < contentRect height] whileTrue: [
+        | char |
+        char := (row >= thumbPos and: [row < (thumbPos + thumbSize)])
+            ifTrue: [thumbChar]
+            ifFalse: [trackChar].
+        self setChar: char at: scrollbarX y: contentRect y + row style: trackStyle.
+        row := row + 1
     ]
 ! !
 

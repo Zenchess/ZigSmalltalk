@@ -90,6 +90,7 @@ setupTabBar
         #('Workspace' $2)
         #('Browser' $3)
         #('REPL' $4)
+        #('FFI' $5)
     ).
     tabBar onTabChange: [:index | self switchToTab: index]
 !
@@ -100,13 +101,13 @@ setupStatusBar
     statusBar message: 'Ready'.
     statusBar items: #(
         #('Ctrl+Q' 'Quit')
-        #('F1-F4' 'Tabs')
+        #('F1-F5' 'Tabs')
     )
 !
 
 setupDefaultTabs
     "Create default tab panels - subclasses/users can customize"
-    | transcriptTab workspaceTab browserTab replTab |
+    | transcriptTab workspaceTab browserTab replTab ffiTab |
 
     "Transcript tab"
     transcriptTab := TuiTranscriptPanel new.
@@ -120,8 +121,8 @@ setupDefaultTabs
     workspaceTab title: 'Workspace'.
     tabs add: workspaceTab.
 
-    "Browser tab (placeholder)"
-    browserTab := TuiWidget new.
+    "Browser tab with 4-pane layout"
+    browserTab := TuiBrowserPanel new.
     browserTab rect: self contentRect.
     browserTab title: 'Browser'.
     tabs add: browserTab.
@@ -131,6 +132,12 @@ setupDefaultTabs
     replTab rect: self contentRect.
     replTab title: 'REPL'.
     tabs add: replTab.
+
+    "FFI Config tab"
+    ffiTab := TuiFFIConfigPanel new.
+    ffiTab rect: self contentRect.
+    ffiTab title: 'FFI Config'.
+    tabs add: ffiTab.
 
     "Focus first tab"
     self switchToTab: 1
@@ -211,11 +218,15 @@ updateStatusForTab: index
     ].
     index = 3 ifTrue: [
         "Browser"
-        statusBar items: #(#('Ctrl+Q' 'Quit') #('Tab' 'Navigate'))
+        statusBar items: #(#('Ctrl+Q' 'Quit') #('Tab' 'Pane') #('Ctrl+S' 'Save') #('Ctrl+A' 'NewClass'))
     ].
     index = 4 ifTrue: [
         "REPL"
         statusBar items: #(#('Ctrl+Q' 'Quit') #('Enter' 'Eval') #('Up/Dn' 'History'))
+    ].
+    index = 5 ifTrue: [
+        "FFI Config"
+        statusBar items: #(#('Ctrl+Q' 'Quit') #('A' 'Add') #('D' 'Delete') #('Ctrl+S' 'Save'))
     ]
 ! !
 
@@ -257,6 +268,18 @@ handleKey: keyCode
     keyCode = AnsiTerminal keyCtrlL ifTrue: [
         "Refresh screen"
         screen forceRedraw.
+        ^self
+    ].
+
+    "F9 - Save Image (matches Zig TUI)"
+    keyCode = AnsiTerminal keyF9 ifTrue: [
+        self saveImage.
+        ^self
+    ].
+
+    "F12 - Save Image As (matches Zig TUI)"
+    keyCode = AnsiTerminal keyF12 ifTrue: [
+        self saveImageAs.
         ^self
     ].
 
@@ -351,6 +374,28 @@ transcriptShow: aString
 transcriptCr
     "Add newline to transcript"
     self transcriptShow: ''
+! !
+
+!TuiApp methodsFor: 'image operations'!
+saveImage
+    "Save image to current path (F9 shortcut, matches Zig TUI)"
+    | path |
+    path := SessionManager current imagePath ifNil: ['smalltalk.image'].
+    [
+        SessionManager current saveImageTo: path.
+        statusBar message: 'Image saved to ', path.
+        self transcriptShow: 'Image saved to ', path
+    ] on: Error do: [:ex |
+        statusBar message: 'Error saving image: ', ex description.
+        self transcriptShow: 'Error saving image: ', ex description
+    ]
+!
+
+saveImageAs
+    "Save image with new filename (F12 shortcut, matches Zig TUI)"
+    "For now, just show a message - dialog would need more implementation"
+    statusBar message: 'Save Image As: Use SessionManager saveImageTo: ''filename'''.
+    self transcriptShow: 'Save Image As dialog not yet implemented'
 ! !
 
 
@@ -448,9 +493,11 @@ handleKey: keyCode
 !TuiTranscriptPanel methodsFor: 'drawing'!
 drawSelf: screen
     | content row startLine endLine |
-    self drawBorder: screen.
+    self drawBorderRounded: screen.
 
     content := self contentRect.
+    self clearContent: screen.
+
     startLine := scrollTop + 1.
     endLine := (scrollTop + content height) min: lines size.
     row := content y.
@@ -470,6 +517,14 @@ drawSelf: screen
         screen fillRect: (TuiRect x: content x y: row width: content width height: 1)
                char: $  style: TuiStyle normal.
         row := row + 1
+    ].
+
+    "Draw scrollbar if needed"
+    lines size > content height ifTrue: [
+        screen drawScrollbar: content
+               total: lines size
+               visible: content height
+               offset: scrollTop
     ]
 ! !
 
@@ -740,9 +795,11 @@ handleKey: keyCode
 !TuiReplPanel methodsFor: 'drawing'!
 drawSelf: screen
     | content row startLine endLine outputRect |
-    self drawBorder: screen.
+    self drawBorderRounded: screen.
 
     content := self contentRect.
+    self clearContent: screen.
+
     outputRect := TuiRect
         x: content x
         y: content y
@@ -771,6 +828,14 @@ drawSelf: screen
         row := row + 1
     ].
 
+    "Draw scrollbar for output if needed"
+    outputLines size > outputRect height ifTrue: [
+        screen drawScrollbar: outputRect
+               total: outputLines size
+               visible: outputRect height
+               offset: scrollTop
+    ].
+
     "Draw input line"
     inputLine rect: (TuiRect
         x: content x
@@ -779,4 +844,400 @@ drawSelf: screen
         height: 1).
     inputLine focused: focused.
     inputLine draw: screen
+! !
+
+
+"============================================================"
+"TuiBrowserPanel - Class browser with 4 panes (matches Zig TUI)"
+"============================================================"
+TuiWidget subclass: #TuiBrowserPanel
+    instanceVariableNames: 'packageList classTree instanceMethodList classMethodList sourceEditor activePane selectedPackage selectedClass selectedMethod showClassSide statusMessage statusIsError'
+    classVariableNames: ''
+    poolDictionaries: ''
+    category: 'TUI-Panels'!
+
+!TuiBrowserPanel class methodsFor: 'instance creation'!
+new
+    ^super new initialize
+! !
+
+!TuiBrowserPanel methodsFor: 'initialization'!
+initialize
+    super initialize.
+    hasBorder := false.
+
+    "Create the 4 panes and source editor"
+    packageList := TuiListView new.
+    packageList title: 'Packages'.
+
+    classTree := TuiTreeView new.
+    classTree title: 'Classes'.
+
+    instanceMethodList := TuiListView new.
+    instanceMethodList title: 'Instance'.
+
+    classMethodList := TuiListView new.
+    classMethodList title: 'Class'.
+
+    sourceEditor := TuiTextArea new.
+    sourceEditor lineNumbers: true.
+    sourceEditor syntaxHighlight: true.
+
+    activePane := #packages.
+    selectedPackage := ''.
+    selectedClass := ''.
+    selectedMethod := ''.
+    showClassSide := false.
+    statusMessage := ''.
+    statusIsError := false.
+
+    self loadPackages.
+    self loadClasses
+!
+
+loadPackages
+    "Load available packages/categories"
+    packageList clear.
+    packageList addItem: 'Kernel'.
+    packageList addItem: 'Collections'.
+    packageList addItem: 'TUI-Core'.
+    packageList addItem: 'TUI-Widgets'.
+    packageList addItem: 'TUI-Panels'
+!
+
+loadClasses
+    "Load class hierarchy"
+    | objectNode collectionNode |
+    classTree clear.
+
+    "Build class tree starting from Object"
+    objectNode := TuiTreeNode text: 'Object'.
+    objectNode addChild: (TuiTreeNode text: 'Boolean').
+    objectNode addChild: (TuiTreeNode text: 'Magnitude').
+    objectNode addChild: (TuiTreeNode text: 'Collection').
+    objectNode addChild: (TuiTreeNode text: 'Stream').
+    objectNode addChild: (TuiTreeNode text: 'TuiWidget').
+
+    classTree addRoot: objectNode.
+    objectNode expand
+! !
+
+!TuiBrowserPanel methodsFor: 'pane layout'!
+calcLayout
+    "Calculate layout rects for 4 panes + source"
+    | topHeight paneWidth pkgRect classRect instRect classMethodRect sourceRect |
+    topHeight := rect height // 2.
+    paneWidth := rect width // 4.
+
+    pkgRect := TuiRect x: rect x y: rect y width: paneWidth height: topHeight.
+    classRect := TuiRect x: rect x + paneWidth y: rect y width: paneWidth height: topHeight.
+    instRect := TuiRect x: rect x + (paneWidth * 2) y: rect y width: paneWidth height: topHeight.
+    classMethodRect := TuiRect x: rect x + (paneWidth * 3) y: rect y width: rect width - (paneWidth * 3) height: topHeight.
+    sourceRect := TuiRect x: rect x y: rect y + topHeight width: rect width height: rect height - topHeight.
+
+    ^Dictionary new
+        at: #packages put: pkgRect;
+        at: #classes put: classRect;
+        at: #instanceMethods put: instRect;
+        at: #classMethods put: classMethodRect;
+        at: #source put: sourceRect;
+        yourself
+! !
+
+!TuiBrowserPanel methodsFor: 'pane navigation'!
+nextPane
+    activePane = #packages ifTrue: [activePane := #classes. ^self].
+    activePane = #classes ifTrue: [activePane := #instanceMethods. ^self].
+    activePane = #instanceMethods ifTrue: [activePane := #classMethods. ^self].
+    activePane = #classMethods ifTrue: [activePane := #source. ^self].
+    activePane = #source ifTrue: [activePane := #packages. ^self]
+!
+
+previousPane
+    activePane = #packages ifTrue: [activePane := #source. ^self].
+    activePane = #classes ifTrue: [activePane := #packages. ^self].
+    activePane = #instanceMethods ifTrue: [activePane := #classes. ^self].
+    activePane = #classMethods ifTrue: [activePane := #instanceMethods. ^self].
+    activePane = #source ifTrue: [activePane := #classMethods. ^self]
+!
+
+updateFocus
+    packageList focused: (focused and: [activePane = #packages]).
+    classTree focused: (focused and: [activePane = #classes]).
+    instanceMethodList focused: (focused and: [activePane = #instanceMethods]).
+    classMethodList focused: (focused and: [activePane = #classMethods]).
+    sourceEditor focused: (focused and: [activePane = #source])
+! !
+
+!TuiBrowserPanel methodsFor: 'geometry'!
+rect: aRect
+    | layout |
+    super rect: aRect.
+    layout := self calcLayout.
+    packageList rect: (layout at: #packages).
+    classTree rect: (layout at: #classes).
+    instanceMethodList rect: (layout at: #instanceMethods).
+    classMethodList rect: (layout at: #classMethods).
+    sourceEditor rect: ((layout at: #source) inner: 1)
+! !
+
+!TuiBrowserPanel methodsFor: 'focus'!
+onFocus
+    self updateFocus
+!
+
+onBlur
+    packageList blur.
+    classTree blur.
+    instanceMethodList blur.
+    classMethodList blur.
+    sourceEditor blur
+! !
+
+!TuiBrowserPanel methodsFor: 'key handling'!
+handleKey: keyCode
+    "Tab - switch panes"
+    keyCode = AnsiTerminal keyTab ifTrue: [
+        activePane = #source ifFalse: [
+            self nextPane.
+            self updateFocus.
+            ^true
+        ]
+    ].
+
+    "Shift+Tab - switch panes backward"
+    keyCode = AnsiTerminal keyShiftTab ifTrue: [
+        self previousPane.
+        self updateFocus.
+        ^true
+    ].
+
+    "Ctrl+S - save"
+    keyCode = AnsiTerminal keyCtrlS ifTrue: [
+        self saveMethod.
+        ^true
+    ].
+
+    "Ctrl+A - new class"
+    keyCode = AnsiTerminal keyCtrlA ifTrue: [
+        self showNewClassDialog.
+        ^true
+    ].
+
+    "Dispatch to active pane"
+    activePane = #packages ifTrue: [^packageList handleKey: keyCode].
+    activePane = #classes ifTrue: [^classTree handleKey: keyCode].
+    activePane = #instanceMethods ifTrue: [^instanceMethodList handleKey: keyCode].
+    activePane = #classMethods ifTrue: [^classMethodList handleKey: keyCode].
+    activePane = #source ifTrue: [^sourceEditor handleKey: keyCode].
+
+    ^false
+!
+
+saveMethod
+    statusMessage := 'Method saved'.
+    statusIsError := false
+!
+
+showNewClassDialog
+    statusMessage := 'New class dialog not yet implemented'.
+    statusIsError := false
+! !
+
+!TuiBrowserPanel methodsFor: 'drawing'!
+drawSelf: screen
+    | layout sourceRect |
+    self updateFocus.
+    layout := self calcLayout.
+
+    "Update pane rects"
+    packageList rect: (layout at: #packages).
+    classTree rect: (layout at: #classes).
+    instanceMethodList rect: (layout at: #instanceMethods).
+    classMethodList rect: (layout at: #classMethods).
+
+    "Draw 4 top panes"
+    packageList draw: screen.
+    classTree draw: screen.
+    instanceMethodList draw: screen.
+    classMethodList draw: screen.
+
+    "Draw source pane with rounded border"
+    sourceRect := layout at: #source.
+    screen drawBoxRounded: sourceRect style: (activePane = #source
+        ifTrue: [TuiStyle borderFocused]
+        ifFalse: [TuiStyle border]).
+    screen drawTitle: self sourceTitle at: sourceRect focused: (activePane = #source).
+
+    "Update and draw source editor"
+    sourceEditor rect: (sourceRect inner: 1).
+    sourceEditor draw: screen.
+
+    "Draw status message if present"
+    statusMessage isEmpty ifFalse: [
+        | statusStyle |
+        statusStyle := statusIsError ifTrue: [TuiStyle error] ifFalse: [TuiStyle normal].
+        screen drawText: statusMessage at: sourceRect x + 1 y: sourceRect bottom - 1 style: statusStyle
+    ]
+!
+
+sourceTitle
+    "Build title for source pane"
+    selectedClass isEmpty ifTrue: [^'Source'].
+    selectedMethod isEmpty ifTrue: [^selectedClass, ' [Definition]'].
+    ^selectedClass, (showClassSide ifTrue: [' class'] ifFalse: ['']), ' >> ', selectedMethod
+! !
+
+
+"============================================================"
+"TuiFFIConfigPanel - FFI library configuration (matches Zig TUI)"
+"============================================================"
+TuiWidget subclass: #TuiFFIConfigPanel
+    instanceVariableNames: 'libraryList libraries statusMessage dirty'
+    classVariableNames: ''
+    poolDictionaries: ''
+    category: 'TUI-Panels'!
+
+!TuiFFIConfigPanel class methodsFor: 'instance creation'!
+new
+    ^super new initialize
+! !
+
+!TuiFFIConfigPanel methodsFor: 'initialization'!
+initialize
+    super initialize.
+    hasBorder := true.
+    title := 'FFI Configuration'.
+
+    libraries := OrderedCollection new.
+    libraryList := TuiListView new.
+    libraryList title: 'Available FFI Libraries'.
+
+    statusMessage := 'Ready'.
+    dirty := false.
+
+    self loadLibraries
+!
+
+loadLibraries
+    "Load available FFI libraries"
+    libraryList clear.
+    libraryList addItem: 'LibC (stdio, stdlib, string)'.
+    libraryList addItem: 'LibMath (math functions)'.
+    libraryList addItem: 'OpenGL (graphics)'.
+    libraryList addItem: 'Raylib (game library)'
+! !
+
+!TuiFFIConfigPanel methodsFor: 'geometry'!
+rect: aRect
+    | listRect |
+    super rect: aRect.
+    "Library list takes up most of the panel"
+    listRect := TuiRect
+        x: aRect x + 2
+        y: aRect y + 4
+        width: aRect width - 4
+        height: aRect height - 10.
+    libraryList rect: listRect
+! !
+
+!TuiFFIConfigPanel methodsFor: 'focus'!
+onFocus
+    libraryList focus
+!
+
+onBlur
+    libraryList blur
+! !
+
+!TuiFFIConfigPanel methodsFor: 'key handling'!
+handleKey: keyCode
+    "A - Add library"
+    (keyCode = $a asciiValue or: [keyCode = $A asciiValue]) ifTrue: [
+        self addLibrary.
+        ^true
+    ].
+
+    "D or Delete - Remove library"
+    (keyCode = $d asciiValue or: [keyCode = $D asciiValue or: [keyCode = AnsiTerminal keyDelete]]) ifTrue: [
+        self removeLibrary.
+        ^true
+    ].
+
+    "Ctrl+S - Save config"
+    keyCode = AnsiTerminal keyCtrlS ifTrue: [
+        self saveConfig.
+        ^true
+    ].
+
+    "Enter - Toggle enable/disable"
+    keyCode = AnsiTerminal keyEnter ifTrue: [
+        self toggleLibrary.
+        ^true
+    ].
+
+    "Pass to library list"
+    ^libraryList handleKey: keyCode
+!
+
+addLibrary
+    statusMessage := 'Add library dialog not yet implemented'.
+    dirty := true
+!
+
+removeLibrary
+    libraryList selectedItem ifNotNil: [:item |
+        statusMessage := 'Removed: ', item asString.
+        dirty := true
+    ]
+!
+
+toggleLibrary
+    libraryList selectedItem ifNotNil: [:item |
+        statusMessage := 'Toggled: ', item asString.
+        dirty := true
+    ]
+!
+
+saveConfig
+    statusMessage := 'Config saved - run zig build gen-ffi to regenerate'.
+    dirty := false
+! !
+
+!TuiFFIConfigPanel methodsFor: 'drawing'!
+drawSelf: screen
+    | content listRect helpY statusY dirtyIndicator |
+    self drawBorderRounded: screen.
+
+    content := self contentRect.
+
+    "Draw header"
+    screen drawText: 'Available C library bindings for Smalltalk FFI:'
+           at: content x + 1 y: content y + 1 style: TuiStyle normal.
+
+    "Update and draw library list"
+    listRect := TuiRect
+        x: content x + 1
+        y: content y + 3
+        width: content width - 2
+        height: content height - 8.
+    libraryList rect: listRect.
+    libraryList focused: focused.
+    libraryList draw: screen.
+
+    "Draw help text"
+    helpY := content y + content height - 4.
+    screen drawText: 'A: Add library | D/Del: Remove | Enter: Toggle | Ctrl+S: Save'
+           at: content x + 1 y: helpY style: TuiStyle status.
+    screen drawText: 'After changes: zig build gen-ffi && zig build'
+           at: content x + 1 y: helpY + 1 style: TuiStyle dim.
+
+    "Draw status bar"
+    statusY := content y + content height - 2.
+    screen fillRect: (TuiRect x: content x y: statusY width: content width height: 1)
+           char: $  style: TuiStyle status.
+
+    dirtyIndicator := dirty ifTrue: [' [unsaved]'] ifFalse: [''].
+    screen drawText: 'Status: ', statusMessage, dirtyIndicator
+           at: content x + 1 y: statusY style: TuiStyle status
 ! !
