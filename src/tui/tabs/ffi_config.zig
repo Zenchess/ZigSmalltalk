@@ -58,7 +58,9 @@ pub const FFIConfigTab = struct {
     };
 
     pub fn init(allocator: std.mem.Allocator, rect: Rect) !FFIConfigTab {
-        const list_rect = Rect.init(rect.x + 2, rect.y + 4, rect.width - 4, rect.height - 10);
+        const list_height = if (rect.height > 12) rect.height - 10 else 2;
+        const list_width = if (rect.width > 6) rect.width - 4 else 2;
+        const list_rect = Rect.init(rect.x + 2, rect.y + 4, list_width, list_height);
         var library_list = try ListView.init(allocator, list_rect);
         library_list.state.title = if (build_options.ffi_enabled) "Available FFI Libraries" else "FFI Disabled";
 

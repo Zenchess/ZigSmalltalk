@@ -12,7 +12,7 @@ echo ""
 # Load files in dependency order (filter empty lines and comments)
 # Exclude ANSI ExternalStructure.cls since we have our own
 FILES=$(grep -v '^$' load-order-tui.txt | grep -v '^#' | grep -v 'ExternalStructure.cls' | tr '\n' ' ')
-STUBS="dolphin-core/stubs/sunit-stubs.st src/image/exception-stubs.st"
+STUBS="dolphin-core/stubs/sunit-stubs.st src/image/exception-stubs.st ansi-tests/bootstrap-stubs.st"
 FFI_CLASSES="src/image/ffi.st"
 FFI="ffi-test.st"
 STRUCTS="external-structure.st"
@@ -25,7 +25,8 @@ TUI_FILES="src/image/tui/AnsiTerminal.st \
            src/image/tui/Widget.st \
            src/image/tui/TextArea.st \
            src/image/tui/UIWidgets.st \
-           src/image/tui/TuiApp.st"
+           src/image/tui/TuiApp.st \
+           src/image/tui/startup.st"
 
 # Load everything: ANSI files, FFI, structs, then TUI
 ./zig-out/bin/zig-smalltalk "$@" $FILES $STUBS $FFI_CLASSES $STRUCTS $FFI $FFI_STRUCTS $TUI_FILES

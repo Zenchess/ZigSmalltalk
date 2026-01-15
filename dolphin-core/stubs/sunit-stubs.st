@@ -8,6 +8,41 @@ doesNotUnderstand: aMessage
      cause infinite recursion if the exception handling itself triggers DNU."
     Transcript show: 'Message not understood: '; show: aMessage selector; cr.
     ^nil!
+
+primitiveFailed
+    "Called when a primitive operation fails. Stub version that returns nil."
+    Transcript show: 'Primitive failed in: '; show: self class name; cr.
+    ^nil!
+
+primitiveFailed: errorCode
+    "Called when a primitive operation fails with an error code."
+    Transcript show: 'Primitive failed with code: '; show: errorCode printString; cr.
+    ^nil!
+
+topFrame
+    "Stub - return nil for stack frame"
+    ^nil!
+
+sender
+    "Stub - return nil for sender frame"
+    ^nil!
+
+method
+    "Stub - return nil for method"
+    ^nil!
+
+selector
+    "Stub - return nil for selector"
+    ^nil!
+
+signal:
+    "Stub - do nothing"
+    ^nil!
+
+signal: signalerText
+    "Stub - signal with text"
+    Transcript show: 'Signal: '; show: signalerText; cr.
+    ^nil!
 !
 
 "FFI methods for String - must be loaded after ANSI String class"
@@ -98,6 +133,37 @@ isAbstract
 !Exception methodsFor!
 sunitExitWith: aValue
     ^aValue!
+
+topFrame
+    "Stub - return nil for stack frame"
+    ^nil!
+
+sender
+    "Stub - return nil for sender frame"
+    ^nil!
+
+method
+    "Stub - return nil for method"
+    ^nil!
+
+selector
+    "Stub - return nil for selector"
+    ^nil!
+
+signal:
+    "Stub - signal exception by returning self"
+    ^self!
+
+signal: signalerText withFailureCode: errorCode
+    "Stub - signal with text and code"
+    Transcript show: 'Exception signaled: '; show: signalerText; cr.
+    ^self!
+!
+
+!TestResult methodsFor!
+testsRun
+    "Answer the total number of tests run"
+    ^passed size + failures size + errors size + skipped size!
 !
 
 "Alias used by SUnit"
@@ -112,6 +178,19 @@ asSortedCollection
 asSortedCollection: aComparator
 	"Return a shallow copy; ignore comparator in this minimal stub."
 	^self asArray copy!
+!
+
+"Fix for copyFrom:to: when primitive 50 fails"
+!ArrayedCollection methodsFor!
+copyFrom: startInteger to: stopInteger
+	"Answer a new sequencedReadableCollection containing elements from startInteger to stopInteger.
+	 Reimplemented without primitive to work around primitive 50 issues."
+	| len newColl |
+	len := stopInteger - startInteger + 1.
+	len < 0 ifTrue: [^self species new: 0].
+	newColl := self species new: len.
+	newColl replaceFrom: 1 to: len with: self startingAt: startInteger.
+	^newColl!
 !
 
 !Behavior methodsFor!
@@ -281,12 +360,38 @@ ifNil: nilBlock ifNotNil: notNilBlock
 ifNotNil: notNilBlock ifNil: nilBlock
 	"Evaluate nilBlock"
 	^nilBlock value!
+
+printString
+	"Answer a string representation of nil"
+	^'nil'!
 !
 
-"Helper for vowel checking"
+"String concatenation operator"
+!String methodsFor!
+, aString
+	"Concatenate with another string"
+	| result newSize |
+	newSize := self size + aString size.
+	result := String new: newSize.
+	result replaceFrom: 1 to: self size with: self startingAt: 1.
+	result replaceFrom: self size + 1 to: newSize with: aString startingAt: 1.
+	^result!
+!
+
+"Helper for vowel checking - uses simple comparisons (includes: may not work)"
 !Character methodsFor!
 isVowel
-	^#($a $e $i $o $u $A $E $I $O $U) includes: self!
+	self = $a ifTrue: [^true].
+	self = $e ifTrue: [^true].
+	self = $i ifTrue: [^true].
+	self = $o ifTrue: [^true].
+	self = $u ifTrue: [^true].
+	self = $A ifTrue: [^true].
+	self = $E ifTrue: [^true].
+	self = $I ifTrue: [^true].
+	self = $O ifTrue: [^true].
+	self = $U ifTrue: [^true].
+	^false!
 
 = aCharacter
 	"Answer whether receiver equals the argument. Characters are immediate values so == works."
@@ -343,3 +448,74 @@ print: anObject
 
 "Initialize Transcript global only if not already set"!
 (Transcript isNil or: [Transcript class name = #DeafObject]) ifTrue: [Transcript := TranscriptStub new]!
+
+"Object >> respondsTo: - check if receiver understands a selector"
+!Object methodsFor!
+respondsTo: aSymbol
+	"Answer whether the receiver can respond to the selector aSymbol."
+	^self class canUnderstand: aSymbol!
+!
+
+"Behavior >> canUnderstand: - check if class understands a selector"
+!Behavior methodsFor!
+canUnderstand: aSymbol
+	"Answer whether instances of the receiver can respond to aSymbol.
+	 Search the method dictionary chain."
+	| cls |
+	cls := self.
+	[cls isNil] whileFalse: [
+		(cls includesSelector: aSymbol) ifTrue: [^true].
+		cls := cls superclass].
+	^false!
+
+includesSelector: aSymbol
+	"Answer whether the receiver's method dictionary contains aSymbol."
+	methodDictionary isNil ifTrue: [^false].
+	| idx size |
+	idx := 1.
+	size := methodDictionary size.
+	[idx <= size] whileTrue: [
+		(methodDictionary at: idx) == aSymbol ifTrue: [^true].
+		idx := idx + 2].
+	^false!
+!
+
+"String >> asLowercase / asUppercase using VM primitives"
+!String methodsFor!
+asLowercase
+	"Answer a new String with all characters converted to lowercase."
+	<primitive: 863>
+	"Fallback - do character-by-character conversion"
+	| result |
+	result := self class new: self size.
+	1 to: self size do: [:i |
+		result at: i put: (self at: i) asLowercase].
+	^result!
+
+asUppercase
+	"Answer a new String with all characters converted to uppercase."
+	<primitive: 862>
+	"Fallback - do character-by-character conversion"
+	| result |
+	result := self class new: self size.
+	1 to: self size do: [:i |
+		result at: i put: (self at: i) asUppercase].
+	^result!
+!
+
+"Character >> asLowercase / asUppercase for ASCII range"
+!Character methodsFor!
+asLowercase
+	"Answer the lowercase equivalent of the receiver."
+	| code |
+	code := self codePoint.
+	(code >= 65 and: [code <= 90]) ifTrue: [^Character codePoint: code + 32].
+	^self!
+
+asUppercase
+	"Answer the uppercase equivalent of the receiver."
+	| code |
+	code := self codePoint.
+	(code >= 97 and: [code <= 122]) ifTrue: [^Character codePoint: code - 32].
+	^self!
+!

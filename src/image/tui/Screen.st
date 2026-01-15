@@ -494,58 +494,31 @@ setCursorAt: aPoint
 
 !TuiScreen methodsFor: 'rendering'!
 flush
-    "Render changes to terminal"
-    | term currentStyle |
+    "Render screen directly (simplified - no double buffering)"
+    | term |
     term := AnsiTerminal current.
     term hideCursor.
-    currentStyle := nil.
 
+    "Just render all rows"
     1 to: height do: [:row |
-        | lineDirty |
-        lineDirty := false.
-
-        "Check if line has changes"
+        | line |
+        line := String new: width.
         1 to: width do: [:col |
-            | idx cell prev |
+            | idx cell |
             idx := self indexFor: col y: row.
-            cell := cells at: idx.
-            prev := prevCells at: idx.
-            (prev isNil or: [cell ~= prev]) ifTrue: [
-                lineDirty := true
+            idx notNil ifTrue: [
+                cell := cells at: idx.
+                line at: col put: cell char
+            ] ifFalse: [
+                line at: col put: $
             ]
         ].
-
-        lineDirty ifTrue: [
-            term moveTo: row col: 1.
-            1 to: width do: [:col |
-                | idx cell |
-                idx := self indexFor: col y: row.
-                cell := cells at: idx.
-
-                "Apply style if changed"
-                (currentStyle isNil or: [currentStyle ~= cell style]) ifTrue: [
-                    cell style apply.
-                    currentStyle := cell style
-                ].
-
-                "Write character"
-                term write: (String with: cell char).
-
-                "Update prev buffer"
-                prevCells at: idx put: cell copy
-            ]
-        ]
+        term moveTo: row col: 1.
+        term write: line
     ].
 
     term resetStyle.
-
-    "Position and show cursor if needed"
-    cursorVisible ifTrue: [
-        term moveTo: cursorY col: cursorX.
-        term showCursor
-    ] ifFalse: [
-        term hideCursor
-    ]
+    term hideCursor
 !
 
 flushFull

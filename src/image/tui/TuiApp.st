@@ -233,15 +233,19 @@ updateStatusForTab: index
 !TuiApp methodsFor: 'event loop'!
 run
     "Main event loop"
+    | loopCount |
     running := true.
+    loopCount := 0.
 
     [running] whileTrue: [
+        loopCount := loopCount + 1.
         self handleResize.
         self processEvents.
         self render.
         self sleep: 10
     ].
 
+    Transcript show: 'Run loop exited, loopCount: '; show: loopCount printString; cr.
     self shutdown
 !
 
@@ -316,9 +320,7 @@ handleResize
 !
 
 render
-    "Render all UI components"
-    screen clear.
-
+    "Render all UI components - only redraws, no full clear"
     "Draw tab bar"
     tabBar draw: screen.
 
@@ -335,9 +337,11 @@ render
 !
 
 sleep: milliseconds
-    "Sleep for given milliseconds"
-    "Use delay primitive if available, otherwise busy-wait"
-    Processor yield
+    "Sleep for given milliseconds - simple busy wait for now"
+    | count |
+    count := 0.
+    [count < 10000] whileTrue: [count := count + 1].
+    "Processor yield"
 ! !
 
 !TuiApp methodsFor: 'shutdown'!
@@ -513,10 +517,9 @@ drawSelf: screen
     ].
 
     "Clear remaining rows"
-    [row < (content y + content height)] whileTrue: [
-        screen fillRect: (TuiRect x: content x y: row width: content width height: 1)
-               char: $  style: TuiStyle normal.
-        row := row + 1
+    row to: (content y + content height - 1) do: [:r |
+        screen fillRect: (TuiRect x: content x y: r width: content width height: 1)
+               char: $  style: TuiStyle normal
     ].
 
     "Draw scrollbar if needed"
