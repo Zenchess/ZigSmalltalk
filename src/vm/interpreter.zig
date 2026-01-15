@@ -23,8 +23,8 @@ var debug_send_special_count: usize = 0;
 
 // Debug flag - set to false to disable verbose debug output
 const DEBUG_VERBOSE = false;
-const DEBUG_STACK = true;
-const DEBUG_STACK_TRACE = true; // Print last N method calls before overflow
+const DEBUG_STACK = false;
+const DEBUG_STACK_TRACE = false; // Print last N method calls before overflow
 
 pub const InterpreterError = error{
     StackOverflow,
@@ -1525,21 +1525,25 @@ pub const Interpreter = struct {
 
                     // Lazily create heap context for closure variable capture
                     // This allows captured variables to be shared across processes
+                    // Only create if there are temps/args to capture - avoid empty contexts
                     if (self.heap_context.isNil()) {
                         // Calculate number of temps to capture from current frame
                         const method_num_temps = self.method.header.num_temps;
                         const method_num_args = self.method.header.num_args;
                         const num_to_capture = method_num_args + method_num_temps;
 
-                        // Create heap context and copy temps from stack
-                        const heap_ctx = self.createHeapContext(num_to_capture) catch {
-                            return InterpreterError.OutOfMemory;
-                        };
-                        self.heap_context = Value.fromObject(heap_ctx);
+                        // Only create heap context if there's something to capture
+                        if (num_to_capture > 0) {
+                            // Create heap context and copy temps from stack
+                            const heap_ctx = self.createHeapContext(num_to_capture) catch {
+                                return InterpreterError.OutOfMemory;
+                            };
+                            self.heap_context = Value.fromObject(heap_ctx);
 
-                        // At method level, home_heap_context == heap_context
-                        if (self.home_heap_context.isNil()) {
-                            self.home_heap_context = self.heap_context;
+                            // At method level, home_heap_context == heap_context
+                            if (self.home_heap_context.isNil()) {
+                                self.home_heap_context = self.heap_context;
+                            }
                         }
                     }
 
@@ -4370,19 +4374,22 @@ pub const Interpreter = struct {
         self.ip += 4;
 
         // Lazily create heap context for closure
+        // Only create if there are temps/args to capture - avoid empty contexts
         if (self.heap_context.isNil()) {
             const method_num_temps = self.method.header.num_temps;
             const method_num_args = self.method.header.num_args;
             const num_to_capture = method_num_args + method_num_temps;
 
-            const heap_ctx = self.createHeapContext(num_to_capture) catch {
-                self.dispatch_error = InterpreterError.OutOfMemory;
-                return .return_error;
-            };
-            self.heap_context = Value.fromObject(heap_ctx);
+            if (num_to_capture > 0) {
+                const heap_ctx = self.createHeapContext(num_to_capture) catch {
+                    self.dispatch_error = InterpreterError.OutOfMemory;
+                    return .return_error;
+                };
+                self.heap_context = Value.fromObject(heap_ctx);
 
-            if (self.home_heap_context.isNil()) {
-                self.home_heap_context = self.heap_context;
+                if (self.home_heap_context.isNil()) {
+                    self.home_heap_context = self.heap_context;
+                }
             }
         }
 

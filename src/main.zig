@@ -774,6 +774,12 @@ fn printValue(file: std.fs.File, heap: *Heap, value: Value) !void {
             }
         } else if (class_index == Heap.CLASS_ARRAY) {
             _ = try file.write("#(...)");
+        } else if (class_index == Heap.CLASS_FLOAT) {
+            // Extract and print float value - stored as 8 bytes
+            const bytes_slice = obj.bytes(8);
+            const float_value: f64 = @bitCast(bytes_slice[0..8].*);
+            const s = std.fmt.bufPrint(&buf, "{d}", .{float_value}) catch "?";
+            _ = try file.write(s);
         } else {
             // Generic object print - try to get class name
             const class = heap.getClass(class_index);
