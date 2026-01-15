@@ -462,7 +462,12 @@ fn primSubtract(interp: *Interpreter) InterpreterError!Value {
 
     if (a.isSmallInt() and b.isSmallInt()) {
         const result = a.asSmallInt() -% b.asSmallInt();
-        return Value.fromSmallInt(@intCast(result));
+        // Check for overflow - SmallInteger fits in 61 bits
+        const max: i61 = std.math.maxInt(i61);
+        const min: i61 = std.math.minInt(i61);
+        if (result >= min and result <= max) {
+            return Value.fromSmallInt(@intCast(result));
+        }
     }
 
     try interp.push(a);
@@ -1008,12 +1013,15 @@ fn primBitShift(interp: *Interpreter) InterpreterError!Value {
                 return Value.fromSmallInt(@bitCast(shifted));
             }
         } else {
-            // Right shift
-            const neg_sv: u6 = @intCast(-sv);
-            if (neg_sv < 61) {
+            // Right shift - check bounds before casting to u6
+            // sv is negative, so -sv is positive. Ensure it fits in u6 (0-63)
+            if (sv > -61) {
+                const neg_sv: u6 = @intCast(-sv);
                 const shifted = av >> neg_sv;
                 return Value.fromSmallInt(shifted);
             }
+            // Shift by >= 61 positions returns 0 or -1 depending on sign
+            return Value.fromSmallInt(if (av < 0) -1 else 0);
         }
     }
 
@@ -1026,7 +1034,13 @@ fn primNegate(interp: *Interpreter) InterpreterError!Value {
     const a = try interp.pop();
 
     if (a.isSmallInt()) {
-        return Value.fromSmallInt(-a.asSmallInt());
+        const val = a.asSmallInt();
+        // Check for overflow: negating minInt overflows because |minInt| > maxInt
+        if (val == std.math.minInt(i61)) {
+            try interp.push(a);
+            return InterpreterError.PrimitiveFailed;
+        }
+        return Value.fromSmallInt(-val);
     }
 
     try interp.push(a);
@@ -1038,6 +1052,11 @@ fn primAbs(interp: *Interpreter) InterpreterError!Value {
 
     if (a.isSmallInt()) {
         const val = a.asSmallInt();
+        // Check for overflow: abs(minInt) overflows because |minInt| > maxInt
+        if (val == std.math.minInt(i61)) {
+            try interp.push(a);
+            return InterpreterError.PrimitiveFailed;
+        }
         return Value.fromSmallInt(if (val < 0) -val else val);
     }
 
@@ -5042,13 +5061,43 @@ fn primSemaphoreSignal(interp: *Interpreter) InterpreterError!Value {
         // No waiters - increment excess signals
         sem_obj.setField(SemaphoreFields.signals, Value.fromSmallInt(current_signals + 1), 3);
     } else {
-        // Wake up the first waiter
-        // For now, we just decrement signals and let the process continue
-        // Full implementation would need to remove from wait queue and add to ready queue
-        // This is a simplified version - the Smalltalk code handles most of the logic
-        if (current_signals > 0) {
-            sem_obj.setField(SemaphoreFields.signals, Value.fromSmallInt(current_signals - 1), 3);
+        // Wake up the first waiter by removing from wait list and adding to ready queue
+        // The first_link should be a Process object
+        if (first_link.isObject()) {
+            const waiter_obj = first_link.asObject();
+
+            // Get next waiter from the linked list (Process has link fields)
+            // Update semaphore's firstLink to next in list
+            const next_link = waiter_obj.getField(ProcessFields.nextLink, 6);
+            sem_obj.setField(SemaphoreFields.firstLink, next_link, 3);
+
+            // If no more waiters, clear lastLink too
+            if (next_link.isNil()) {
+                sem_obj.setField(SemaphoreFields.lastLink, Value.nil, 3);
+            }
+
+            // Clear the waiter's list pointer
+            waiter_obj.setField(ProcessFields.myList, Value.nil, 6);
+            waiter_obj.setField(ProcessFields.nextLink, Value.nil, 6);
+
+            // Resume the waiting process - find or create VM process and add to ready queue
+            var vm_process = interp.process_scheduler.findProcess(first_link);
+            if (vm_process == null) {
+                const priority_val = waiter_obj.getField(ProcessFields.priority, 6);
+                const priority: u8 = if (priority_val.isSmallInt())
+                    @intCast(@max(1, @min(10, priority_val.asSmallInt())))
+                else
+                    5;
+                vm_process = interp.process_scheduler.createProcess(first_link, priority) catch null;
+            }
+
+            if (vm_process) |proc| {
+                if (proc.state == .waiting or proc.state == .suspended) {
+                    interp.process_scheduler.makeReady(proc);
+                }
+            }
         }
+        // Don't change signals count - we "consumed" the signal by waking a waiter
     }
 
     return sem; // Answer the receiver
@@ -5110,12 +5159,51 @@ fn primSemaphoreWait(interp: *Interpreter) InterpreterError!Value {
             }
             return ret_holder;
         }
-        // For INFINITE (-1) or positive timeout, we would block
-        // For now, simplified: just return success after consuming signal (if any)
+
+        // For INFINITE (-1) or positive timeout, we need to block
+        // Add current process to semaphore's wait queue
+        const current_process = interp.process_scheduler.active_process;
+        if (current_process) |proc| {
+            // Add process to semaphore's wait list
+            // The semaphore has firstLink and lastLink for the wait queue
+            const last_link = sem_obj.getField(SemaphoreFields.lastLink, 3);
+
+            // Update process's list pointer
+            proc.object.asObject().setField(ProcessFields.myList, sem, 6);
+            proc.object.asObject().setField(ProcessFields.nextLink, Value.nil, 6);
+
+            if (last_link.isNil()) {
+                // Empty wait queue - this process is first and last
+                sem_obj.setField(SemaphoreFields.firstLink, proc.object, 3);
+                sem_obj.setField(SemaphoreFields.lastLink, proc.object, 3);
+            } else {
+                // Add to end of wait queue
+                if (last_link.isObject()) {
+                    last_link.asObject().setField(ProcessFields.nextLink, proc.object, 6);
+                }
+                sem_obj.setField(SemaphoreFields.lastLink, proc.object, 3);
+            }
+
+            // Suspend current process and switch to another
+            proc.state = .waiting;
+            interp.saveContextToProcess(proc);
+            interp.process_scheduler.active_process = null;
+
+            // Find next process to run
+            if (interp.process_scheduler.findHighestPriorityReady()) |next| {
+                interp.process_scheduler.removeFromReadyQueue(next);
+                interp.restoreContextFromProcess(next);
+                next.state = .running;
+                interp.process_scheduler.active_process = next;
+                // The wait result will be set when the process is signaled
+                // For now, push ret_holder for when we resume
+                try interp.push(ret_holder);
+                return ret_holder; // Continue in new process
+            }
+        }
     }
 
-    // Full blocking wait would require process switching
-    // For now, return timeout for no signals case
+    // No other process to run or timeout = 0, return timeout
     if (ret_holder.isObject()) {
         const holder_obj = ret_holder.asObject();
         holder_obj.setField(0, Value.fromSmallInt(WAIT_TIMEOUT), holder_obj.header.size);
@@ -5402,7 +5490,7 @@ test "Primitives - arithmetic" {
     var heap = try memory.Heap.init(allocator, 1024 * 1024);
     defer heap.deinit();
 
-    var interp = Interpreter.init(&heap, allocator);
+    var interp = try Interpreter.init(&heap, allocator);
     defer interp.deinit();
 
     // Test addition
@@ -5693,7 +5781,7 @@ test "Primitives - comparison" {
     var heap = try memory.Heap.init(allocator, 1024 * 1024);
     defer heap.deinit();
 
-    var interp = Interpreter.init(&heap, allocator);
+    var interp = try Interpreter.init(&heap, allocator);
     defer interp.deinit();
 
     // Test less than
@@ -8523,7 +8611,12 @@ fn primReplaceFromToWith(interp: *Interpreter) InterpreterError!Value {
     const receiver = try interp.pop();
 
     if (!receiver.isObject() or !start_val.isSmallInt() or !stop_val.isSmallInt() or !rep_start_val.isSmallInt()) {
+        // Restore all arguments in reverse order before failing
         try interp.push(receiver);
+        try interp.push(start_val);
+        try interp.push(stop_val);
+        try interp.push(replacement);
+        try interp.push(rep_start_val);
         return InterpreterError.PrimitiveFailed;
     }
 
@@ -8532,7 +8625,12 @@ fn primReplaceFromToWith(interp: *Interpreter) InterpreterError!Value {
     const rep_start: usize = @intCast(rep_start_val.asSmallInt());
 
     if (start < 1 or stop < start - 1) {
+        // Restore all arguments before failing
         try interp.push(receiver);
+        try interp.push(start_val);
+        try interp.push(stop_val);
+        try interp.push(replacement);
+        try interp.push(rep_start_val);
         return InterpreterError.PrimitiveFailed;
     }
 
@@ -8553,7 +8651,12 @@ fn primReplaceFromToWith(interp: *Interpreter) InterpreterError!Value {
             if (rep_obj.header.getFormat() == .bytes) {
                 const rep_bytes = rep_obj.bytes(rep_obj.header.size);
                 if (rep_start < 1 or rep_start + count - 1 > rep_bytes.len) {
+                    // Restore all arguments before failing
                     try interp.push(receiver);
+                    try interp.push(start_val);
+                    try interp.push(stop_val);
+                    try interp.push(replacement);
+                    try interp.push(rep_start_val);
                     return InterpreterError.PrimitiveFailed;
                 }
                 // Use a loop for overlapping copies
@@ -8568,14 +8671,24 @@ fn primReplaceFromToWith(interp: *Interpreter) InterpreterError!Value {
         // Object array replacement (variable = indexed, normal = fixed fields)
         const count = stop - start + 1;
         if (stop > recv_obj.header.size) {
+            // Restore all arguments before failing
             try interp.push(receiver);
+            try interp.push(start_val);
+            try interp.push(stop_val);
+            try interp.push(replacement);
+            try interp.push(rep_start_val);
             return InterpreterError.PrimitiveFailed;
         }
 
         if (replacement.isObject()) {
             const rep_obj = replacement.asObject();
             if (rep_start < 1 or rep_start + count - 1 > rep_obj.header.size) {
+                // Restore all arguments before failing
                 try interp.push(receiver);
+                try interp.push(start_val);
+                try interp.push(stop_val);
+                try interp.push(replacement);
+                try interp.push(rep_start_val);
                 return InterpreterError.PrimitiveFailed;
             }
             for (0..count) |i| {

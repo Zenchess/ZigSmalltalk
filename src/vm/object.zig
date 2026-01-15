@@ -192,13 +192,19 @@ pub const Object = struct {
         return ptr[0..count];
     }
 
-    /// Get a single field by index
+    /// Get a single field by index (with bounds checking)
     pub fn getField(self: *Object, index: usize, num_fields: usize) Value {
+        if (index >= num_fields) {
+            return Value.nil; // Return nil for out-of-bounds access instead of crashing
+        }
         return self.fields(num_fields)[index];
     }
 
-    /// Set a single field by index
+    /// Set a single field by index (with bounds checking)
     pub fn setField(self: *Object, index: usize, value: Value, num_fields: usize) void {
+        if (index >= num_fields) {
+            return; // Silently ignore out-of-bounds writes instead of crashing
+        }
         self.fields(num_fields)[index] = value;
     }
 
@@ -237,7 +243,7 @@ pub const CompiledMethod = struct {
     }
 
     pub fn getBytecodes(self: *CompiledMethod) []u8 {
-        const lit_bytes = self.header.num_literals * @sizeOf(Value);
+        const lit_bytes = @as(usize, self.header.num_literals) * @sizeOf(Value);
         const ptr: [*]u8 = @ptrFromInt(@intFromPtr(self) + @sizeOf(MethodHeader) + lit_bytes);
         return ptr[0..self.header.bytecode_size];
     }

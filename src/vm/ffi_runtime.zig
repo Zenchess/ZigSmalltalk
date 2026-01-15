@@ -102,18 +102,24 @@ pub const CallContext = struct {
         }
     }
 
-    pub fn addStringTemp(self: *CallContext, s: []u8) void {
-        if (self.string_count < MAX_ARGS) {
-            self.string_temps[self.string_count] = s;
-            self.string_count += 1;
+    pub fn addStringTemp(self: *CallContext, s: []u8) RuntimeFFIError!void {
+        if (self.string_count >= MAX_ARGS) {
+            // Can't track this allocation - must free it now to avoid leak
+            self.allocator.free(s);
+            return RuntimeFFIError.TooManyArguments;
         }
+        self.string_temps[self.string_count] = s;
+        self.string_count += 1;
     }
 
-    pub fn addPtrArrayTemp(self: *CallContext, arr: [][*c]u8) void {
-        if (self.ptr_array_count < MAX_ARGS) {
-            self.ptr_array_temps[self.ptr_array_count] = arr;
-            self.ptr_array_count += 1;
+    pub fn addPtrArrayTemp(self: *CallContext, arr: [][*c]u8) RuntimeFFIError!void {
+        if (self.ptr_array_count >= MAX_ARGS) {
+            // Can't track this allocation - must free it now to avoid leak
+            self.allocator.free(arr);
+            return RuntimeFFIError.TooManyArguments;
         }
+        self.ptr_array_temps[self.ptr_array_count] = arr;
+        self.ptr_array_count += 1;
     }
 };
 
@@ -168,7 +174,11 @@ fn valueToCValue(ctx: *CallContext, val: Value, typ: FFIType, out: *u64) Runtime
             if (val.isNil()) {
                 out.* = 0;
             } else if (val.isSmallInt()) {
-                out.* = @intCast(val.asSmallInt());
+                const addr = val.asSmallInt();
+                if (addr < 0) {
+                    return RuntimeFFIError.TypeMismatch; // Negative addresses invalid
+                }
+                out.* = @intCast(addr);
             } else if (val.isObject()) {
                 const obj = val.asObject();
                 // ByteArray - return pointer to data
@@ -195,7 +205,7 @@ fn valueToCValue(ctx: *CallContext, val: Value, typ: FFIType, out: *u64) Runtime
                     const c_str = ctx.allocator.alloc(u8, bytes.len + 1) catch return RuntimeFFIError.AllocationFailed;
                     @memcpy(c_str[0..bytes.len], bytes);
                     c_str[bytes.len] = 0;
-                    ctx.addStringTemp(c_str);
+                    try ctx.addStringTemp(c_str);
                     out.* = @intFromPtr(c_str.ptr);
                 } else {
                     return RuntimeFFIError.TypeMismatch;
@@ -215,7 +225,7 @@ fn valueToCValue(ctx: *CallContext, val: Value, typ: FFIType, out: *u64) Runtime
                     const size = obj.header.size;
                     // Allocate array of char* pointers
                     const ptr_array = ctx.allocator.alloc([*c]u8, size) catch return RuntimeFFIError.AllocationFailed;
-                    ctx.addPtrArrayTemp(ptr_array);
+                    try ctx.addPtrArrayTemp(ptr_array);
 
                     // Convert each element to a null-terminated string
                     const fields = obj.fields(size);
@@ -232,7 +242,7 @@ fn valueToCValue(ctx: *CallContext, val: Value, typ: FFIType, out: *u64) Runtime
                                 const c_str = ctx.allocator.alloc(u8, bytes.len + 1) catch return RuntimeFFIError.AllocationFailed;
                                 @memcpy(c_str[0..bytes.len], bytes);
                                 c_str[bytes.len] = 0;
-                                ctx.addStringTemp(c_str);
+                                try ctx.addStringTemp(c_str);
                                 ptr_array[i] = @ptrCast(c_str.ptr);
                             } else {
                                 return RuntimeFFIError.TypeMismatch;
@@ -285,6 +295,12 @@ fn cValueToValue(heap: *Heap, result: u64, typ: FFIType) RuntimeFFIError!Value {
         },
         .pointer, .string, .string_array => blk: {
             if (result == 0) {
+                break :blk Value.nil;
+            }
+            // Check if pointer fits in SmallInt (61 bits signed)
+            const max_small_int: u64 = (@as(u64, 1) << 60) - 1;
+            if (result > max_small_int) {
+                // Address too large for SmallInt - return nil
                 break :blk Value.nil;
             }
             const as_i61: i61 = @intCast(result);

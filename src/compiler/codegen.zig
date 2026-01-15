@@ -270,10 +270,12 @@ pub const CodeGenerator = struct {
                 }
                 // Create array from stack values
                 const size = node.data.elements.len;
-                if (size <= 255) {
-                    try self.emit(.make_array);
-                    try self.emitByte(@intCast(size));
+                if (size > 255) {
+                    // Array too large for single-byte size opcode
+                    return CompileError.TooManyLiterals;
                 }
+                try self.emit(.make_array);
+                try self.emitByte(@intCast(size));
             },
 
             .variable => {

@@ -604,8 +604,10 @@ pub const Heap = struct {
 
         // Check if already copied (forwarding pointer in old location)
         if (old_obj.header.isMarked()) {
-            // The hash field contains the offset in new space
-            const new_ptr: *Object = @ptrCast(@alignCast(self.from_space.ptr + old_obj.header.hash));
+            // The hash + size fields together contain the 64-bit offset in new space
+            // (hash = low 32 bits, size = high 32 bits)
+            const offset: u64 = @as(u64, old_obj.header.hash) | (@as(u64, old_obj.header.size) << 32);
+            const new_ptr: *Object = @ptrCast(@alignCast(self.from_space.ptr + offset));
             return Value.fromObject(new_ptr);
         }
 
@@ -640,8 +642,10 @@ pub const Heap = struct {
         const new_obj: *Object = @ptrCast(@alignCast(dst));
 
         // Leave forwarding pointer in old object
+        // Store 64-bit offset using both hash (low 32 bits) and size (high 32 bits) fields
         old_obj.header.setMarked(true);
-        old_obj.header.hash = @intCast(new_ptr);
+        old_obj.header.hash = @truncate(new_ptr); // low 32 bits
+        old_obj.header.size = @truncate(new_ptr >> 32); // high 32 bits
 
         return Value.fromObject(new_obj);
     }
@@ -672,8 +676,14 @@ pub const Heap = struct {
     }
 
     fn objectFieldCount(self: *Heap, obj: *Object) usize {
-        // Get field count from class format info
-        // For now, we'll store it in a simple way
+        const format = obj.header.getFormat();
+
+        // For variable objects (Array, etc.), use header.size which stores actual element count
+        if (format == .variable or format == .weak) {
+            return obj.header.size;
+        }
+
+        // For fixed objects (normal), get count from class format spec
         const class = self.getClass(obj.header.class_index);
         if (class.isObject()) {
             const class_obj = class.asObject();
@@ -683,20 +693,22 @@ pub const Heap = struct {
                 return info.inst_size;
             }
         }
-        return 0;
+
+        // Fallback to header.size if class lookup fails
+        return obj.header.size;
     }
 
-    fn objectByteCount(self: *Heap, obj: *Object) usize {
-        // Similar to above
-        const class = self.getClass(obj.header.class_index);
-        if (class.isObject()) {
-            const class_obj = class.asObject();
-            const format_val = class_obj.getField(CLASS_FIELD_FORMAT, class_obj.header.size);
-            if (format_val.isSmallInt()) {
-                const info = decodeInstanceSpec(format_val.asSmallInt());
-                return info.inst_size;
-            }
+    fn objectByteCount(_: *Heap, obj: *Object) usize {
+        const format = obj.header.getFormat();
+
+        // For byte/word objects, header.size stores the actual byte/word count
+        if (format == .bytes) {
+            return obj.header.size;
+        } else if (format == .words) {
+            return obj.header.size * 4;
         }
+
+        // For other formats, return 0 (they use field count, not byte count)
         return 0;
     }
 

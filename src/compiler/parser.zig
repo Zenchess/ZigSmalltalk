@@ -564,10 +564,14 @@ pub const Parser = struct {
             const node = try self.createNode(.literal_symbol);
             const text = self.previous.text;
             // Remove # and optional quotes
-            if (text.len > 1 and text[1] == '\'') {
+            // For quoted symbols like #'hello world', text is "#'hello world'"
+            // Need at least 4 chars: #'x' (# ' x ')
+            if (text.len >= 4 and text[1] == '\'' and text[text.len - 1] == '\'') {
                 node.data = .{ .string = text[2 .. text.len - 1] };
-            } else {
+            } else if (text.len > 1) {
                 node.data = .{ .string = text[1..] };
+            } else {
+                node.data = .{ .string = "" };
             }
             return node;
         }
@@ -738,9 +742,36 @@ pub const Parser = struct {
                     const nested = try self.parseLiteralArray();
                     try elements.append(self.allocator, nested);
                 } else {
-                    _ = self.advance();
+                    // Parenthesized nested array without # (shorthand in literal arrays)
+                    _ = self.advance(); // consume (
                     // Recursively parse nested array content
-                    // (simplified - treat as a new literal array)
+                    var nested_elements: std.ArrayList(*ASTNode) = .{};
+                    while (!self.check(.close_paren) and !self.isAtEnd()) {
+                        if (self.check(.integer) or self.check(.float) or self.check(.scaled_decimal) or
+                            self.check(.string) or self.check(.symbol) or
+                            self.check(.character) or self.check(.identifier))
+                        {
+                            const elem = try self.primary();
+                            try nested_elements.append(self.allocator, elem);
+                        } else if (self.check(.hash) or self.check(.open_paren)) {
+                            // Recursively handle nested arrays
+                            if (self.check(.hash)) {
+                                const nested = try self.parseLiteralArray();
+                                try nested_elements.append(self.allocator, nested);
+                            } else {
+                                // Skip deeply nested parentheses for now
+                                break;
+                            }
+                        } else {
+                            break;
+                        }
+                    }
+                    if (!self.match(.close_paren)) {
+                        return ParseError.UnexpectedToken;
+                    }
+                    const nested_arr = try self.createNode(.literal_array);
+                    nested_arr.data = .{ .elements = try nested_elements.toOwnedSlice(self.allocator) };
+                    try elements.append(self.allocator, nested_arr);
                 }
             } else {
                 break;

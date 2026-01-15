@@ -683,7 +683,9 @@ fn createMetaclassFor(heap: *Heap, class: *Object, name: []const u8) !*Object {
     metaclass.setField(Heap.CLASS_FIELD_NAME, meta_name_sym, Heap.METACLASS_NUM_FIELDS);
 
     // Describe the layout of class objects (instances of this metaclass)
-    setMetaclassFormat(metaclass, @as(i61, Heap.CLASS_NUM_FIELDS), .normal);
+    // Note: Metaclasses have METACLASS_NUM_FIELDS (11), not CLASS_NUM_FIELDS (10)
+    // because they have the extra METACLASS_FIELD_THIS_CLASS field
+    setMetaclassFormat(metaclass, @as(i61, Heap.METACLASS_NUM_FIELDS), .normal);
 
     // Link the class to its metaclass
     class.setField(Heap.CLASS_FIELD_METACLASS, Value.fromObject(metaclass), Heap.CLASS_NUM_FIELDS);
@@ -729,7 +731,8 @@ fn createMethodDict(heap: *Heap, capacity: usize) !*Object {
 /// Uses linear probing with the same hash function as lookup
 fn insertIntoMethodDict(dict_obj: *Object, selector_sym: Value, method_val: Value) bool {
     const dict_size = dict_obj.header.size;
-    if (dict_size < 2) return false;
+    // Dictionary must have at least 2 slots and be even (selector, method pairs)
+    if (dict_size < 2 or (dict_size & 1) != 0) return false;
 
     const num_slots = dict_size / 2;
     if (num_slots == 0) return false;
@@ -882,12 +885,25 @@ pub fn createPrimitiveMethod(heap: *Heap, num_args: u8, primitive_index: u16) !*
 /// Install core methods in bootstrap classes
 /// Uses Dolphin-compatible primitive numbers for SmallInteger, Object, etc.
 pub fn installCoreMethods(heap: *Heap) !void {
-    // Get class objects
-    const small_int_class = heap.getClass(Heap.CLASS_SMALL_INTEGER).asObject();
-    const string_class = heap.getClass(Heap.CLASS_STRING).asObject();
-    const object_class = heap.getClass(Heap.CLASS_OBJECT).asObject();
-    const true_class = heap.getClass(Heap.CLASS_TRUE).asObject();
-    const false_class = heap.getClass(Heap.CLASS_FALSE).asObject();
+    // Get class objects with safety checks
+    const small_int_val = heap.getClass(Heap.CLASS_SMALL_INTEGER);
+    const string_val = heap.getClass(Heap.CLASS_STRING);
+    const object_val = heap.getClass(Heap.CLASS_OBJECT);
+    const true_val = heap.getClass(Heap.CLASS_TRUE);
+    const false_val = heap.getClass(Heap.CLASS_FALSE);
+
+    // Validate that all required classes are objects
+    if (!small_int_val.isObject() or !string_val.isObject() or !object_val.isObject() or
+        !true_val.isObject() or !false_val.isObject())
+    {
+        return error.ClassNotInitialized;
+    }
+
+    const small_int_class = small_int_val.asObject();
+    const string_class = string_val.asObject();
+    const object_class = object_val.asObject();
+    const true_class = true_val.asObject();
+    const false_class = false_val.asObject();
 
     // SmallInteger methods - Dolphin compatible primitive numbers
     try installMethod(heap, small_int_class, "+", try createPrimitiveMethod(heap, 1, @intFromEnum(Primitive.add))); // 15
@@ -945,11 +961,15 @@ pub fn installCoreMethods(heap: *Heap) !void {
     try installMethod(heap, string_class, "ffiCall:with:", try createPrimitiveMethod(heap, 2, @intFromEnum(Primitive.ffi_call_with_struct))); // 792
 
     // Symbol methods - Symbol is used as receiver in FFI calls (e.g., #Raylib ffiCall:with:)
-    const symbol_class = heap.getClass(Heap.CLASS_SYMBOL).asObject();
+    const symbol_val = heap.getClass(Heap.CLASS_SYMBOL);
+    if (!symbol_val.isObject()) return error.ClassNotInitialized;
+    const symbol_class = symbol_val.asObject();
     try installMethod(heap, symbol_class, "ffiCall:with:", try createPrimitiveMethod(heap, 2, @intFromEnum(Primitive.ffi_call_with_struct))); // 792
 
     // Array methods - Dolphin compatible
-    const array_class = heap.getClass(Heap.CLASS_ARRAY).asObject();
+    const array_val = heap.getClass(Heap.CLASS_ARRAY);
+    if (!array_val.isObject()) return error.ClassNotInitialized;
+    const array_class = array_val.asObject();
     try installMethod(heap, array_class, "size", try createPrimitiveMethod(heap, 0, @intFromEnum(Primitive.size))); // 62
     try installMethod(heap, array_class, "basicSize", try createPrimitiveMethod(heap, 0, @intFromEnum(Primitive.size))); // 62
     try installMethod(heap, array_class, "at:", try createPrimitiveMethod(heap, 1, @intFromEnum(Primitive.at))); // 60

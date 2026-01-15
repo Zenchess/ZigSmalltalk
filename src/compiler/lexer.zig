@@ -109,11 +109,13 @@ pub const Lexer = struct {
                 }
                 // Compile-time constant ##(
                 if (self.peek() == '#') {
-                    _ = self.advance(); // consume second #
-                    if (self.peek() == '(') {
+                    // Check if it's ##( by looking two characters ahead
+                    if (self.pos + 1 < self.source.len and self.source[self.pos + 1] == '(') {
+                        _ = self.advance(); // consume second # only for ##(
                         return self.makeToken(.double_hash);
                     }
-                    // Not ##( - return as hash and let next call return another hash
+                    // Not ##( - just return the first # as hash
+                    // The next call will see the second # and handle it
                     return self.makeToken(.hash);
                 }
                 if (self.peek() == '\'') {
@@ -150,25 +152,10 @@ pub const Lexer = struct {
     }
 
     fn scanString(self: *Lexer) Token {
-        while (!self.isAtEnd() and self.peek() != '\'') {
-            if (self.peek() == '\n') {
-                self.line += 1;
-                self.column = 0;
-            }
-            _ = self.advance();
-        }
-
-        if (self.isAtEnd()) {
-            return self.errorToken("Unterminated string");
-        }
-
-        // Consume closing quote
-        _ = self.advance();
-
-        // Check for escaped quote ('')
-        if (self.peek() == '\'') {
-            _ = self.advance();
-            // Continue scanning for more string content
+        // Scan string with proper handling of escaped quotes ('')
+        // A quote is escaped if immediately followed by another quote
+        while (true) {
+            // Scan until we find a quote
             while (!self.isAtEnd() and self.peek() != '\'') {
                 if (self.peek() == '\n') {
                     self.line += 1;
@@ -176,8 +163,22 @@ pub const Lexer = struct {
                 }
                 _ = self.advance();
             }
-            if (!self.isAtEnd()) {
+
+            if (self.isAtEnd()) {
+                return self.errorToken("Unterminated string");
+            }
+
+            // Consume the quote
+            _ = self.advance();
+
+            // Check if it's an escaped quote ('')
+            if (self.peek() == '\'') {
+                // Escaped quote - consume it and continue scanning
                 _ = self.advance();
+                // Continue the outer loop to scan more content
+            } else {
+                // Not escaped - this was the closing quote
+                break;
             }
         }
 

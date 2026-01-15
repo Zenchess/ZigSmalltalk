@@ -1963,12 +1963,23 @@ pub const JIT = struct {
         // === FAST PATH: Inline SmallInt cache check ===
 
         // Load receiver from stack: rax = stack[sp - num_args - 1]
-        const recv_disp: i8 = -@as(i8, @intCast((@as(u16, num_args) + 1) * 8));
-        buf.rex(true, false, true, true);
-        buf.emit8(0x8B);
-        buf.emit8(0x44);
-        buf.emit8(0xE5);
-        buf.emit8(@bitCast(recv_disp));
+        const recv_offset: i32 = -@as(i32, @intCast((@as(u32, num_args) + 1) * 8));
+        // Use disp32 addressing mode if offset doesn't fit in i8
+        if (recv_offset >= -128 and recv_offset <= 127) {
+            // disp8 mode: mov rax, [r13 + disp8]
+            buf.rex(true, false, true, true);
+            buf.emit8(0x8B);
+            buf.emit8(0x44);
+            buf.emit8(0xE5);
+            buf.emit8(@bitCast(@as(i8, @intCast(recv_offset))));
+        } else {
+            // disp32 mode: mov rax, [r13 + disp32]
+            buf.rex(true, false, true, true);
+            buf.emit8(0x8B);
+            buf.emit8(0x84);
+            buf.emit8(0xE5);
+            buf.emit32(@bitCast(recv_offset));
+        }
 
         // Check if receiver is SmallInt: (rax & 7) == 1
         buf.movRegReg(.rcx, .rax);

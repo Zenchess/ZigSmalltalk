@@ -128,6 +128,8 @@ pub fn valueToPointer(val: Value) FFIError!?*anyopaque {
         // Treat SmallInteger as a raw address
         const addr = val.asSmallInt();
         if (addr == 0) return null;
+        // Validate that address is non-negative before converting to pointer
+        if (addr < 0) return FFIError.InvalidPointer;
         return @ptrFromInt(@as(usize, @intCast(addr)));
     }
     if (!val.isObject()) return FFIError.TypeMismatch;
@@ -152,7 +154,13 @@ pub fn valueToPointer(val: Value) FFIError!?*anyopaque {
 pub fn pointerToValue(ptr: ?*anyopaque) Value {
     if (ptr == null) return Value.nil;
     const addr: usize = @intFromPtr(ptr);
-    // Store as SmallInteger (may truncate on 64-bit, but works for most practical cases)
+    // Check if address fits in SmallInt range (i61)
+    const max_small_int: usize = (@as(usize, 1) << 60) - 1;
+    if (addr > max_small_int) {
+        // Address too large for SmallInt - return nil as a fallback
+        // In a full implementation, this would return an ExternalAddress object
+        return Value.nil;
+    }
     return Value.fromSmallInt(@intCast(addr));
 }
 

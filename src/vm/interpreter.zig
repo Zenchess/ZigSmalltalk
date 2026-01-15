@@ -100,12 +100,12 @@ pub const Interpreter = struct {
 
     heap: *Heap,
 
-    // Execution stack
-    stack: [8192]Value,
+    // Execution stack (heap-allocated to avoid stack overflow with large sizes)
+    stack: []Value,
     sp: usize, // Stack pointer (points to next free slot)
 
-    // Call stack
-    contexts: [1024]Context,
+    // Call stack (heap-allocated to avoid stack overflow with large sizes)
+    contexts: []Context,
     context_ptr: usize, // Current context index
 
     // Current execution state (cached from current context)
@@ -208,12 +208,17 @@ pub const Interpreter = struct {
     stack_cache_count: u2,       // Number of cached values (0, 1, or 2)
     stack_cache_enabled: bool,   // Whether to use stack caching
 
-    pub fn init(heap: *Heap, allocator: std.mem.Allocator) Interpreter {
+    pub fn init(heap: *Heap, allocator: std.mem.Allocator) !Interpreter {
+        // Allocate stack and contexts on the heap to avoid stack overflow with large sizes
+        const stack = try allocator.alloc(Value, 65536);
+        errdefer allocator.free(stack);
+        const contexts = try allocator.alloc(Context, 8192);
+
         return .{
             .heap = heap,
-            .stack = undefined,
+            .stack = stack,
             .sp = 0,
-            .contexts = undefined,
+            .contexts = contexts,
             .context_ptr = 0,
             .method = undefined,
             .method_class = Value.nil,
@@ -465,6 +470,10 @@ pub const Interpreter = struct {
     }
 
     pub fn deinit(self: *Interpreter) void {
+        // Free heap-allocated stack arrays
+        self.allocator.free(self.stack);
+        self.allocator.free(self.contexts);
+        // Clean up other resources
         self.overlapped_pool.deinit();
         self.process_scheduler.deinit();
     }
@@ -1745,7 +1754,12 @@ pub const Interpreter = struct {
 
     // Pop N values and push result (for N-ary operations returning 1 value)
     inline fn popNPush1(self: *Interpreter, n: usize, value: Value) void {
-        self.sp -= n;
+        // Bounds check to prevent underflow
+        if (self.sp >= n) {
+            self.sp -= n;
+        } else {
+            self.sp = 0;
+        }
         self.stack[self.sp] = value;
         self.sp += 1;
     }
@@ -1900,8 +1914,11 @@ pub const Interpreter = struct {
     }
 
     pub fn sendMessage(self: *Interpreter, selector_index: u8, num_args: u8, is_super: bool, bytecode_offset: usize) InterpreterError!void {
-        // Get selector from literals
+        // Get selector from literals with bounds check
         const literals = self.method.getLiterals();
+        if (selector_index >= literals.len) {
+            return InterpreterError.InvalidBytecode;
+        }
         const selector = literals[selector_index];
         var selector_name: []const u8 = "<?>";
         if (selector.isObject()) {
@@ -1923,7 +1940,12 @@ pub const Interpreter = struct {
         // Stack layout: [..., recv, arg0, arg1, ...], sp points past last arg
         // recv_pos = sp - num_args - 1 (position of receiver)
         // args are at recv_pos+1, recv_pos+2, etc.
-        const recv_pos = self.sp - @as(usize, num_args) - 1;
+        // Bounds check: ensure stack has enough values for receiver + args
+        const required_slots = @as(usize, num_args) + 1;
+        if (self.sp < required_slots) {
+            return InterpreterError.StackUnderflow;
+        }
+        const recv_pos = self.sp - required_slots;
         const recv = self.stack[recv_pos];
 
         // ========================================================================
@@ -3370,7 +3392,7 @@ pub const Interpreter = struct {
 
             // Stack bounds check (infrequent - every 256 instructions)
             if (self.instruction_count & 0xFF == 0) {
-                if (self.sp >= self.stack.len - 32) {
+                if (self.sp >= self.stack.len - 512) {
                     return InterpreterError.StackOverflow;
                 }
             }
@@ -3546,6 +3568,10 @@ pub const Interpreter = struct {
 
     fn handlePushInteger(self: *Interpreter) DispatchResult {
         const bc = self.method.getBytecodes();
+        if (self.ip >= bc.len) {
+            self.dispatch_error = InterpreterError.InvalidBytecode;
+            return .return_error;
+        }
         const n: i8 = @bitCast(bc[self.ip]);
         self.ip += 1;
         self.stack[self.sp] = Value.fromSmallInt(n);
@@ -3555,6 +3581,10 @@ pub const Interpreter = struct {
 
     fn handlePushInteger16(self: *Interpreter) DispatchResult {
         const bc = self.method.getBytecodes();
+        if (self.ip + 1 >= bc.len) {
+            self.dispatch_error = InterpreterError.InvalidBytecode;
+            return .return_error;
+        }
         const hi: u16 = bc[self.ip];
         const lo: u16 = bc[self.ip + 1];
         self.ip += 2;
@@ -3566,9 +3596,23 @@ pub const Interpreter = struct {
 
     fn handlePushLiteral(self: *Interpreter) DispatchResult {
         const bc = self.method.getBytecodes();
+        if (self.ip >= bc.len) {
+            self.dispatch_error = InterpreterError.InvalidBytecode;
+            return .return_error;
+        }
+        // Check stack space before pushing
+        if (self.sp >= self.stack.len) {
+            self.dispatch_error = InterpreterError.StackOverflow;
+            return .return_error;
+        }
         const index = bc[self.ip];
         self.ip += 1;
         const literals = self.method.getLiterals();
+        // Bounds check on literal index
+        if (index >= literals.len) {
+            self.dispatch_error = InterpreterError.InvalidBytecode;
+            return .return_error;
+        }
         self.stack[self.sp] = literals[index];
         self.sp += 1;
         return .continue_dispatch;
@@ -3576,9 +3620,18 @@ pub const Interpreter = struct {
 
     fn handlePushLiteralVariable(self: *Interpreter) DispatchResult {
         const bc = self.method.getBytecodes();
+        if (self.ip >= bc.len) {
+            self.dispatch_error = InterpreterError.InvalidBytecode;
+            return .return_error;
+        }
         const index = bc[self.ip];
         self.ip += 1;
         const literals = self.method.getLiterals();
+        // Bounds check on literal index
+        if (index >= literals.len) {
+            self.dispatch_error = InterpreterError.InvalidBytecode;
+            return .return_error;
+        }
         const literal = literals[index];
 
         if (literal.isObject()) {
@@ -3607,6 +3660,10 @@ pub const Interpreter = struct {
 
     fn handlePushReceiverVariableExt(self: *Interpreter) DispatchResult {
         const bc = self.method.getBytecodes();
+        if (self.ip >= bc.len) {
+            self.dispatch_error = InterpreterError.InvalidBytecode;
+            return .return_error;
+        }
         const index = bc[self.ip];
         self.ip += 1;
         if (self.pushReceiverVariable(index)) {
@@ -3619,6 +3676,10 @@ pub const Interpreter = struct {
 
     fn handlePushTemporaryExt(self: *Interpreter) DispatchResult {
         const bc = self.method.getBytecodes();
+        if (self.ip >= bc.len) {
+            self.dispatch_error = InterpreterError.InvalidBytecode;
+            return .return_error;
+        }
         const index = bc[self.ip];
         self.ip += 1;
         if (self.pushTemporary(index)) {
@@ -3650,6 +3711,10 @@ pub const Interpreter = struct {
     // Jump operations
     fn handleJump(self: *Interpreter) DispatchResult {
         const bc = self.method.getBytecodes();
+        if (self.ip + 1 >= bc.len) {
+            self.dispatch_error = InterpreterError.InvalidBytecode;
+            return .return_error;
+        }
         const hi: u16 = bc[self.ip];
         const lo: u16 = bc[self.ip + 1];
         const offset: i16 = @bitCast((hi << 8) | lo);
@@ -3659,6 +3724,10 @@ pub const Interpreter = struct {
 
     fn handleJumpIfTrue(self: *Interpreter) DispatchResult {
         const bc = self.method.getBytecodes();
+        if (self.ip + 1 >= bc.len) {
+            self.dispatch_error = InterpreterError.InvalidBytecode;
+            return .return_error;
+        }
         const hi: u16 = bc[self.ip];
         const lo: u16 = bc[self.ip + 1];
         const offset: i16 = @bitCast((hi << 8) | lo);
@@ -3674,6 +3743,10 @@ pub const Interpreter = struct {
 
     fn handleJumpIfFalse(self: *Interpreter) DispatchResult {
         const bc = self.method.getBytecodes();
+        if (self.ip + 1 >= bc.len) {
+            self.dispatch_error = InterpreterError.InvalidBytecode;
+            return .return_error;
+        }
         const hi: u16 = bc[self.ip];
         const lo: u16 = bc[self.ip + 1];
         const offset: i16 = @bitCast((hi << 8) | lo);
@@ -3689,6 +3762,10 @@ pub const Interpreter = struct {
 
     fn handleJumpIfNil(self: *Interpreter) DispatchResult {
         const bc = self.method.getBytecodes();
+        if (self.ip + 1 >= bc.len) {
+            self.dispatch_error = InterpreterError.InvalidBytecode;
+            return .return_error;
+        }
         const hi: u16 = bc[self.ip];
         const lo: u16 = bc[self.ip + 1];
         const offset: i16 = @bitCast((hi << 8) | lo);
@@ -3704,6 +3781,10 @@ pub const Interpreter = struct {
 
     fn handleJumpIfNotNil(self: *Interpreter) DispatchResult {
         const bc = self.method.getBytecodes();
+        if (self.ip + 1 >= bc.len) {
+            self.dispatch_error = InterpreterError.InvalidBytecode;
+            return .return_error;
+        }
         const hi: u16 = bc[self.ip];
         const lo: u16 = bc[self.ip + 1];
         const offset: i16 = @bitCast((hi << 8) | lo);
@@ -3823,6 +3904,11 @@ pub const Interpreter = struct {
     // Send operations - delegate to existing sendMessage
     fn handleSend(self: *Interpreter) DispatchResult {
         const bc = self.method.getBytecodes();
+        // Check bounds for 2-byte operands
+        if (self.ip + 1 >= bc.len) {
+            self.dispatch_error = InterpreterError.InvalidBytecode;
+            return .return_error;
+        }
         const selector_index = bc[self.ip];
         const num_args = bc[self.ip + 1];
         self.ip += 2;
@@ -3835,6 +3921,11 @@ pub const Interpreter = struct {
 
     fn handleSuperSend(self: *Interpreter) DispatchResult {
         const bc = self.method.getBytecodes();
+        // Check bounds for 2-byte operands
+        if (self.ip + 1 >= bc.len) {
+            self.dispatch_error = InterpreterError.InvalidBytecode;
+            return .return_error;
+        }
         const selector_index = bc[self.ip];
         const num_args = bc[self.ip + 1];
         self.ip += 2;
@@ -4522,7 +4613,7 @@ test "Interpreter - push and pop" {
     var heap = try Heap.init(allocator, 1024 * 1024);
     defer heap.deinit();
 
-    var interp = Interpreter.init(&heap, allocator);
+    var interp = try Interpreter.init(&heap, allocator);
     defer interp.deinit();
 
     try interp.push(Value.fromSmallInt(42));
