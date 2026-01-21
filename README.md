@@ -8,7 +8,7 @@ This project was inspired by limitations encountered when attempting to load an 
 
 Currently working:  Terminal editor with workspace/transcript/ffi page/browser.  FFI auto generation works, tested on OpenGL and Raylib.  
 
-Benchmarks are around 20,000 message sends/second on some benchmarks, still slower than Cog/Visualworks but this is the current focus of development for more speed, utilizing more advanced Jit compilation techniques.
+Benchmarks are around 20,000,000 message sends/second on some benchmarks, still slower than Cog/Visualworks but this is the current focus of development for more speed, utilizing more advanced Jit compilation techniques.
 
 ## Platforms
 Linux, Windows (could run on mac maybe but haven't tested)
@@ -214,3 +214,4 @@ This project includes the ANSI Smalltalk class library from **Dolphin Smalltalk*
 This project uses the **ANSI Smalltalk class library** from [Dolphin Smalltalk](https://github.com/dolphinsmalltalk/Dolphin) by Object Arts. The class files in `ansi-tests/` are derived from Dolphin's implementation of the ANSI Smalltalk standard.
 
 The VM implementation takes advantage of Zig's systems programming capabilities for performance and C interoperability.
+
