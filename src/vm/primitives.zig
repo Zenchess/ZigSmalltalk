@@ -3526,9 +3526,11 @@ fn primBlockValueWithArgs(interp: *Interpreter) InterpreterError!Value {
         try interp.push(Value.nil);
     }
 
-    // If the block has temps, create a new heap context for them.
-    // The context needs slots for BOTH args and temps since bytecode indices are absolute
-    if (num_temps > 0) {
+    // ALWAYS create a new heap context for the block's args (and temps if any).
+    // The context needs slots for BOTH args and temps since bytecode indices are absolute.
+    // BUG FIX: Previously only created context when num_temps > 0, which broke
+    // blocks with arguments but no temps when called inside methods with outer temps.
+    if (array_size + num_temps > 0) {
         const outer_ctx = interp.heap_context;
         const heap_ctx = try interp.createHeapContext(array_size + num_temps); // args + temps
         // Store the outer context in SENDER field so push_outer_temp can follow the chain
