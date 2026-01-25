@@ -132,6 +132,41 @@ address
 
 !
 
+"Float arithmetic using Dolphin/ANSI primitive numbers (NOT Zig primitives 41-50)"
+!Float methodsFor: 'arithmetic'!
+
++ aNumber
+    "Add aNumber to the receiver"
+    <primitive: 160>
+    ^self primitiveFailed!
+
+- aNumber
+    "Subtract aNumber from the receiver"
+    <primitive: 161>
+    ^self primitiveFailed!
+
+< aNumber
+    "Answer whether the receiver is less than aNumber"
+    <primitive: 162>
+    ^self primitiveFailed!
+
+* aNumber
+    "Multiply the receiver by aNumber"
+    <primitive: 164>
+    ^self primitiveFailed!
+
+/ aNumber
+    "Divide the receiver by aNumber"
+    <primitive: 165>
+    ^self primitiveFailed!
+
+<= aNumber
+    "Answer whether the receiver is less than or equal to aNumber"
+    <primitive: 214>
+    ^self primitiveFailed!
+
+!
+
 Object subclass: #ExternalStructure
     instanceVariableNames: 'bytes'
     classVariableNames: ''
@@ -260,12 +295,13 @@ structInfo: structName for: libraryName
 
 generateStructsFor: libraryName
     "Dynamically generate ExternalStructure subclasses for all structs in the library"
-    | structNames |
+    | structNames count |
     structNames := self structNamesFor: libraryName.
-    structNames do: [:name |
-        self createStructClass: name inLibrary: libraryName
+    count := structNames size.
+    1 to: count do: [:i |
+        self createStructClass: (structNames at: i) inLibrary: libraryName
     ].
-    ^structNames size!
+    ^count!
 
 createStructClass: structName inLibrary: libraryName
     | info size newClass base |
