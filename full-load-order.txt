@@ -1,3 +1,6 @@
+# Core string and symbol methods
+dolphin-core/stubs/string-symbol-stubs.st
+
 # SUnit stubs and fixes
 dolphin-core/stubs/sunit-stubs.st
 dolphin-core/stubs/sunit-overrides.st

@@ -1,0 +1,2 @@
+# Test load order file
+dolphin-core/stubs/string-symbol-stubs.st
