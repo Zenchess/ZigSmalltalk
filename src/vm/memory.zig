@@ -80,6 +80,7 @@ pub const Heap = struct {
     pub const CLASS_COLLECTION: u32 = 44;
     pub const CLASS_SEQUENCEABLE_COLLECTION: u32 = 45;
     pub const CLASS_ARRAYED_COLLECTION: u32 = 46;
+    pub const CLASS_MESSAGE_NOT_UNDERSTOOD: u32 = 47;
 
     // Class object field indices
     pub const CLASS_FIELD_SUPERCLASS: usize = 0;

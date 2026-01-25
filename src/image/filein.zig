@@ -509,12 +509,32 @@ pub const FileIn = struct {
                     }
                 }
 
-                // If expression starts with a number, parens, block, string, or temp declaration,
+                // If expression starts with a number, parens, block, or string,
                 // it's definitely an expression, not a method body
+                // Note: | could be either a temp var declaration OR a binary method selector,
+                // so we need to check if it's followed by an identifier (binary method) or not
                 if (effective_chunk.len > 0) {
                     const first = effective_chunk[0];
-                    if (std.ascii.isDigit(first) or first == '(' or first == '[' or first == '\'' or first == '|') {
+                    if (std.ascii.isDigit(first) or first == '(' or first == '[' or first == '\'') {
                         self.current_class = null; // Clear class context - this is an expression
+                    } else if (first == '|') {
+                        // Check if this looks like a binary method "| identifier" or temp vars "| temp1 temp2 |"
+                        // Binary methods have "| identifier" followed by newline/comment/body
+                        // Temp vars have "| temp1 temp2 |" on a single line
+                        // If we find "|" later in the line, it's a temp var declaration
+                        var has_closing_bar = false;
+                        var i: usize = 1;
+                        while (i < effective_chunk.len and effective_chunk[i] != '\n' and effective_chunk[i] != '\r') : (i += 1) {
+                            if (effective_chunk[i] == '|') {
+                                has_closing_bar = true;
+                                break;
+                            }
+                        }
+                        if (has_closing_bar) {
+                            // It's a temp var declaration - treat as expression
+                            self.current_class = null;
+                        }
+                        // If no closing bar on same line, it's a binary method - keep class context
                     } else if (std.ascii.isUpper(first)) {
                         // Extract the class name from the expression
                         var name_end: usize = 0;
@@ -540,6 +560,7 @@ pub const FileIn = struct {
             return;
         }
         // Otherwise treat as a method body
+        if (DEBUG_VERBOSE) std.debug.print("DEBUG processMethodBody for class '{?s}', chunk starts with: '{s}'\n", .{ self.current_class, if (chunk.len > 40) chunk[0..40] else chunk });
         try self.processMethodBody(chunk);
     }
 
@@ -870,8 +891,10 @@ pub const FileIn = struct {
 
         // Find the class
         const class_value = self.heap.getGlobal(class_name) orelse {
+            if (DEBUG_VERBOSE) std.debug.print("DEBUG processMethodBody: class '{s}' not found in globals\n", .{class_name});
             return FileInError.ClassNotFound;
         };
+        if (DEBUG_VERBOSE) std.debug.print("DEBUG processMethodBody: found class '{s}' at {*}\n", .{ class_name, class_value.asObject() });
 
         if (!class_value.isObject()) {
             return FileInError.ClassNotFound;
@@ -950,6 +973,11 @@ pub const FileIn = struct {
         defer arena.deinit();
         const method_alloc = arena.allocator();
 
+        // Debug: show full chunk for stub methods
+        if (DEBUG_VERBOSE and (std.mem.eql(u8, selector, "testReturn42") or std.mem.eql(u8, selector, "activeProcess"))) {
+            std.debug.print("DEBUG full chunk for '{s}'>>{s}':\n---\n{s}\n---\n", .{ class_name, selector, chunk });
+        }
+
         var p = Parser.init(method_alloc, chunk);
         const ast = p.parseMethod() catch {
             return FileInError.CompilationFailed;
@@ -997,6 +1025,32 @@ pub const FileIn = struct {
         const method = gen.compileMethod(ast) catch {
             return FileInError.CompilationFailed;
         };
+
+        // Debug bytecodes for stub methods
+        if (DEBUG_VERBOSE and (std.mem.eql(u8, selector, "testReturn42") or std.mem.eql(u8, selector, "activeProcess"))) {
+            const bcs = method.getBytecodes();
+            std.debug.print("DEBUG {s}>>{s} bytecodes:", .{ class_name, selector });
+            for (bcs) |bc| {
+                std.debug.print(" {d}", .{bc});
+            }
+            std.debug.print("\n", .{});
+            const lits = method.getLiterals();
+            std.debug.print("DEBUG {s}>>{s} literals count: {d}\n", .{ class_name, selector, lits.len });
+            for (lits, 0..) |lit, i| {
+                if (lit.isSmallInt()) {
+                    std.debug.print("  lit[{d}] = SmallInt({d})\n", .{ i, lit.asSmallInt() });
+                } else if (lit.isObject()) {
+                    const obj = lit.asObject();
+                    if (obj.header.class_index == Heap.CLASS_SYMBOL) {
+                        std.debug.print("  lit[{d}] = Symbol('{s}')\n", .{ i, obj.bytes(obj.header.size) });
+                    } else {
+                        std.debug.print("  lit[{d}] = Object(class_idx={d})\n", .{ i, obj.header.class_index });
+                    }
+                } else {
+                    std.debug.print("  lit[{d}] = other\n", .{i});
+                }
+            }
+        }
 
         // Debug for Character = specifically (disabled)
         // if (std.mem.eql(u8, selector, "=") and std.mem.eql(u8, class_name, "Character")) {
@@ -1068,7 +1122,9 @@ pub const FileIn = struct {
 
         // Install the method in the class
         const class_obj = target_class_val.asObject();
+        if (DEBUG_VERBOSE) std.debug.print("DEBUG about to install '{s}' >> '{s}' in class at {*}\n", .{ class_name, selector, class_obj });
         try installMethodInClass(self.heap, class_obj, selector, method, self.current_is_class_side);
+        if (DEBUG_VERBOSE) std.debug.print("DEBUG installed '{s}' >> '{s}' successfully\n", .{ class_name, selector });
 
         // ProtocolSpec file defines protocol-building helpers as instance methods, but ANSI DB
         // sends them to the class. Install class-side copies for those selectors.
@@ -1088,6 +1144,15 @@ pub const FileIn = struct {
         }
 
         self.methods_loaded += 1;
+
+        // Flush method cache to ensure new/updated methods are found
+        if (self.interp) |interp_ptr| {
+            if (DEBUG_VERBOSE) std.debug.print("DEBUG flushing method cache after installing '{s}'\n", .{selector});
+            interp_ptr.flushMethodCache();
+            interp_ptr.invalidateInlineCache();
+        } else {
+            if (DEBUG_VERBOSE) std.debug.print("DEBUG no interpreter to flush cache after installing '{s}'\n", .{selector});
+        }
     }
 
     /// Handle "ClassName addClassConstant: 'Foo' value: 123" chunks minimally.
@@ -1551,6 +1616,9 @@ fn hashInsertMethod(dict: *object.Object, selector_sym: Value, method_val: Value
 
         // Empty slot - insert
         if (fields[slot_base].isNil()) {
+            if (DEBUG_VERBOSE and (std.mem.eql(u8, selector_str, "activeProcess") or std.mem.eql(u8, selector_str, "testReturn42"))) {
+                std.debug.print("DEBUG hashInsertMethod: NEW INSERT '{s}' (method: {*})\n", .{ selector_str, method_val.asObject() });
+            }
             fields[slot_base] = selector_sym;
             fields[slot_base + 1] = method_val;
             return true;
@@ -1558,6 +1626,9 @@ fn hashInsertMethod(dict: *object.Object, selector_sym: Value, method_val: Value
 
         // Existing key - update
         if (fields[slot_base].bits == selector_sym.bits) {
+            if (DEBUG_VERBOSE and (std.mem.eql(u8, selector_str, "activeProcess") or std.mem.eql(u8, selector_str, "testReturn42"))) {
+                std.debug.print("DEBUG hashInsertMethod: UPDATING '{s}' by bits match (old method: {*}, new method: {*})\n", .{ selector_str, fields[slot_base + 1].asObject(), method_val.asObject() });
+            }
             fields[slot_base + 1] = method_val;
             return true;
         }
@@ -1568,6 +1639,9 @@ fn hashInsertMethod(dict: *object.Object, selector_sym: Value, method_val: Value
             if (key_obj.header.class_index == Heap.CLASS_SYMBOL) {
                 const k_bytes = key_obj.bytes(key_obj.header.size);
                 if (std.mem.eql(u8, k_bytes, selector_str)) {
+                    if (DEBUG_VERBOSE and (std.mem.eql(u8, selector_str, "activeProcess") or std.mem.eql(u8, selector_str, "testReturn42"))) {
+                        std.debug.print("DEBUG hashInsertMethod: UPDATING '{s}' by string match (old method: {*}, new method: {*})\n", .{ selector_str, fields[slot_base + 1].asObject(), method_val.asObject() });
+                    }
                     fields[slot_base + 1] = method_val;
                     return true;
                 }

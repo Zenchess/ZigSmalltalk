@@ -118,6 +118,10 @@ pub fn bootstrap(heap: *Heap) !void {
     const message_class = try createClassObject(heap, Heap.CLASS_CLASS);
     heap.class_table.items[Heap.CLASS_MESSAGE] = Value.fromObject(message_class);
 
+    // MessageNotUnderstood class (subclass of Error)
+    const mnu_class = try createClassObject(heap, Heap.CLASS_CLASS);
+    heap.class_table.items[Heap.CLASS_MESSAGE_NOT_UNDERSTOOD] = Value.fromObject(mnu_class);
+
     // Dictionary class
     const dictionary_class = try createClassObject(heap, Heap.CLASS_CLASS);
     heap.class_table.items[Heap.CLASS_DICTIONARY] = Value.fromObject(dictionary_class);
@@ -272,6 +276,9 @@ pub fn bootstrap(heap: *Heap) !void {
     // Message -> Object
     setClassSuperclass(message_class, Value.fromObject(object_class));
 
+    // MessageNotUnderstood -> Error
+    setClassSuperclass(mnu_class, Value.fromObject(error_class));
+
     // Dictionary -> Object (in full system: HashedCollection -> Collection -> Object)
     setClassSuperclass(dictionary_class, Value.fromObject(object_class));
 
@@ -319,6 +326,7 @@ pub fn bootstrap(heap: *Heap) !void {
     try setClassName(heap, exception_class, "Exception");
     try setClassName(heap, error_class, "Error");
     try setClassName(heap, message_class, "Message");
+    try setClassName(heap, mnu_class, "MessageNotUnderstood");
     try setClassName(heap, dictionary_class, "Dictionary");
     try setClassName(heap, set_class, "Set");
     try setClassName(heap, ordered_collection_class, "OrderedCollection");
@@ -629,6 +637,7 @@ pub fn bootstrap(heap: *Heap) !void {
     try heap.setGlobal("Exception", Value.fromObject(exception_class));
     try heap.setGlobal("Error", Value.fromObject(error_class));
     try heap.setGlobal("Message", Value.fromObject(message_class));
+    try heap.setGlobal("MessageNotUnderstood", Value.fromObject(mnu_class));
     try heap.setGlobal("Dictionary", Value.fromObject(dictionary_class));
     try heap.setGlobal("Set", Value.fromObject(set_class));
     try heap.setGlobal("OrderedCollection", Value.fromObject(ordered_collection_class));
@@ -1321,7 +1330,8 @@ fn createFFILibraryClass(heap: *Heap, superclass: *Object, name: []const u8) !*O
     class.setField(Heap.CLASS_FIELD_METACLASS, Value.fromObject(metaclass), Heap.CLASS_NUM_FIELDS);
 
     // Register class in globals FIRST (so we can re-fetch it after GC)
-    try heap.globals.put(heap.allocator, name, Value.fromObject(class));
+    // Use setGlobal which properly dupes the key string
+    try heap.setGlobal(name, Value.fromObject(class));
 
     // Pre-allocate method dictionary for metaclass (large enough for ~600 FFI methods)
     // This prevents GC during method installation

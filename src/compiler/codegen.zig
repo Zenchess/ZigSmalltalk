@@ -535,6 +535,9 @@ pub const CodeGenerator = struct {
                     } else if (std.mem.eql(u8, selector, "==")) {
                         try self.emit(.send_identical);
                         return;
+                    } else if (std.mem.eql(u8, selector, "~~")) {
+                        try self.emit(.send_not_identical);
+                        return;
                     }
                 }
 

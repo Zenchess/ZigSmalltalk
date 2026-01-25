@@ -2672,6 +2672,13 @@ fn primBlockValueZero(interp: *Interpreter) InterpreterError!Value {
     // Execute until we hit a return
     const result = interp.interpretLoop() catch |err| {
         interp.primitive_block_depth -= 1;
+
+        // If exception was caught and handled by primExceptionSignal, don't restore state
+        // The handler already set up the correct context, and primOnDo will retrieve the result
+        if (err == InterpreterError.SmalltalkException and interp.exception_handled) {
+            return err;
+        }
+
         interp.ip = saved_ip;
         interp.method = saved_method;
 
@@ -2704,7 +2711,7 @@ fn primBlockValueZero(interp: *Interpreter) InterpreterError!Value {
     return result;
 }
 
-fn primBlockValue1(interp: *Interpreter) InterpreterError!Value {
+pub fn primBlockValue1(interp: *Interpreter) InterpreterError!Value {
     const arg = try interp.pop();
     const block = try interp.pop();
 
@@ -2841,6 +2848,13 @@ fn primBlockValue1(interp: *Interpreter) InterpreterError!Value {
 
     const result = interp.interpretLoop() catch |err| {
         interp.primitive_block_depth -= 1;
+
+        // If exception was caught and handled by primExceptionSignal, don't restore state
+        // The handler already set up the correct context, and primOnDo will retrieve the result
+        if (err == InterpreterError.SmalltalkException and interp.exception_handled) {
+            return err;
+        }
+
         interp.ip = saved_ip;
         interp.method = saved_method;
 
@@ -3005,6 +3019,13 @@ fn primBlockValue2(interp: *Interpreter) InterpreterError!Value {
 
     const result = interp.interpretLoop() catch |err| {
         interp.primitive_block_depth -= 1;
+
+        // If exception was caught and handled by primExceptionSignal, don't restore state
+        // The handler already set up the correct context, and primOnDo will retrieve the result
+        if (err == InterpreterError.SmalltalkException and interp.exception_handled) {
+            return err;
+        }
+
         interp.ip = saved_ip;
         interp.method = saved_method;
 
@@ -3175,6 +3196,13 @@ fn primBlockValue3(interp: *Interpreter) InterpreterError!Value {
 
     const result = interp.interpretLoop() catch |err| {
         interp.primitive_block_depth -= 1;
+
+        // If exception was caught and handled by primExceptionSignal, don't restore state
+        // The handler already set up the correct context, and primOnDo will retrieve the result
+        if (err == InterpreterError.SmalltalkException and interp.exception_handled) {
+            return err;
+        }
+
         interp.ip = saved_ip;
         interp.method = saved_method;
 
@@ -3352,6 +3380,13 @@ fn primBlockValue4(interp: *Interpreter) InterpreterError!Value {
 
     const result = interp.interpretLoop() catch |err| {
         interp.primitive_block_depth -= 1;
+
+        // If exception was caught and handled by primExceptionSignal, don't restore state
+        // The handler already set up the correct context, and primOnDo will retrieve the result
+        if (err == InterpreterError.SmalltalkException and interp.exception_handled) {
+            return err;
+        }
+
         interp.ip = saved_ip;
         interp.method = saved_method;
 
@@ -3508,6 +3543,13 @@ fn primBlockValueWithArgs(interp: *Interpreter) InterpreterError!Value {
 
     const result = interp.interpretLoop() catch |err| {
         interp.primitive_block_depth -= 1;
+
+        // If exception was caught and handled by primExceptionSignal, don't restore state
+        // The handler already set up the correct context, and primOnDo will retrieve the result
+        if (err == InterpreterError.SmalltalkException and interp.exception_handled) {
+            return err;
+        }
+
         interp.ip = saved_ip;
         interp.method = saved_method;
 
@@ -3857,6 +3899,13 @@ fn evaluateBlock(interp: *Interpreter, block: Value) InterpreterError!Value {
 
     const result = interp.interpretLoop() catch |err| {
         interp.primitive_block_depth -= 1;
+
+        // If exception was caught and handled by primExceptionSignal, don't restore state
+        // The handler already set up the correct context, and primOnDo will retrieve the result
+        if (err == InterpreterError.SmalltalkException and interp.exception_handled) {
+            return err;
+        }
+
         interp.ip = saved_ip;
         interp.method = saved_method;
 
@@ -4476,6 +4525,12 @@ fn primToDo(interp: *Interpreter) InterpreterError!Value {
         // Execute the block
         _ = interp.interpretLoop() catch |err| {
             interp.primitive_block_depth -= 1;
+
+            // If exception was caught and handled by primExceptionSignal, don't restore state
+            if (err == InterpreterError.SmalltalkException and interp.exception_handled) {
+                return err;
+            }
+
             // For BlockNonLocalReturn, always propagate
             interp.ip = saved_ip;
             interp.method = saved_method;
@@ -4608,7 +4663,13 @@ fn primToByDo(interp: *Interpreter) InterpreterError!Value {
             // Execute the block
             _ = interp.interpretLoop() catch |err| {
                 interp.primitive_block_depth -= 1;
-                                if (err == InterpreterError.BlockNonLocalReturn) {
+
+                // If exception was caught and handled by primExceptionSignal, don't restore state
+                if (err == InterpreterError.SmalltalkException and interp.exception_handled) {
+                    return err;
+                }
+
+                if (err == InterpreterError.BlockNonLocalReturn) {
                     const result = try interp.pop();
                     interp.ip = saved_ip;
                     interp.method = saved_method;
@@ -4665,7 +4726,13 @@ fn primToByDo(interp: *Interpreter) InterpreterError!Value {
             // Execute the block
             _ = interp.interpretLoop() catch |err| {
                 interp.primitive_block_depth -= 1;
-                                if (err == InterpreterError.BlockNonLocalReturn) {
+
+                // If exception was caught and handled by primExceptionSignal, don't restore state
+                if (err == InterpreterError.SmalltalkException and interp.exception_handled) {
+                    return err;
+                }
+
+                if (err == InterpreterError.BlockNonLocalReturn) {
                     const result = try interp.pop();
                     interp.ip = saved_ip;
                     interp.method = saved_method;
@@ -4814,6 +4881,13 @@ fn evaluateBlockWith1(interp: *Interpreter, block: Value, arg: Value) Interprete
 
     const result = interp.interpretLoop() catch |err| {
         interp.primitive_block_depth -= 1;
+
+        // If exception was caught and handled by primExceptionSignal, don't restore state
+        // The handler already set up the correct context, and primOnDo will retrieve the result
+        if (err == InterpreterError.SmalltalkException and interp.exception_handled) {
+            return err;
+        }
+
         interp.ip = saved_ip;
         interp.method = saved_method;
 
@@ -4907,7 +4981,13 @@ fn evaluateBlockWith2(interp: *Interpreter, block: Value, arg1: Value, arg2: Val
 
     const result = interp.interpretLoop() catch |err| {
         interp.primitive_block_depth -= 1;
-                interp.ip = saved_ip;
+
+        // If exception was caught and handled by primExceptionSignal, don't restore state
+        if (err == InterpreterError.SmalltalkException and interp.exception_handled) {
+            return err;
+        }
+
+        interp.ip = saved_ip;
         interp.method = saved_method;
 
         // For BlockNonLocalReturn, always propagate - let the .send bytecode handler intercept it
@@ -4922,7 +5002,7 @@ fn evaluateBlockWith2(interp: *Interpreter, block: Value, arg1: Value, arg2: Val
     };
 
     interp.primitive_block_depth -= 1;
-        interp.ip = saved_ip;
+    interp.ip = saved_ip;
     interp.method = saved_method;
     interp.sp = saved_sp;
     interp.temp_base = saved_temp_base;
@@ -6295,49 +6375,53 @@ fn primDoesNotUnderstand(interp: *Interpreter) InterpreterError!Value {
     interp.last_mnu_receiver = recv;
     interp.last_mnu_method = interp.currentMethodSource();
 
-    // Print error message
-    std.debug.print("MessageNotUnderstood: ", .{});
-
-    // Try to print receiver class name
-    if (recv.isObject()) {
-        const obj = recv.asObject();
-        const class = interp.heap.getClass(obj.header.class_index);
-        if (class.isObject()) {
-            const class_obj = class.asObject();
-            const name_val = class_obj.getField(memory.Heap.CLASS_FIELD_NAME, class_obj.header.size);
-            if (name_val.isObject()) {
-                const name_obj = name_val.asObject();
-                const name_bytes = name_obj.bytes(name_obj.header.size);
-                std.debug.print("{s}", .{name_bytes});
-            }
-        }
-    } else if (recv.isSmallInt()) {
-        std.debug.print("SmallInteger({d})", .{recv.asSmallInt()});
-    } else if (recv.isNil()) {
-        std.debug.print("nil", .{});
-    } else if (recv.isTrue()) {
-        std.debug.print("true", .{});
-    } else if (recv.isFalse()) {
-        std.debug.print("false", .{});
-    }
-
-    std.debug.print(" >> ", .{});
-
-    // Print selector from Message object
+    // Get selector string for error reporting
+    var sel_bytes: []const u8 = "<?>";
     if (message.isObject()) {
         const msg_obj = message.asObject();
         const selector = msg_obj.getField(0, 3);
         if (selector.isObject()) {
             const sel_obj = selector.asObject();
-            const sel_bytes = sel_obj.bytes(sel_obj.header.size);
-            std.debug.print("{s}", .{sel_bytes});
+            sel_bytes = sel_obj.bytes(sel_obj.header.size);
             interp.last_mnu_selector = sel_bytes;
         }
     }
 
-    std.debug.print("\n", .{});
-
-    return InterpreterError.MessageNotUnderstood;
+    // Try to signal through Smalltalk exception mechanism
+    _ = interp.signalMessageNotUnderstood(recv, message) catch |err| {
+        if (err == InterpreterError.SmalltalkException) {
+            // Handler was found and executed - propagate so primOnDo handles the result
+            return err;
+        }
+        // No handler - print error and return Zig error
+        std.debug.print("MessageNotUnderstood: ", .{});
+        // Try to print receiver class name
+        if (recv.isObject()) {
+            const obj = recv.asObject();
+            const class = interp.heap.getClass(obj.header.class_index);
+            if (class.isObject()) {
+                const class_obj = class.asObject();
+                const name_val = class_obj.getField(memory.Heap.CLASS_FIELD_NAME, class_obj.header.size);
+                if (name_val.isObject()) {
+                    const name_obj = name_val.asObject();
+                    const name_bytes = name_obj.bytes(name_obj.header.size);
+                    std.debug.print("{s}", .{name_bytes});
+                }
+            }
+        } else if (recv.isSmallInt()) {
+            std.debug.print("SmallInteger({d})", .{recv.asSmallInt()});
+        } else if (recv.isNil()) {
+            std.debug.print("nil", .{});
+        } else if (recv.isTrue()) {
+            std.debug.print("true", .{});
+        } else if (recv.isFalse()) {
+            std.debug.print("false", .{});
+        }
+        std.debug.print(" >> {s}\n", .{sel_bytes});
+        return err;
+    };
+    // signalMessageNotUnderstood doesn't return normally in the success path
+    unreachable;
 }
 
 fn primError(interp: *Interpreter) InterpreterError!Value {
@@ -6376,13 +6460,18 @@ fn primExceptionSignal(interp: *Interpreter) InterpreterError!Value {
     if (interp.findExceptionHandler(exception)) |handler_idx| {
         const handler = interp.exception_handlers[handler_idx];
 
-        // Unwind the stack to the handler's context
+        // Save current interpreter state so we can restore it after handler executes
+        const saved_method = interp.method;
+        const saved_ip = interp.ip;
+        const saved_receiver = interp.receiver;
+        const saved_context_ptr = interp.context_ptr;
+        const saved_temp_base = interp.temp_base;
+        const saved_sp = interp.sp;
+
+        // Unwind the stack to the handler's context for executing the handler
         interp.context_ptr = handler.context_ptr;
         interp.sp = handler.sp;
         interp.temp_base = handler.temp_base;
-        interp.method = handler.method;
-        interp.ip = handler.ip;
-        interp.receiver = handler.receiver;
 
         // Remove handlers installed after this one
         interp.handler_ptr = handler_idx;
@@ -6393,7 +6482,31 @@ fn primExceptionSignal(interp: *Interpreter) InterpreterError!Value {
         // Execute the handler block with the exception as argument
         try interp.push(handler.handler_block);
         try interp.push(exception);
-        return primBlockValue1(interp);
+        const handler_result = primBlockValue1(interp) catch |err| {
+            // Handler itself threw an error - restore state and propagate
+            interp.method = saved_method;
+            interp.ip = saved_ip;
+            interp.receiver = saved_receiver;
+            interp.context_ptr = saved_context_ptr;
+            interp.temp_base = saved_temp_base;
+            interp.sp = saved_sp;
+            return err;
+        };
+
+        // Restore method/ip/receiver so normal return path works correctly
+        interp.method = saved_method;
+        interp.ip = saved_ip;
+        interp.receiver = saved_receiver;
+        // Note: we keep the unwound context_ptr/temp_base/sp - these are handled by primOnDo
+
+        // Handler succeeded - set flag so primBlockValue* don't restore their saved state
+        // This allows the loop containing on:do: to continue properly
+        interp.exception_handled = true;
+        interp.exception_handler_result = handler_result;
+
+        // Return SmalltalkException to unwind the Zig call stack back to primOnDo
+        // primOnDo will check exception_handled and use exception_handler_result
+        return InterpreterError.SmalltalkException;
     }
 
     // No handler found - return the exception for Zig-level handling
@@ -6447,13 +6560,16 @@ fn primOnDo(interp: *Interpreter) InterpreterError!Value {
         // Pop the handler on error
         interp.popExceptionHandler();
 
-        // If this is a Smalltalk exception, check if we should handle it
-        if (err == InterpreterError.SmalltalkException) {
-            // The exception was already handled by primExceptionSignal
-            // or there was no matching handler
-            return err;
+        // Check if exception was caught and handled by primExceptionSignal
+        if (err == InterpreterError.SmalltalkException and interp.exception_handled) {
+            // Exception was handled - return the handler's result
+            const handler_result = interp.exception_handler_result;
+            interp.exception_handled = false;
+            interp.exception_handler_result = Value.nil;
+            return handler_result;
         }
 
+        // Exception was not handled by us - propagate it
         return err;
     };
 
@@ -7132,10 +7248,39 @@ fn primOcAddLast(interp: *Interpreter) InterpreterError!Value {
 
     const new_last = last_idx.asSmallInt() + 1;
     if (new_last >= @as(i61, @intCast(array_size))) {
-        // Would need to grow - for now, fail
-        try interp.push(oc);
-        try interp.push(element);
-        return InterpreterError.PrimitiveFailed;
+        // Need to grow the array - double the size
+        const first_idx = oc_obj.getField(1, 3);
+        if (!first_idx.isSmallInt()) {
+            try interp.push(oc);
+            try interp.push(element);
+            return InterpreterError.PrimitiveFailed;
+        }
+        const first = first_idx.asSmallInt();
+        const current_count = new_last - first; // Number of elements currently in collection
+
+        // Create new array with double the size
+        const new_size = array_size * 2;
+        const new_array = interp.heap.allocateObject(Heap.CLASS_ARRAY, new_size, .variable) catch {
+            return InterpreterError.OutOfMemory;
+        };
+
+        // Copy existing elements to the beginning of the new array
+        var i: usize = 0;
+        while (i < current_count) : (i += 1) {
+            const src_idx: usize = @intCast(first + @as(i61, @intCast(i)));
+            const val = array.getField(src_idx, array_size);
+            new_array.setField(i, val, new_size);
+        }
+
+        // Add the new element
+        new_array.setField(@intCast(current_count), element, new_size);
+
+        // Update OrderedCollection
+        oc_obj.setField(0, Value.fromObject(new_array), 3);
+        oc_obj.setField(1, Value.fromSmallInt(0), 3); // Reset first to 0
+        oc_obj.setField(2, Value.fromSmallInt(@intCast(current_count)), 3); // last = count (just added element)
+
+        return element;
     }
 
     array.setField(@intCast(new_last), element, array_size);
