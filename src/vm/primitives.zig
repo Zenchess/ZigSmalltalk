@@ -2673,9 +2673,12 @@ fn primBlockValueZero(interp: *Interpreter) InterpreterError!Value {
     const result = interp.interpretLoop() catch |err| {
         interp.primitive_block_depth -= 1;
 
-        // If exception was caught and handled by primExceptionSignal, don't restore state
-        // The handler already set up the correct context, and primOnDo will retrieve the result
+        // If exception was caught and handled by primExceptionSignal, restore heap contexts
+        // and propagate the error for primOnDo to handle
         if (err == InterpreterError.SmalltalkException and interp.exception_handled) {
+            // MUST restore heap contexts to prevent state leakage after exception handling
+            interp.heap_context = saved_heap_context;
+            interp.home_heap_context = saved_home_heap_context;
             return err;
         }
 
@@ -2849,9 +2852,12 @@ pub fn primBlockValue1(interp: *Interpreter) InterpreterError!Value {
     const result = interp.interpretLoop() catch |err| {
         interp.primitive_block_depth -= 1;
 
-        // If exception was caught and handled by primExceptionSignal, don't restore state
-        // The handler already set up the correct context, and primOnDo will retrieve the result
+        // If exception was caught and handled by primExceptionSignal, restore heap contexts
+        // and propagate the error for primOnDo to handle
         if (err == InterpreterError.SmalltalkException and interp.exception_handled) {
+            // MUST restore heap contexts to prevent state leakage after exception handling
+            interp.heap_context = saved_heap_context;
+            interp.home_heap_context = saved_home_heap_context;
             return err;
         }
 
@@ -3020,9 +3026,12 @@ fn primBlockValue2(interp: *Interpreter) InterpreterError!Value {
     const result = interp.interpretLoop() catch |err| {
         interp.primitive_block_depth -= 1;
 
-        // If exception was caught and handled by primExceptionSignal, don't restore state
-        // The handler already set up the correct context, and primOnDo will retrieve the result
+        // If exception was caught and handled by primExceptionSignal, restore heap contexts
+        // and propagate the error for primOnDo to handle
         if (err == InterpreterError.SmalltalkException and interp.exception_handled) {
+            // MUST restore heap contexts to prevent state leakage after exception handling
+            interp.heap_context = saved_heap_context;
+            interp.home_heap_context = saved_home_heap_context;
             return err;
         }
 
@@ -3197,9 +3206,12 @@ fn primBlockValue3(interp: *Interpreter) InterpreterError!Value {
     const result = interp.interpretLoop() catch |err| {
         interp.primitive_block_depth -= 1;
 
-        // If exception was caught and handled by primExceptionSignal, don't restore state
-        // The handler already set up the correct context, and primOnDo will retrieve the result
+        // If exception was caught and handled by primExceptionSignal, restore heap contexts
+        // and propagate the error for primOnDo to handle
         if (err == InterpreterError.SmalltalkException and interp.exception_handled) {
+            // MUST restore heap contexts to prevent state leakage after exception handling
+            interp.heap_context = saved_heap_context;
+            interp.home_heap_context = saved_home_heap_context;
             return err;
         }
 
@@ -3381,9 +3393,12 @@ fn primBlockValue4(interp: *Interpreter) InterpreterError!Value {
     const result = interp.interpretLoop() catch |err| {
         interp.primitive_block_depth -= 1;
 
-        // If exception was caught and handled by primExceptionSignal, don't restore state
-        // The handler already set up the correct context, and primOnDo will retrieve the result
+        // If exception was caught and handled by primExceptionSignal, restore heap contexts
+        // and propagate the error for primOnDo to handle
         if (err == InterpreterError.SmalltalkException and interp.exception_handled) {
+            // MUST restore heap contexts to prevent state leakage after exception handling
+            interp.heap_context = saved_heap_context;
+            interp.home_heap_context = saved_home_heap_context;
             return err;
         }
 
@@ -3546,9 +3561,12 @@ fn primBlockValueWithArgs(interp: *Interpreter) InterpreterError!Value {
     const result = interp.interpretLoop() catch |err| {
         interp.primitive_block_depth -= 1;
 
-        // If exception was caught and handled by primExceptionSignal, don't restore state
-        // The handler already set up the correct context, and primOnDo will retrieve the result
+        // If exception was caught and handled by primExceptionSignal, restore heap contexts
+        // and propagate the error for primOnDo to handle
         if (err == InterpreterError.SmalltalkException and interp.exception_handled) {
+            // MUST restore heap contexts to prevent state leakage after exception handling
+            interp.heap_context = saved_heap_context;
+            interp.home_heap_context = saved_home_heap_context;
             return err;
         }
 
@@ -3902,9 +3920,12 @@ fn evaluateBlock(interp: *Interpreter, block: Value) InterpreterError!Value {
     const result = interp.interpretLoop() catch |err| {
         interp.primitive_block_depth -= 1;
 
-        // If exception was caught and handled by primExceptionSignal, don't restore state
-        // The handler already set up the correct context, and primOnDo will retrieve the result
+        // If exception was caught and handled by primExceptionSignal, restore heap contexts
+        // and propagate the error for primOnDo to handle
         if (err == InterpreterError.SmalltalkException and interp.exception_handled) {
+            // MUST restore heap contexts to prevent state leakage after exception handling
+            interp.heap_context = saved_heap_context;
+            interp.home_heap_context = saved_home_heap_context;
             return err;
         }
 
@@ -4888,9 +4909,12 @@ fn evaluateBlockWith1(interp: *Interpreter, block: Value, arg: Value) Interprete
     const result = interp.interpretLoop() catch |err| {
         interp.primitive_block_depth -= 1;
 
-        // If exception was caught and handled by primExceptionSignal, don't restore state
-        // The handler already set up the correct context, and primOnDo will retrieve the result
+        // If exception was caught and handled by primExceptionSignal, restore heap contexts
+        // and propagate the error for primOnDo to handle
         if (err == InterpreterError.SmalltalkException and interp.exception_handled) {
+            // MUST restore heap contexts to prevent state leakage after exception handling
+            interp.heap_context = saved_heap_context;
+            interp.home_heap_context = saved_home_heap_context;
             return err;
         }
 

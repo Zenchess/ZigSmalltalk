@@ -1697,6 +1697,10 @@ pub const Interpreter = struct {
                     // ALWAYS write to stack for fast reads by outer scope
                     const base = if (level >= 2) self.home_temp_base else self.outer_temp_base;
                     const slot = base + 1 + index;
+                    // Bounds check to prevent memory corruption
+                    if (slot >= self.stack.len) {
+                        return InterpreterError.StackOverflow;
+                    }
                     self.stack[slot] = val;
 
                     // Also write to heap context for cross-process/forked block access
