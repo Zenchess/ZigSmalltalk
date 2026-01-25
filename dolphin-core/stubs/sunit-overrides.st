@@ -25,7 +25,15 @@ new
 !String methodsFor!
 beginsWith: aCollection
 	"Answer whether the receiver begins with the sequence of objects in aCollection."
-	^self basicBeginsWith: aCollection!
+	| mySize theirSize matches |
+	mySize := self size.
+	theirSize := aCollection size.
+	mySize < theirSize ifTrue: [^false].
+	matches := true.
+	1 to: theirSize do: [:i |
+		matches ifTrue: [
+			(self at: i) = (aCollection at: i) ifFalse: [matches := false]]].
+	^matches!
 !
 
 !Set methodsFor!

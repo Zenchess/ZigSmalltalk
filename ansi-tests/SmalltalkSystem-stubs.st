@@ -1,3 +1,12 @@
+!SmalltalkSystem methodsFor: 'system'!
+exit: anInteger
+    "Exit the Smalltalk system with the given exit code"
+    <primitive: 965>
+    Transcript show: 'exit: '; show: anInteger printString; cr.
+    "If primitive fails, just continue"
+    ^self!
+!
+
 !SmalltalkSystem methodsFor: 'enumerating'!
 allClasses
     "Return an Array of all classes in the system using VM primitive"
@@ -8,18 +17,13 @@ allClasses
 allClassesDo: aBlock
     "Iterate over all classes in the Smalltalk dictionary"
     | classes i size |
-    Transcript show: '>>> ENTERED allClassesDo <<<'; cr.
-    Transcript show: 'About to call allClasses...'; cr.
     classes := self allClasses.
-    Transcript show: 'allClasses returned, checking size...'; cr.
     size := classes basicSize.
-    Transcript show: 'allClassesDo: got '; show: size printString; show: ' classes from primitive'; cr.
     i := 1.
     [i <= size] whileTrue: [
         aBlock value: (classes basicAt: i).
         i := i + 1
     ].
-    Transcript show: '>>> EXITING allClassesDo <<<'; cr.
     ^self!
 !
 
@@ -31,6 +35,17 @@ beginsWith: aCollection
     self size < size ifTrue: [^false].
     1 to: size do: [:i |
         (self at: i) = (aCollection at: i) ifFalse: [^false]].
+    ^true!
+
+endsWith: aCollection
+    "Answer whether the receiver ends with aCollection"
+    | mySize colSize offset |
+    mySize := self size.
+    colSize := aCollection size.
+    mySize < colSize ifTrue: [^false].
+    offset := mySize - colSize.
+    1 to: colSize do: [:i |
+        (self at: offset + i) = (aCollection at: i) ifFalse: [^false]].
     ^true!
 !
 
@@ -96,6 +111,27 @@ asString
     result := String new: self size.
     1 to: self size do: [:i | result at: i put: (self at: i)].
     ^result!
+!
+
+!Symbol methodsFor: 'accessing'!
+argumentCount
+    "Answer the number of arguments the receiver takes when used as a message selector.
+    This is the number of colons in the symbol."
+    | count |
+    count := 0.
+    1 to: self size do: [:i |
+        (self at: i) = $: ifTrue: [count := count + 1]].
+    ^count!
+
+numArgs
+    "Answer the number of arguments this selector takes"
+    ^self argumentCount!
+!
+
+!Integer methodsFor: 'testing'!
+isZero
+    "Answer whether the receiver is zero"
+    ^self = 0!
 !
 
 !Object methodsFor: 'accessing'!
@@ -197,19 +233,57 @@ testSelectors
 !
 
 !TestSuite methodsFor: 'running'!
+run
+    "Override to create TestResult and run tests"
+    | result |
+    result := TestResult new.
+    self setUp.
+    [self run: result] ensure: [self tearDown].
+    ^result!
+
 run: aResult
-    "Override to avoid using do: which is broken - use indexed loop instead"
-    | start tests size |
-    Transcript show: 'TestSuite>>run: called'; cr.
-    start := Delay microsecondClockValue.
-    [tests := self tests.
+    "Run tests using indexed loop"
+    | tests size |
+    tests := self tests.
     size := tests size.
-    Transcript show: '  Running '; show: size printString; show: ' tests'; cr.
     1 to: size do: [:i |
-        Transcript show: '    Test '; show: i printString; cr.
-        self changed: (tests at: i).
-        (tests at: i) run: aResult]]
-        ensure: [aResult duration: (Delay microsecondClockValue - start) microseconds]!
+        (tests at: i) run: aResult]!
+!
+
+!TestResult methodsFor: 'running-stub'!
+runCase: aTestCase
+    "Run a single test case with exception handling"
+    [[aTestCase runCase]
+        on: TestFailure
+        do: [:ex |
+            self addFailure: aTestCase signal: ex.
+            ^self]]
+        on: Error
+        do: [:ex |
+            self addError: aTestCase signal: ex.
+            ^self].
+    "If we get here, test passed"
+    passed add: aTestCase.
+    results at: aTestCase put: #passed.
+    ^self!
+
+addError: aTestCase signal: anException
+    "Simplified error recording that avoids stack introspection"
+    results at: aTestCase put: #error.
+    errors add: aTestCase.
+    ^self!
+
+addFailure: aTestCase signal: anException
+    "Simplified failure recording that avoids stack introspection"
+    results at: aTestCase put: #failure.
+    failures add: aTestCase.
+    ^self!
+
+addPass: aTestCase duration: aDuration
+    "Record a passed test"
+    results at: aTestCase put: #passed.
+    passed add: aTestCase.
+    ^self!
 !
 
 !TestCase class methodsFor: 'instance creation'!
@@ -220,18 +294,10 @@ selector: aSymbol
 
 !TestCase class methodsFor: 'building suites'!
 buildSuiteFromSelectors
-    "Override to add debugging and ensure it works"
-    | result |
-    Transcript show: 'STUB buildSuiteFromSelectors for '; show: self name; cr.
-    result := self shouldInheritSelectors
-        ifTrue: [
-            Transcript show: '  STUB using allSelectors'; cr.
-            self buildSuiteFromAllSelectors]
-        ifFalse: [
-            Transcript show: '  STUB using localSelectors'; cr.
-            self buildSuiteFromLocalSelectors].
-    Transcript show: '  STUB result has '; show: result tests size printString; show: ' tests'; cr.
-    ^result!
+    "Override to ensure correct selector inheritance"
+    ^self shouldInheritSelectors
+        ifTrue: [self buildSuiteFromAllSelectors]
+        ifFalse: [self buildSuiteFromLocalSelectors]!
 
 buildSuiteFromAllSelectors
     ^self buildSuiteFromMethods: self allTestSelectors!
@@ -239,18 +305,14 @@ buildSuiteFromAllSelectors
 buildSuiteFromLocalSelectors
     ^self buildSuiteFromMethods: self testSelectors!
 
-!
 buildSuiteFromMethods: testMethods
     "Override to avoid using inject:into: which uses do: - use indexed loop instead"
     | suite size |
-    Transcript show: 'buildSuiteFromMethods for '; show: self name;
-        show: ' with '; show: testMethods size printString; show: ' methods'; cr.
     suite := TestSuite new.
     suite name: self name asString.
     size := testMethods size.
     1 to: size do: [:i |
         suite addTest: (self selector: (testMethods at: i))].
-    Transcript show: '  Suite built with '; show: suite tests size printString; show: ' tests'; cr.
     ^suite!
 !
 
@@ -603,4 +665,33 @@ isAbstract
 isAbstract
     "TestCase is abstract - subclasses should be concrete unless they also override isAbstract"
     ^self == TestCase!
+!
+
+"Boolean operators - | and & (non-short-circuit OR and AND)"
+!True methodsFor: 'logical operations'!
+| operand
+    "Inclusive OR - since receiver is true, result is always true"
+    ^true!
+
+& operand
+    "Logical AND - since receiver is true, result depends on operand"
+    ^operand!
+
+eqv: operand
+    "Answer true if both receiver and operand have the same truth value"
+    ^operand!
+!
+
+!False methodsFor: 'logical operations'!
+| operand
+    "Inclusive OR - since receiver is false, result depends on operand"
+    ^operand!
+
+& operand
+    "Logical AND - since receiver is false, result is always false"
+    ^false!
+
+eqv: operand
+    "Answer true if both receiver and operand have the same truth value"
+    ^operand not!
 !
