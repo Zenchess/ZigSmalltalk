@@ -27,12 +27,15 @@
     {
       "name": "OpenGL",
       "headers": [],
-      "link": "opengl32",
+      "link": "GL",
       "enabled": true
     },
     {
       "name": "OpenXR",
-      "headers": ["C:\\programming\\ZigSmalltalk\\vendor\\openxr-loader\\include\\openxr\\openxr.h"],
+      "headers": [
+        "C:\\programming\\ZigSmalltalk\\vendor\\openxr\\include\\openxr\\openxr.h",
+        "C:\\programming\\ZigSmalltalk\\vendor\\openxr\\include\\openxr\\openxr_platform.h"
+      ],
       "link": "C:\\programming\\ZigSmalltalk\\vendor\\openxr-loader\\x64\\lib\\openxr_loader.lib",
       "enabled": true
     }
