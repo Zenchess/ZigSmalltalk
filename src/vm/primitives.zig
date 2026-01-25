@@ -4865,8 +4865,12 @@ fn evaluateBlockWith1(interp: *Interpreter, block: Value, arg: Value) Interprete
         try interp.push(Value.nil);
     }
 
-    // If the block has temps, create a new heap context for them
-    if (num_temps > 0) {
+    // ALWAYS create a new heap context for the block's args (and temps if any).
+    // This is necessary because push_temporary needs to read from heap_context,
+    // and if we don't create one, it will read from the OUTER context instead of the block's args.
+    // BUG FIX: Previously only created context when num_temps > 0, which broke
+    // blocks with arguments but no temps (e.g., [:sel | ...] inside methods with outer temps).
+    {
         const outer_ctx = interp.heap_context;
         const heap_ctx = try interp.createHeapContext(1 + num_temps); // 1 arg + temps
         // Store the outer context in SENDER field so push_outer_temp can follow the chain
