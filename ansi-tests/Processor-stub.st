@@ -12,9 +12,12 @@ Object subclass: #MinimalProcess
 
 !ProcessorScheduler methodsFor: 'accessing'!
 
+testReturn42
+    ^42!
+
 activeProcess
-    activeProcess isNil ifTrue: [activeProcess := MinimalProcess new].
-    ^activeProcess!
+    "Return the active process - always create new for now"
+    ^MinimalProcess new!
 
 isActiveMain
     ^true!
@@ -36,6 +39,10 @@ exceptionEnvironment: anObject
 terminate
     ^self!
 
+topFrame
+    "Return the top stack frame for this process"
+    ^StackFrame current!
+
 ! !
 
-Processor := ProcessorScheduler new!
+Processor := ProcessorScheduler basicNew!

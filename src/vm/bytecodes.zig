@@ -346,6 +346,17 @@ pub const Primitive = enum(u16) {
     semaphore_set_signals = 99, // Semaphore >> primSetSignals:
     signal_timer_after = 100, // Delay class >> signalTimerAfter:
 
+    // ========================================================================
+    // Stack Frame introspection (230-236)
+    // ========================================================================
+    stack_frame_method = 230, // StackFrame >> method - get CompiledMethod for frame
+    stack_frame_receiver = 231, // StackFrame >> receiver - get self for frame
+    stack_frame_sender = 232, // StackFrame >> sender - get parent frame
+    stack_frame_ip = 233, // StackFrame >> ip - get instruction pointer
+    stack_frame_arguments = 234, // StackFrame >> arguments - get args array
+    stack_frame_temporaries = 235, // StackFrame >> temporaries - get temps array
+    stack_frame_current = 236, // StackFrame class >> current - get top frame
+
     // Object swapping (moved to avoid conflict with process primitives)
     become = 180, // Object >> become:
     one_way_become = 181, // Object >> oneWayBecome:

@@ -1118,7 +1118,7 @@ test "CodeGenerator - simple integer" {
     };
 
     const method = try gen.compileDoIt(&node);
-    defer allocator.free(@as([*]u8, @ptrCast(method))[0..100]); // Simplified cleanup
+    // Note: method is allocated through the heap, which is cleaned up by heap.deinit()
 
     try std.testing.expectEqual(@as(u8, 0), method.header.num_args);
 }

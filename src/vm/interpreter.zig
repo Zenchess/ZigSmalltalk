@@ -96,6 +96,7 @@ pub const Interpreter = struct {
         cached_holder: Value, // Class containing the method
         cached_version: u32, // Cache version when entry was created
         cached_jit_code: ?*jit.CompiledCode, // JIT compiled code (if available)
+        cached_selector: Value, // Selector for the send (to avoid false cache hits)
     };
 
     heap: *Heap,
@@ -249,7 +250,7 @@ pub const Interpreter = struct {
             .method_cache_hits = 0,
             .method_cache_misses = 0,
             // Initialize inline cache to empty
-            .inline_cache = [_]InlineCacheEntry{.{ .method_ptr = 0, .bytecode_offset = 0, .cached_class = Value.nil, .cached_method = null, .cached_holder = Value.nil, .cached_version = 0, .cached_jit_code = null }} ** INLINE_CACHE_SIZE,
+            .inline_cache = [_]InlineCacheEntry{.{ .method_ptr = 0, .bytecode_offset = 0, .cached_class = Value.nil, .cached_method = null, .cached_holder = Value.nil, .cached_version = 0, .cached_jit_code = null, .cached_selector = Value.nil }} ** INLINE_CACHE_SIZE,
             .inline_cache_hits = 0,
             .inline_cache_misses = 0,
             .cache_version = 1, // Start at 1 so version 0 means "uninitialized"
@@ -2287,10 +2288,12 @@ pub const Interpreter = struct {
 
         // Fast path: check if this exact callsite has a cached lookup
         // Also check cache version to handle method dictionary changes
+        // Must also check selector to avoid false hits from different DoIt methods
         if (!is_super and ic_entry.method_ptr == method_ptr and
             ic_entry.bytecode_offset == @as(u16, @intCast(bytecode_offset)) and
             ic_entry.cached_class.bits == receiver_class.bits and
-            ic_entry.cached_version == self.cache_version)
+            ic_entry.cached_version == self.cache_version and
+            ic_entry.cached_selector.bits == selector.bits)
         {
             // Inline cache HIT - use cached method directly
             self.inline_cache_hits += 1;
@@ -2513,6 +2516,7 @@ pub const Interpreter = struct {
                     .cached_holder = method_lookup.holder,
                     .cached_version = self.cache_version,
                     .cached_jit_code = jit_code,
+                    .cached_selector = selector,
                 };
             }
             const found_method = method_lookup.method;
@@ -2650,6 +2654,16 @@ pub const Interpreter = struct {
             self.method_class = method_holder;
             self.ip = 0;
             self.receiver = recv;
+
+            // Debug: show bytecodes of method being executed
+            if (DEBUG_VERBOSE and (std.mem.eql(u8, selector_name, "testReturn42") or std.mem.eql(u8, selector_name, "activeProcess"))) {
+                const exec_bcs = found_method.getBytecodes();
+                std.debug.print("DEBUG executing method '{s}' bytecodes:", .{selector_name});
+                for (exec_bcs) |bc| {
+                    std.debug.print(" {d}", .{bc});
+                }
+                std.debug.print(" (method at {*})\n", .{found_method});
+            }
             // OPTIMIZATION: recv+args already on stack at recv_pos
             // temp_base points to receiver position
             self.temp_base = recv_pos;
@@ -2897,6 +2911,15 @@ pub const Interpreter = struct {
     };
 
     pub fn lookupMethodWithHolder(self: *Interpreter, start_class: Value, selector: Value) ?MethodLookup {
+        // Debug: get selector name for debugging
+        var sel_name: []const u8 = "";
+        if (selector.isObject()) {
+            const sel_obj = selector.asObject();
+            if (sel_obj.header.class_index == Heap.CLASS_SYMBOL) {
+                sel_name = sel_obj.bytes(sel_obj.header.size);
+            }
+        }
+
         // Check method cache first
         const hash = start_class.bits ^ selector.bits;
         const index = hash & (METHOD_CACHE_SIZE - 1);
@@ -2905,6 +2928,9 @@ pub const Interpreter = struct {
         if (entry.class.bits == start_class.bits and entry.selector.bits == selector.bits) {
             // Cache hit!
             self.method_cache_hits += 1;
+            if (DEBUG_VERBOSE and (std.mem.eql(u8, sel_name, "testReturn42") or std.mem.eql(u8, sel_name, "activeProcess"))) {
+                std.debug.print("DEBUG lookupMethod CACHE HIT for '{s}' -> method at {*}\n", .{ sel_name, entry.method });
+            }
             if (entry.method) |method| {
                 return MethodLookup{
                     .method = method,
@@ -2917,6 +2943,13 @@ pub const Interpreter = struct {
         // Cache miss - do full lookup
         self.method_cache_misses += 1;
         const result = self.lookupMethodWithHolderUncached(start_class, selector);
+        if (DEBUG_VERBOSE and (std.mem.eql(u8, sel_name, "testReturn42") or std.mem.eql(u8, sel_name, "activeProcess"))) {
+            if (result) |r| {
+                std.debug.print("DEBUG lookupMethod CACHE MISS for '{s}' -> method at {*}\n", .{ sel_name, r.method });
+            } else {
+                std.debug.print("DEBUG lookupMethod CACHE MISS for '{s}' -> NOT FOUND\n", .{sel_name});
+            }
+        }
 
         // Update cache
         entry.class = start_class;
@@ -4560,9 +4593,17 @@ pub const Interpreter = struct {
     fn makeHandlerPushTemp(comptime index: usize) DispatchHandler {
         return struct {
             fn handler(self: *Interpreter) DispatchResult {
-                // Fast path: always read from stack (store_outer_temp keeps stack in sync)
-                const slot = self.temp_base + 1 + index;
-                self.stack[self.sp] = self.stack[slot];
+                // Check heap_context first for proper closure variable sharing
+                // This is critical for block arguments to work correctly
+                if (!self.heap_context.isNil()) {
+                    const ctx_obj = self.heap_context.asObject();
+                    const val = getHeapContextTemp(ctx_obj, index);
+                    self.stack[self.sp] = val;
+                } else {
+                    // Fall back to stack access
+                    const slot = self.temp_base + 1 + index;
+                    self.stack[self.sp] = self.stack[slot];
+                }
                 self.sp += 1;
                 return .continue_dispatch;
             }
@@ -4660,7 +4701,7 @@ test "Interpreter - push and pop" {
     var heap = try Heap.init(allocator, 1024 * 1024);
     defer heap.deinit();
 
-    var interp = try Interpreter.init(&heap, allocator);
+    var interp = try Interpreter.init(heap, allocator);
     defer interp.deinit();
 
     try interp.push(Value.fromSmallInt(42));

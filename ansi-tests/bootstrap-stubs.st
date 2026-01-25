@@ -88,6 +88,10 @@ defaultAction
 runCount
     ^runCount ifNil: [0]!
 
+testsRun
+    "Alias for runCount - used by some test runners"
+    ^self runCount!
+
 passedCount
     ^passedCount ifNil: [0]!
 

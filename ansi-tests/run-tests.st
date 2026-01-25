@@ -4,9 +4,9 @@
 testSuite := TestSuite new.
 
 "Add all ANSI test classes to the suite"
-Smalltalk allClassesDo: [ :class | 
-    (class name endsWith: 'ANSITest') ifTrue: [
-        testSuite addTest: class new
+Smalltalk allClassesDo: [ :class |
+    (class name asString endsWith: 'ANSITest') ifTrue: [
+        testSuite addTest: class buildSuite
     ]
 ].
 

@@ -103,6 +103,17 @@ pub fn executePrimitive(interp: *Interpreter, prim_index: u16) InterpreterError!
         .millisecond_clock_value => primMillisecondClockValue(interp),
 
         // ====================================================================
+        // Stack Frame introspection (230-236)
+        // ====================================================================
+        .stack_frame_method => primStackFrameMethod(interp),
+        .stack_frame_receiver => primStackFrameReceiver(interp),
+        .stack_frame_sender => primStackFrameSender(interp),
+        .stack_frame_ip => primStackFrameIP(interp),
+        .stack_frame_arguments => primStackFrameArguments(interp),
+        .stack_frame_temporaries => primStackFrameTemporaries(interp),
+        .stack_frame_current => primStackFrameCurrent(interp),
+
+        // ====================================================================
         // Object system (Dolphin: 109-114)
         // ====================================================================
         .hash => primHash(interp),
@@ -5718,7 +5729,7 @@ test "Primitives - arithmetic" {
     var heap = try memory.Heap.init(allocator, 1024 * 1024);
     defer heap.deinit();
 
-    var interp = try Interpreter.init(&heap, allocator);
+    var interp = try Interpreter.init(heap, allocator);
     defer interp.deinit();
 
     // Test addition
@@ -6009,7 +6020,7 @@ test "Primitives - comparison" {
     var heap = try memory.Heap.init(allocator, 1024 * 1024);
     defer heap.deinit();
 
-    var interp = try Interpreter.init(&heap, allocator);
+    var interp = try Interpreter.init(heap, allocator);
     defer interp.deinit();
 
     // Test less than
@@ -12054,4 +12065,258 @@ fn primAllClasses(interp: *Interpreter) InterpreterError!Value {
 
     std.debug.print("DEBUG: primAllClasses returning array with {d} classes\n", .{num_classes});
     return Value.fromObject(array);
+}
+
+// ============================================================================
+// Stack Frame Introspection Primitives (230-236)
+// ============================================================================
+
+/// StackFrame >> method
+/// Answer the CompiledMethod for this frame
+fn primStackFrameMethod(interp: *Interpreter) InterpreterError!Value {
+    const receiver = try interp.pop(); // StackFrame object
+
+    // Get the frame index from the StackFrame object
+    if (!receiver.isObject()) return InterpreterError.PrimitiveFailed;
+    const frame_obj = receiver.asObject();
+    const fields = frame_obj.fields(2);
+    const index_val = fields[1]; // index field (absolute context index)
+
+    if (!index_val.isSmallInt()) return InterpreterError.PrimitiveFailed;
+    const frame_index = index_val.asSmallInt();
+
+    // Validate frame index (must be >= 0 and still on stack)
+    if (frame_index < 0) return InterpreterError.PrimitiveFailed;
+    const idx: usize = @intCast(frame_index);
+
+    // Check if frame is still on the stack (hasn't returned)
+    if (idx > interp.context_ptr) {
+        // Frame has returned - return nil (dead frame)
+        return Value.nil;
+    }
+
+    const ctx = interp.contexts[idx];
+
+    // Return the CompiledMethod as an object
+    return Value.fromObject(@ptrCast(ctx.method));
+}
+
+/// StackFrame >> receiver
+/// Answer the receiver (self) for this frame
+fn primStackFrameReceiver(interp: *Interpreter) InterpreterError!Value {
+    const receiver = try interp.pop(); // StackFrame object
+
+    if (!receiver.isObject()) return InterpreterError.PrimitiveFailed;
+    const frame_obj = receiver.asObject();
+    const fields = frame_obj.fields(2);
+    const index_val = fields[1]; // index field (absolute context index)
+
+    if (!index_val.isSmallInt()) return InterpreterError.PrimitiveFailed;
+    const frame_index = index_val.asSmallInt();
+
+    if (frame_index < 0) return InterpreterError.PrimitiveFailed;
+    const idx: usize = @intCast(frame_index);
+
+    // Check if frame is still on the stack
+    if (idx > interp.context_ptr) {
+        return Value.nil;
+    }
+
+    const ctx = interp.contexts[idx];
+
+    return ctx.receiver;
+}
+
+/// StackFrame >> sender
+/// Answer the StackFrame that called this frame, or nil if this is the bottom
+fn primStackFrameSender(interp: *Interpreter) InterpreterError!Value {
+    const receiver = try interp.pop(); // StackFrame object
+
+    if (!receiver.isObject()) return InterpreterError.PrimitiveFailed;
+    const frame_obj = receiver.asObject();
+    const fields = frame_obj.fields(2);
+    const process_val = fields[0]; // process field
+    const index_val = fields[1]; // index field (absolute context index)
+
+    if (!index_val.isSmallInt()) return InterpreterError.PrimitiveFailed;
+    const frame_index = index_val.asSmallInt();
+
+    if (frame_index < 0) return InterpreterError.PrimitiveFailed;
+
+    // Sender is one below in the stack (idx - 1)
+    // If we're at 0, there is no sender
+    if (frame_index == 0) {
+        return Value.nil;
+    }
+
+    // Create a new StackFrame with index-1 (the sender)
+    const stack_frame_class = interp.heap.getGlobal("StackFrame") orelse {
+        return InterpreterError.PrimitiveFailed;
+    };
+
+    if (!stack_frame_class.isObject()) return InterpreterError.PrimitiveFailed;
+    const class_obj = stack_frame_class.asObject();
+
+    // Find the class index by looking through the class table
+    const class_index = findClassIndex(interp.heap, class_obj) orelse {
+        return InterpreterError.PrimitiveFailed;
+    };
+
+    // Allocate new StackFrame with 2 fields (process, index)
+    const new_frame = interp.heap.allocateObject(class_index, 2, .normal) catch {
+        return InterpreterError.PrimitiveFailed;
+    };
+    const new_fields = new_frame.fields(2);
+    new_fields[0] = process_val; // Same process
+    new_fields[1] = Value.fromSmallInt(frame_index - 1); // Decrement index (sender is below)
+
+    return Value.fromObject(new_frame);
+}
+
+/// StackFrame >> ip
+/// Answer the instruction pointer (bytecode offset) for this frame
+fn primStackFrameIP(interp: *Interpreter) InterpreterError!Value {
+    const receiver = try interp.pop(); // StackFrame object
+
+    if (!receiver.isObject()) return InterpreterError.PrimitiveFailed;
+    const frame_obj = receiver.asObject();
+    const fields = frame_obj.fields(2);
+    const index_val = fields[1]; // index field (absolute context index)
+
+    if (!index_val.isSmallInt()) return InterpreterError.PrimitiveFailed;
+    const frame_index = index_val.asSmallInt();
+
+    if (frame_index < 0) return InterpreterError.PrimitiveFailed;
+    const idx: usize = @intCast(frame_index);
+
+    // Check if frame is still on the stack
+    if (idx > interp.context_ptr) {
+        return Value.fromSmallInt(0);
+    }
+
+    const ctx = interp.contexts[idx];
+
+    return Value.fromSmallInt(@intCast(ctx.ip));
+}
+
+/// StackFrame >> arguments
+/// Answer an Array of the arguments passed to this frame
+fn primStackFrameArguments(interp: *Interpreter) InterpreterError!Value {
+    const receiver = try interp.pop(); // StackFrame object
+
+    if (!receiver.isObject()) return InterpreterError.PrimitiveFailed;
+    const frame_obj = receiver.asObject();
+    const fields = frame_obj.fields(2);
+    const index_val = fields[1]; // index field (absolute context index)
+
+    if (!index_val.isSmallInt()) return InterpreterError.PrimitiveFailed;
+    const frame_index = index_val.asSmallInt();
+
+    if (frame_index < 0) return InterpreterError.PrimitiveFailed;
+    const idx: usize = @intCast(frame_index);
+
+    if (idx > interp.context_ptr) {
+        // Return empty array for dead frame
+        const empty = interp.heap.allocateObject(Heap.CLASS_ARRAY, 0, .variable) catch {
+            return InterpreterError.PrimitiveFailed;
+        };
+        return Value.fromObject(empty);
+    }
+
+    const ctx = interp.contexts[idx];
+
+    // Get argument count from the method
+    const arg_count: usize = ctx.method.header.num_args;
+
+    // Allocate array for arguments
+    const args_array = interp.heap.allocateObject(Heap.CLASS_ARRAY, @intCast(arg_count), .variable) catch {
+        return InterpreterError.PrimitiveFailed;
+    };
+
+    // Copy arguments from the stack (they're at temp_base)
+    const array_fields = args_array.fields(@intCast(arg_count));
+    for (0..arg_count) |i| {
+        array_fields[i] = interp.stack[ctx.temp_base + i];
+    }
+
+    return Value.fromObject(args_array);
+}
+
+/// StackFrame >> temporaries
+/// Answer an Array of the temporary variables in this frame
+fn primStackFrameTemporaries(interp: *Interpreter) InterpreterError!Value {
+    const receiver = try interp.pop(); // StackFrame object
+
+    if (!receiver.isObject()) return InterpreterError.PrimitiveFailed;
+    const frame_obj = receiver.asObject();
+    const fields = frame_obj.fields(2);
+    const index_val = fields[1]; // index field (absolute context index)
+
+    if (!index_val.isSmallInt()) return InterpreterError.PrimitiveFailed;
+    const frame_index = index_val.asSmallInt();
+
+    if (frame_index < 0) return InterpreterError.PrimitiveFailed;
+    const idx: usize = @intCast(frame_index);
+
+    if (idx > interp.context_ptr) {
+        // Return empty array for dead frame
+        const empty = interp.heap.allocateObject(Heap.CLASS_ARRAY, 0, .variable) catch {
+            return InterpreterError.PrimitiveFailed;
+        };
+        return Value.fromObject(empty);
+    }
+
+    const ctx = interp.contexts[idx];
+
+    // Get temp count from the method (excluding args)
+    const arg_count: usize = ctx.method.header.num_args;
+    const temp_count: usize = ctx.method.header.num_temps;
+
+    // Allocate array for temps (temp_count includes args, so subtract)
+    const num_temps = if (temp_count > arg_count) temp_count - arg_count else 0;
+    const temps_array = interp.heap.allocateObject(Heap.CLASS_ARRAY, @intCast(num_temps), .variable) catch {
+        return InterpreterError.PrimitiveFailed;
+    };
+
+    // Copy temps from the stack (they're after args at temp_base)
+    const array_fields = temps_array.fields(@intCast(num_temps));
+    for (0..num_temps) |i| {
+        array_fields[i] = interp.stack[ctx.temp_base + arg_count + i];
+    }
+
+    return Value.fromObject(temps_array);
+}
+
+/// StackFrame class >> current
+/// Answer the current (top) stack frame
+fn primStackFrameCurrent(interp: *Interpreter) InterpreterError!Value {
+    _ = try interp.pop(); // Pop receiver (StackFrame class)
+
+    // Get StackFrame class
+    const stack_frame_class = interp.heap.getGlobal("StackFrame") orelse {
+        return InterpreterError.PrimitiveFailed;
+    };
+
+    if (!stack_frame_class.isObject()) return InterpreterError.PrimitiveFailed;
+    const class_obj = stack_frame_class.asObject();
+
+    // Find the class index by looking through the class table
+    const class_index = findClassIndex(interp.heap, class_obj) orelse {
+        return InterpreterError.PrimitiveFailed;
+    };
+
+    // Allocate new StackFrame with 2 fields (process, index)
+    const frame = interp.heap.allocateObject(class_index, 2, .normal) catch {
+        return InterpreterError.PrimitiveFailed;
+    };
+    const fields = frame.fields(2);
+
+    // Set process to nil for now (we don't have a proper Process object)
+    fields[0] = Value.nil;
+    // Store ABSOLUTE context index - primitives run without their own context,
+    // so context_ptr already points to the caller's frame
+    const caller_index: i61 = @intCast(interp.context_ptr);
+    fields[1] = Value.fromSmallInt(caller_index);
+
+    return Value.fromObject(frame);
 }

@@ -413,6 +413,40 @@ pub fn main() !void {
         std.debug.print("JIT compilation enabled\n", .{});
     }
 
+    // Load core libraries before command-line files so they can be overridden
+    {
+        var core_file_in = filein.FileIn.initWithInterpreter(allocator, heap, &interp);
+        defer core_file_in.deinit();
+
+        // Load TranscriptShell so Transcript works
+        core_file_in.loadFile("src/image/transcript-shell.st") catch {
+            core_file_in.loadFile("transcript-shell.st") catch {};
+        };
+
+        // Initialize TranscriptShell (sets Transcript global)
+        _ = compileAndExecute(allocator, &interp, "TranscriptShell create") catch {};
+
+        // Load process scheduling classes (Process, Semaphore, Delay, etc.)
+        core_file_in.loadFile("src/smalltalk/process-scheduling.st") catch {
+            core_file_in.loadFile("process-scheduling.st") catch {};
+        };
+
+        // Load StackFrame for stack introspection
+        core_file_in.loadFile("src/smalltalk/stack-frame.st") catch {
+            core_file_in.loadFile("stack-frame.st") catch {};
+        };
+
+        // Load Message class (needed for doesNotUnderstand:)
+        core_file_in.loadFile("src/smalltalk/message.st") catch {
+            core_file_in.loadFile("message.st") catch {};
+        };
+
+        // Load exception handling (MessageNotUnderstood, on:do:, etc.)
+        core_file_in.loadFile("src/smalltalk/exception-handling.st") catch {
+            core_file_in.loadFile("exception-handling.st") catch {};
+        };
+    }
+
     var skip_next: bool = false;
     for (args[1..]) |arg| {
         if (skip_next) {
@@ -421,9 +455,13 @@ pub fn main() !void {
         }
         // Skip flags
         if (arg.len > 0 and arg[0] == '-') {
-            if (std.mem.eql(u8, arg, "--image") or std.mem.eql(u8, arg, "--load-order") or std.mem.eql(u8, arg, "--load-ansi")) {
+            if (std.mem.eql(u8, arg, "--image") or std.mem.eql(u8, arg, "--load-order")) {
                 // Skip the following path (already handled in the earlier loop)
                 skip_next = true;
+                continue;
+            }
+            if (std.mem.eql(u8, arg, "--load-ansi")) {
+                // Just a flag to indicate ANSI test mode - don't skip next arg
                 continue;
             }
             if (std.mem.eql(u8, arg, "--tui") or std.mem.eql(u8, arg, "--no-repl") or std.mem.eql(u8, arg, "--jit")) {
@@ -484,25 +522,8 @@ pub fn main() !void {
         return;
     }
 
-    // REPL mode: Auto-load TranscriptShell and process scheduling for full environment
-    {
-        var file_in = filein.FileIn.init(allocator, heap);
-        defer file_in.deinit();
-
-        // Load TranscriptShell so Transcript works
-        file_in.loadFile("src/image/transcript-shell.st") catch {
-            // Try relative to executable location or current directory
-            file_in.loadFile("transcript-shell.st") catch {};
-        };
-
-        // Initialize TranscriptShell (sets Transcript global)
-        _ = compileAndExecute(allocator, &interp, "TranscriptShell create") catch {};
-
-        // Load process scheduling classes (Process, Semaphore, Delay, etc.)
-        file_in.loadFile("src/smalltalk/process-scheduling.st") catch {
-            file_in.loadFile("process-scheduling.st") catch {};
-        };
-    }
+    // Core libraries (TranscriptShell, process-scheduling) are now loaded
+    // before command-line files so they can be overridden
 
     // Print banner
     _ = try stdout.write(banner);

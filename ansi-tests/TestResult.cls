@@ -162,6 +162,10 @@ runCase: aTestCase
 runCount
 	^results size!
 
+testsRun
+	"Alias for runCount - used by some test runners"
+	^self runCount!
+
 skipped
 	^skipped!
 

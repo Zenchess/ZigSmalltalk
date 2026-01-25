@@ -589,3 +589,18 @@ asANSITestArray: arrays
     "Simplified - just return the arrays unchanged"
     ^arrays!
 !
+
+"Add isAbstract method to Class - defaults to false"
+"In Dolphin Smalltalk this is a class property, but we implement as a method"
+!Class methodsFor: 'testing'!
+isAbstract
+    "Answer whether this class is abstract. By default, classes are not abstract.
+     TestCase and other abstract classes override this to return true."
+    ^false!
+!
+
+!TestCase class methodsFor: 'testing'!
+isAbstract
+    "TestCase is abstract - subclasses should be concrete unless they also override isAbstract"
+    ^self == TestCase!
+!

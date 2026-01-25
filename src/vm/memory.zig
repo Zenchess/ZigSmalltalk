@@ -66,6 +66,8 @@ pub const Heap = struct {
     pub const CLASS_WRITE_STREAM: u32 = 25;
     pub const CLASS_FILE_STREAM: u32 = 26;
     pub const CLASS_METHOD_CONTEXT: u32 = 27; // Heap-allocated activation record
+    pub const CLASS_STACK_FRAME: u32 = 28; // Stack frame for introspection
+    pub const CLASS_PROCESS: u32 = 29; // Process (for stack frame reference)
 
     pub const CLASS_DEAF_OBJECT: u32 = 36;
     pub const CLASS_TRANSCRIPT_SHELL: u32 = 37;

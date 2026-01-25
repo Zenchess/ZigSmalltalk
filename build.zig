@@ -128,6 +128,21 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
+    // Add build options to tests (same as exe)
+    unit_tests.root_module.addOptions("build_options", options);
+    unit_tests.linkLibC();
+
+    // Link FFI libraries for tests (same as exe)
+    if (ffi_available) {
+        if (libffi_result) |result| {
+            unit_tests.linkLibrary(result.lib);
+            unit_tests.addIncludePath(result.include_path);
+        } else {
+            unit_tests.linkSystemLibrary("ffi");
+        }
+        linkFFILibraries(b, unit_tests, target);
+    }
+
     const run_unit_tests = b.addRunArtifact(unit_tests);
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_unit_tests.step);
