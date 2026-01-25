@@ -51,8 +51,9 @@ endsWith: aCollection
 
 !SUnitNameResolver class methodsFor: 'resolving'!
 classNamed: aSymbol
-    "Look up a class by name"
-    ^Smalltalk at: aSymbol ifAbsent: [nil]!
+    "Look up a class by name using primitive that accesses heap globals directly"
+    <primitive: 910>
+    ^nil!
 !
 
 !MainTestCase class methodsFor: 'helper classes'!

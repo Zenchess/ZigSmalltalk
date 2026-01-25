@@ -361,49 +361,6 @@ pub fn main() !void {
     // Register interpreter with heap for GC stack tracing
     heap.interpreter = &interp;
 
-    // Check for --jit flag to enable JIT compilation
-    // Process load-order file if specified
-    if (load_order_path) |order_path| {
-        const order_file = std.fs.cwd().openFile(order_path, .{}) catch |err| {
-            std.debug.print("Failed to open load-order file {s}: {any}\n", .{ order_path, err });
-            return;
-        };
-        defer order_file.close();
-
-        const order_content = order_file.readToEndAlloc(allocator, 10 * 1024 * 1024) catch {
-            std.debug.print("Failed to read load-order file\n", .{});
-            return;
-        };
-        defer allocator.free(order_content);
-
-        // Process each line as a file path
-        var lines = std.mem.splitAny(u8, order_content, "\n\r");
-        while (lines.next()) |line| {
-            const trimmed_line = std.mem.trim(u8, line, " \t");
-            // Skip empty lines and comments
-            if (trimmed_line.len == 0) continue;
-            if (trimmed_line[0] == '#') continue;
-
-            // Use main interpreter for JIT stats tracking
-            var file_in = filein.FileIn.initWithInterpreter(allocator, heap, &interp);
-            defer file_in.deinit();
-
-            file_in.loadFile(trimmed_line) catch |err| {
-                if (!tui_mode) {
-                    const err_msg = switch (err) {
-                        filein.FileInError.FileNotFound => "File not found",
-                        filein.FileInError.ClassNotFound => "Class not found",
-                        filein.FileInError.InvalidMethodDefinition => "Invalid method definition",
-                        filein.FileInError.CompilationFailed => "Compilation failed",
-                        else => "Unknown error",
-                    };
-                    std.debug.print("Loading: {s} - Error: {s}\n", .{ trimmed_line, err_msg });
-                }
-                continue;
-            };
-        }
-    }
-
     // Enable JIT after core loads to avoid compiling transient boot code
     if (jit_requested) {
         std.debug.print("Enabling JIT after load-order processing\n", .{});
@@ -450,6 +407,48 @@ pub fn main() !void {
         core_file_in.loadFile("src/smalltalk/exception-handling.st") catch {
             core_file_in.loadFile("exception-handling.st") catch {};
         };
+    }
+
+    // Process load-order file if specified (after core libraries are loaded)
+    if (load_order_path) |order_path| {
+        const order_file = std.fs.cwd().openFile(order_path, .{}) catch |err| {
+            std.debug.print("Failed to open load-order file {s}: {any}\n", .{ order_path, err });
+            return;
+        };
+        defer order_file.close();
+
+        const order_content = order_file.readToEndAlloc(allocator, 10 * 1024 * 1024) catch {
+            std.debug.print("Failed to read load-order file\n", .{});
+            return;
+        };
+        defer allocator.free(order_content);
+
+        // Process each line as a file path
+        var lines = std.mem.splitAny(u8, order_content, "\n\r");
+        while (lines.next()) |line| {
+            const trimmed_line = std.mem.trim(u8, line, " \t");
+            // Skip empty lines and comments
+            if (trimmed_line.len == 0) continue;
+            if (trimmed_line[0] == '#') continue;
+
+            // Use main interpreter for JIT stats tracking
+            var file_in = filein.FileIn.initWithInterpreter(allocator, heap, &interp);
+            defer file_in.deinit();
+
+            file_in.loadFile(trimmed_line) catch |err| {
+                if (!tui_mode) {
+                    const err_msg = switch (err) {
+                        filein.FileInError.FileNotFound => "File not found",
+                        filein.FileInError.ClassNotFound => "Class not found",
+                        filein.FileInError.InvalidMethodDefinition => "Invalid method definition",
+                        filein.FileInError.CompilationFailed => "Compilation failed",
+                        else => "Unknown error",
+                    };
+                    std.debug.print("Loading: {s} - Error: {s}\n", .{ trimmed_line, err_msg });
+                }
+                continue;
+            };
+        }
     }
 
     var skip_next: bool = false;

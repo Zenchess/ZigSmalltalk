@@ -1,0 +1,122 @@
+# SUnit stubs and fixes
+dolphin-core/stubs/sunit-stubs.st
+dolphin-core/stubs/sunit-overrides.st
+dolphin-core/stubs/testrunner-overrides.st
+
+# SUnitNameResolver class (required before adding methods to it)
+ansi-tests/SUnitNameResolver.cls
+
+# ANSI test stubs (overrides for SUnitNameResolver, etc.)
+ansi-tests/SmalltalkSystem-stubs.st
+
+# SUnit framework classes
+Dolphin/Core/Contributions/Camp Smalltalk/SUnit/TestFailure.cls
+Dolphin/Core/Contributions/Camp Smalltalk/SUnit/ResumableTestFailure.cls
+Dolphin/Core/Contributions/Camp Smalltalk/SUnit/TestSkip.cls
+Dolphin/Core/Contributions/Camp Smalltalk/SUnit/TestResource.cls
+Dolphin/Core/Contributions/Camp Smalltalk/SUnit/TestCaseResult.cls
+Dolphin/Core/Contributions/Camp Smalltalk/SUnit/TestResult.cls
+Dolphin/Core/Contributions/Camp Smalltalk/SUnit/TestCase.cls
+Dolphin/Core/Contributions/Camp Smalltalk/SUnit/TestSuite.cls
+Dolphin/Core/Contributions/Camp Smalltalk/SUnit/TestRunner.cls
+
+# Protocol specification classes (required by TestCaseProtocol)
+Dolphin/Core/Contributions/Camp Smalltalk/ANSI/Tests/MsgParmSpec.cls
+Dolphin/Core/Contributions/Camp Smalltalk/ANSI/Tests/MsgReturnSpec.cls
+Dolphin/Core/Contributions/Camp Smalltalk/ANSI/Tests/MsgReturnRuleSpec.cls
+Dolphin/Core/Contributions/Camp Smalltalk/ANSI/Tests/ProtocolANYSpec.cls
+Dolphin/Core/Contributions/Camp Smalltalk/ANSI/Tests/ProtocolMsgSpec.cls
+Dolphin/Core/Contributions/Camp Smalltalk/ANSI/Tests/ProtocolSpec.cls
+
+# Protocol database and initialization
+Dolphin/Core/Contributions/Camp Smalltalk/ANSI/Tests/AnsiDB.st
+Dolphin/Core/Contributions/Camp Smalltalk/ANSI/Tests/AnsiInit.st
+
+# ANSI Test helper classes
+Dolphin/Core/Contributions/Camp Smalltalk/ANSI/Tests/ObjectHelper.cls
+Dolphin/Core/Contributions/Camp Smalltalk/ANSI/Tests/CollectionHelper.cls
+Dolphin/Core/Contributions/Camp Smalltalk/ANSI/Tests/ExtensibleCollectionHelper.cls
+Dolphin/Core/Contributions/Camp Smalltalk/ANSI/Tests/SequencedCollectionHelper.cls
+Dolphin/Core/Contributions/Camp Smalltalk/ANSI/Tests/SequencedReadableCollectionHelper.cls
+Dolphin/Core/Contributions/Camp Smalltalk/ANSI/Tests/ReadStreamHelper.cls
+Dolphin/Core/Contributions/Camp Smalltalk/ANSI/Tests/WriteStreamHelper.cls
+Dolphin/Core/Contributions/Camp Smalltalk/ANSI/Tests/GettableStreamHelper.cls
+Dolphin/Core/Contributions/Camp Smalltalk/ANSI/Tests/PuttableStreamHelper.cls
+Dolphin/Core/Contributions/Camp Smalltalk/ANSI/Tests/ReadableStringHelper.cls
+Dolphin/Core/Contributions/Camp Smalltalk/ANSI/Tests/CollectionStreamHelper.cls
+Dolphin/Core/Contributions/Camp Smalltalk/ANSI/Tests/SequencedStreamHelper.cls
+Dolphin/Core/Contributions/Camp Smalltalk/ANSI/Tests/TestCaseHelper.cls
+Dolphin/Core/Contributions/Camp Smalltalk/ANSI/Tests/TestCaseProtocol.cls
+Dolphin/Core/Contributions/Camp Smalltalk/ANSI/Tests/MainTestCase.cls
+
+# ANSI Test classes - basic types first
+Dolphin/Core/Contributions/Camp Smalltalk/ANSI/Tests/ObjectANSITest.cls
+Dolphin/Core/Contributions/Camp Smalltalk/ANSI/Tests/ObjectClassANSITest.cls
+Dolphin/Core/Contributions/Camp Smalltalk/ANSI/Tests/BooleanANSITest.cls
+Dolphin/Core/Contributions/Camp Smalltalk/ANSI/Tests/NilANSITest.cls
+
+# ANSI Test classes - numbers
+Dolphin/Core/Contributions/Camp Smalltalk/ANSI/Tests/IntegerANSITest.cls
+Dolphin/Core/Contributions/Camp Smalltalk/ANSI/Tests/FloatANSITest.cls
+Dolphin/Core/Contributions/Camp Smalltalk/ANSI/Tests/FloatCharacterizationANSITest.cls
+Dolphin/Core/Contributions/Camp Smalltalk/ANSI/Tests/FractionANSITest.cls
+Dolphin/Core/Contributions/Camp Smalltalk/ANSI/Tests/FractionFactoryANSITest.cls
+
+# ANSI Test classes - characters and strings
+Dolphin/Core/Contributions/Camp Smalltalk/ANSI/Tests/CharacterANSITest.cls
+Dolphin/Core/Contributions/Camp Smalltalk/ANSI/Tests/CharacterFactoryANSITest.cls
+Dolphin/Core/Contributions/Camp Smalltalk/ANSI/Tests/StringANSITest.cls
+Dolphin/Core/Contributions/Camp Smalltalk/ANSI/Tests/StringFactoryANSITest.cls
+Dolphin/Core/Contributions/Camp Smalltalk/ANSI/Tests/SymbolANSITest.cls
+Dolphin/Core/Contributions/Camp Smalltalk/ANSI/Tests/SelectorANSITest.cls
+
+# ANSI Test classes - collections
+Dolphin/Core/Contributions/Camp Smalltalk/ANSI/Tests/ArrayANSITest.cls
+Dolphin/Core/Contributions/Camp Smalltalk/ANSI/Tests/ArrayFactoryANSITest.cls
+Dolphin/Core/Contributions/Camp Smalltalk/ANSI/Tests/ByteArrayANSITest.cls
+Dolphin/Core/Contributions/Camp Smalltalk/ANSI/Tests/ByteArrayFactoryANSITest.cls
+Dolphin/Core/Contributions/Camp Smalltalk/ANSI/Tests/OrderedCollectionANSITest.cls
+Dolphin/Core/Contributions/Camp Smalltalk/ANSI/Tests/OrderedCollectionFactoryANSITest.cls
+Dolphin/Core/Contributions/Camp Smalltalk/ANSI/Tests/SetANSITest.cls
+Dolphin/Core/Contributions/Camp Smalltalk/ANSI/Tests/SetFactoryANSITest.cls
+Dolphin/Core/Contributions/Camp Smalltalk/ANSI/Tests/BagANSITest.cls
+Dolphin/Core/Contributions/Camp Smalltalk/ANSI/Tests/BagFactoryANSITest.cls
+Dolphin/Core/Contributions/Camp Smalltalk/ANSI/Tests/IntervalANSITest.cls
+Dolphin/Core/Contributions/Camp Smalltalk/ANSI/Tests/IntervalFactoryANSITest.cls
+Dolphin/Core/Contributions/Camp Smalltalk/ANSI/Tests/SortedCollectionANSITest.cls
+Dolphin/Core/Contributions/Camp Smalltalk/ANSI/Tests/SortedCollectionFactoryANSITest.cls
+Dolphin/Core/Contributions/Camp Smalltalk/ANSI/Tests/DictionaryANSITest.cls
+Dolphin/Core/Contributions/Camp Smalltalk/ANSI/Tests/DictionaryFactoryANSITest.cls
+Dolphin/Core/Contributions/Camp Smalltalk/ANSI/Tests/IdentityDictionaryANSITest.cls
+Dolphin/Core/Contributions/Camp Smalltalk/ANSI/Tests/IdentityDictionaryFactoryANSITest.cls
+
+# ANSI Test classes - blocks
+Dolphin/Core/Contributions/Camp Smalltalk/ANSI/Tests/NiladicBlockANSITest.cls
+Dolphin/Core/Contributions/Camp Smalltalk/ANSI/Tests/MonadicBlockANSITest.cls
+Dolphin/Core/Contributions/Camp Smalltalk/ANSI/Tests/DyadicValuableANSITest.cls
+
+# ANSI Test classes - exceptions
+Dolphin/Core/Contributions/Camp Smalltalk/ANSI/Tests/ExceptionANSITest.cls
+Dolphin/Core/Contributions/Camp Smalltalk/ANSI/Tests/ExceptionClassANSITest.cls
+Dolphin/Core/Contributions/Camp Smalltalk/ANSI/Tests/ExceptionSetANSITest.cls
+Dolphin/Core/Contributions/Camp Smalltalk/ANSI/Tests/ErrorANSITest.cls
+Dolphin/Core/Contributions/Camp Smalltalk/ANSI/Tests/ErrorClassANSITest.cls
+Dolphin/Core/Contributions/Camp Smalltalk/ANSI/Tests/NotificationANSITest.cls
+Dolphin/Core/Contributions/Camp Smalltalk/ANSI/Tests/NotificationClassANSITest.cls
+Dolphin/Core/Contributions/Camp Smalltalk/ANSI/Tests/WarningANSITest.cls
+Dolphin/Core/Contributions/Camp Smalltalk/ANSI/Tests/WarningClassANSITest.cls
+Dolphin/Core/Contributions/Camp Smalltalk/ANSI/Tests/MessageNotUnderstoodANSITest.cls
+Dolphin/Core/Contributions/Camp Smalltalk/ANSI/Tests/MessageNotUnderstoodSelectorANSITest.cls
+Dolphin/Core/Contributions/Camp Smalltalk/ANSI/Tests/FailedMessageANSITest.cls
+Dolphin/Core/Contributions/Camp Smalltalk/ANSI/Tests/ZeroDivideANSITest.cls
+Dolphin/Core/Contributions/Camp Smalltalk/ANSI/Tests/ZeroDivideFactoryANSITest.cls
+
+# ANSI Test classes - streams
+Dolphin/Core/Contributions/Camp Smalltalk/ANSI/Tests/ReadStreamANSITest.cls
+Dolphin/Core/Contributions/Camp Smalltalk/ANSI/Tests/ReadStreamFactoryANSITest.cls
+Dolphin/Core/Contributions/Camp Smalltalk/ANSI/Tests/WriteStreamANSITest.cls
+Dolphin/Core/Contributions/Camp Smalltalk/ANSI/Tests/WriteStreamFactoryANSITest.cls
+Dolphin/Core/Contributions/Camp Smalltalk/ANSI/Tests/ReadWriteStreamANSITest.cls
+Dolphin/Core/Contributions/Camp Smalltalk/ANSI/Tests/ReadWriteStreamFactoryANSITest.cls
+
+run-integer-tests.st
