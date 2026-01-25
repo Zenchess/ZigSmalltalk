@@ -1,5 +1,13 @@
 "Filed out stub support for SUnit in Zig Smalltalk"!
 
+"Behavior accessors - methodDictionary is at field index 2 (1-based) in the class object"
+!Behavior methodsFor!
+methodDictionary
+    "Answer the method dictionary of the receiver.
+     The method dictionary is stored at field index 2 of the class object."
+    ^self at: 2!
+!
+
 "Simple doesNotUnderstand: to prevent infinite recursion during exception handling"
 !Object methodsFor!
 doesNotUnderstand: aMessage
@@ -366,6 +374,19 @@ printString
 	^'nil'!
 !
 
+"Boolean printString methods - avoid streams"
+!True methodsFor!
+printString
+	"Answer a string representation of true"
+	^'true'!
+!
+
+!False methodsFor!
+printString
+	"Answer a string representation of false"
+	^'false'!
+!
+
 "String concatenation operator"
 !String methodsFor!
 , aString
@@ -406,6 +427,18 @@ numArgs
 	count := 0.
 	1 to: self size do: [:i | (self basicAt: i) = $: ifTrue: [count := count + 1]].
 	^count!
+
+beginsWith: aCollection
+	"Answer whether the receiver begins with the sequence of objects in aCollection."
+	| mySize theirSize matches |
+	mySize := self size.
+	theirSize := aCollection size.
+	mySize < theirSize ifTrue: [^false].
+	matches := true.
+	1 to: theirSize do: [:i |
+		matches ifTrue: [
+			(self at: i) = (aCollection at: i) ifFalse: [matches := false]]].
+	^matches!
 !
 
 "Fix beginsWith: to use simple index-based comparison without non-local returns"
@@ -421,6 +454,18 @@ beginsWith: aCollection
 		matches ifTrue: [
 			(self at: i) = (aCollection at: i) ifFalse: [matches := false]]].
 	^matches!
+
+basicBeginsWith: aCollection
+	"Answer whether the receiver begins with the sequence of objects in aCollection - no early returns version"
+	| size match i |
+	size := aCollection size.
+	self size < size ifTrue: [^false].
+	match := true.
+	i := 1.
+	aCollection do: [:each |
+		match ifTrue: [(self at: i) = each ifFalse: [match := false]].
+		i := i + 1].
+	^match!
 !
 
 Object subclass: #TranscriptStub

@@ -426,6 +426,11 @@ pub fn main() !void {
         // Initialize TranscriptShell (sets Transcript global)
         _ = compileAndExecute(allocator, &interp, "TranscriptShell create") catch {};
 
+        // Load exception stubs (addClassVariable:, etc.) needed by process scheduling
+        core_file_in.loadFile("src/image/exception-stubs.st") catch {
+            core_file_in.loadFile("exception-stubs.st") catch {};
+        };
+
         // Load process scheduling classes (Process, Semaphore, Delay, etc.)
         core_file_in.loadFile("src/smalltalk/process-scheduling.st") catch {
             core_file_in.loadFile("process-scheduling.st") catch {};
@@ -668,6 +673,9 @@ pub fn main() !void {
                 error.InvalidIndex => "Invalid index",
                 error.TypeError => "Type error",
                 error.BlockCannotReturn => "Block cannot return",
+                error.SmalltalkException => "Smalltalk exception signaled",
+                error.BlockNonLocalReturn => "Block non-local return",
+                error.ContinueExecution => "Continue execution (should not reach here)",
                 else => "Unknown error",
             };
             _ = try stdout.write(err_msg);

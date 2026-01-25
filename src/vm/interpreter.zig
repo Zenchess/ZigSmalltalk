@@ -130,6 +130,8 @@ pub const Interpreter = struct {
     exception_handlers: [256]ExceptionHandler,
     handler_ptr: usize, // Current handler index (number of active handlers)
     current_exception: Value, // Current exception being handled (for handler block parameter)
+    exception_handled: bool, // Flag set when exception was caught by handler - tells primBlockValue* not to restore state
+    exception_handler_result: Value, // Result from exception handler block
 
     // Primitive block execution tracking - when > 0, return_top returns directly to primitive
     // but block_return still uses context chain for non-local returns
@@ -237,6 +239,8 @@ pub const Interpreter = struct {
             .exception_handlers = undefined,
             .handler_ptr = 0,
             .current_exception = Value.nil,
+            .exception_handled = false,
+            .exception_handler_result = Value.nil,
             .primitive_block_depth = 0,
             .primitive_block_bases = [_]usize{0} ** 64,
             .non_local_return_target = 0,
@@ -717,6 +721,8 @@ pub const Interpreter = struct {
         self.context_ptr = 0;
         self.handler_ptr = 0;
         self.current_exception = Value.nil;
+        self.exception_handled = false;
+        self.exception_handler_result = Value.nil;
         self.primitive_block_depth = 0;
         self.non_local_return_target = 0;
 
@@ -983,6 +989,73 @@ pub const Interpreter = struct {
         return null;
     }
 
+    /// Signal a MessageNotUnderstood exception through the Smalltalk exception mechanism.
+    /// If there's a handler, it will be invoked. If not, returns MessageNotUnderstood error.
+    pub fn signalMessageNotUnderstood(self: *Interpreter, recv: Value, message: Value) InterpreterError!Value {
+        // Create a MessageNotUnderstood exception object
+        const mnu_obj = self.heap.allocateObject(Heap.CLASS_MESSAGE_NOT_UNDERSTOOD, 2, .normal) catch {
+            return InterpreterError.MessageNotUnderstood;
+        };
+        // Field 0: messageText (or receiver) - we store the message object
+        mnu_obj.setField(0, message, 2);
+        // Field 1: receiver
+        mnu_obj.setField(1, recv, 2);
+
+        const exception = Value.fromObject(mnu_obj);
+
+        // Check if there's an exception handler
+        if (self.findExceptionHandler(exception)) |handler_idx| {
+            const handler = self.exception_handlers[handler_idx];
+
+            // Save current state
+            const saved_method = self.method;
+            const saved_ip = self.ip;
+            const saved_receiver = self.receiver;
+            const saved_context_ptr = self.context_ptr;
+            const saved_temp_base = self.temp_base;
+            const saved_sp = self.sp;
+
+            // Unwind to handler's context
+            self.context_ptr = handler.context_ptr;
+            self.sp = handler.sp;
+            self.temp_base = handler.temp_base;
+
+            // Remove handlers installed after this one
+            self.handler_ptr = handler_idx;
+
+            // Store exception
+            self.current_exception = exception;
+
+            // Execute handler block with exception as argument
+            try self.push(handler.handler_block);
+            try self.push(exception);
+            const handler_result = primitives.primBlockValue1(self) catch |err| {
+                // Handler threw - restore and propagate
+                self.method = saved_method;
+                self.ip = saved_ip;
+                self.receiver = saved_receiver;
+                self.context_ptr = saved_context_ptr;
+                self.temp_base = saved_temp_base;
+                self.sp = saved_sp;
+                return err;
+            };
+
+            // Restore method state
+            self.method = saved_method;
+            self.ip = saved_ip;
+            self.receiver = saved_receiver;
+
+            // Mark exception as handled
+            self.exception_handled = true;
+            self.exception_handler_result = handler_result;
+
+            return InterpreterError.SmalltalkException;
+        }
+
+        // No handler - return regular MNU error
+        return InterpreterError.MessageNotUnderstood;
+    }
+
     /// Execute a compiled method and return the result
     pub fn execute(self: *Interpreter, method: *CompiledMethod, recv: Value, args: []const Value) InterpreterError!Value {
         // Initialize common selectors for fast arithmetic dispatch (once)
@@ -1019,6 +1092,11 @@ pub const Interpreter = struct {
 
     /// Internal execute without main process setup (called after main process is ensured)
     fn executeWithoutMainProcess(self: *Interpreter, method: *CompiledMethod, recv: Value, args: []const Value) InterpreterError!Value {
+        // Reset stack and context for fresh top-level execution
+        // This is critical to prevent stack corruption between REPL evaluations
+        self.sp = 0;
+        self.context_ptr = 0;
+
         // Set up initial context
         self.method = method;
         self.ip = 0;
@@ -2441,6 +2519,7 @@ pub const Interpreter = struct {
                             return err;
                         }
                         if (err == InterpreterError.BlockNonLocalReturn) return err;
+                        if (err == InterpreterError.SmalltalkException) return err;
                         // Primitive failed - restore stack and fall through
                         self.sp = recv_pos;
                         try self.push(self.stack[recv_pos]);
@@ -2547,6 +2626,10 @@ pub const Interpreter = struct {
                     }
                     // Propagate block non-local returns up the call chain
                     if (err == InterpreterError.BlockNonLocalReturn) {
+                        return err;
+                    }
+                    // Propagate Smalltalk exceptions so on:do: can catch them
+                    if (err == InterpreterError.SmalltalkException) {
                         return err;
                     }
                     // Primitive failed, fall through to execute bytecode
@@ -2829,8 +2912,11 @@ pub const Interpreter = struct {
                         c = c_obj.getField(Heap.CLASS_FIELD_SUPERCLASS, c_obj.header.size);
                     }
                 }
-                if (DEBUG_VERBOSE) std.debug.print("DEBUG MessageNotUnderstood recv={s} selector={s}\n", .{ recv_name, sel_name }); 
-                return InterpreterError.MessageNotUnderstood;
+                if (DEBUG_VERBOSE) std.debug.print("DEBUG MessageNotUnderstood recv={s} selector={s}\n", .{ recv_name, sel_name });
+                // Try to signal through Smalltalk exception mechanism
+                // If handled, SmalltalkException propagates back to primOnDo which returns the result
+                _ = try self.signalMessageNotUnderstood(recv, selector);
+                return;
             }
         }
     }
@@ -3321,7 +3407,10 @@ pub const Interpreter = struct {
                     std.debug.print("  outer_temp_base={} slot0={s} slot1={s}\n", .{ base, s0, s1 });
                 }
             }
-            return InterpreterError.MessageNotUnderstood;
+            // Try to signal through Smalltalk exception mechanism
+            // If handled, SmalltalkException propagates back to primOnDo which returns the result
+            _ = try self.signalMessageNotUnderstood(recv, selector_sym);
+            return;
         }
     }
 
@@ -3414,7 +3503,10 @@ pub const Interpreter = struct {
             }
         }
         if (DEBUG_VERBOSE) std.debug.print("DEBUG lookup miss selector={s} recv={s}\n", .{ selector, recv_name });
-        return InterpreterError.MessageNotUnderstood;
+        // Try to signal through Smalltalk exception mechanism
+        // If handled, SmalltalkException propagates back to primOnDo which returns the result
+        _ = try self.signalMessageNotUnderstood(recv, selector_sym);
+        return;
     }
 
     // ========================================================================
