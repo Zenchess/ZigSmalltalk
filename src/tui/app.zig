@@ -117,7 +117,7 @@ pub const App = struct {
         const width = term.width;
         const height = term.height;
 
-        const screen = try Screen.init(allocator, term, width, height);
+        const screen = try Screen.init(allocator, width, height);
 
         // Calculate layout regions
         const tabbar_rect = Rect.init(0, 0, width, 1);
