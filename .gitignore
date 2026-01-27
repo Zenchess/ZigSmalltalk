@@ -17,3 +17,113 @@ Dolphin/
 chess-opengl.st
 packages/ChessScene3D/
 OpenGLDolphin/
+
+# Test outputs and logs
+*-output.txt
+*-output-*.txt
+*-output.log
+*.log
+full-run.txt
+keylog.txt
+nul
+
+# Ad-hoc test scripts (keep organized tests in ansi-tests/)
+test-*.st
+check-*.st
+run-*.st
+simple-*.st
+hello.st
+minimal-*.st
+comprehensive-*.st
+focused-*.st
+final-*.st
+edge-*.st
+repl-*.st
+verify-*.st
+discover-*.st
+count-*.st
+demo-*.st
+inspect-*.st
+list-*.st
+load-*.st
+show-*.st
+chunk-*.st
+float-*.st
+integer-*.st
+object-*.st
+gl-*.st
+
+# Ad-hoc batch files
+*.bat
+
+# Test binaries
+test_raylib
+test_raylib_funcs
+test_structs
+
+# Generated reports (regenerate as needed)
+*-REPORT.md
+*-STATUS.md
+*-SUMMARY.md
+*-SUMMARY.txt
+BUG-ANALYSIS-*.md
+*-README.md
+
+# Vendor dependencies (should use submodules or package manager)
+vendor/
+
+# Temporary ansi-tests runner scripts (exclude tracked files)
+ansi-tests/run-all*.st
+ansi-tests/run-batch*.st
+ansi-tests/run-comprehensive*.st
+ansi-tests/run-debug*.st
+ansi-tests/run-final*.st
+ansi-tests/run-full*.st
+ansi-tests/run-manual*.st
+ansi-tests/run-noerror*.st
+ansi-tests/run-safe*.st
+ansi-tests/run-simple*.st
+ansi-tests/run-simpler*.st
+ansi-tests/run-test-one*.st
+ansi-tests/run-trace*.st
+ansi-tests/run-working*.st
+ansi-tests/*-fix.st
+ansi-tests/*-debug.st
+ansi-tests/diagnose-*.st
+ansi-tests/*-doit.st
+# Keep tracked: run-tests.st, run-tests-simple.st, run-core-tests.st
+# Keep tracked: test-dolphin-load.st, test-method.st, test-stack.st
+
+# Shell scripts for testing
+*.sh
+!tools/*.sh
+
+# Test input files
+test-input.txt
+test-results.txt
+
+# Test run outputs
+*-test-run.txt
+*-test-results.txt
+*-test.txt
+heap-stack-test.txt
+latest-test-run.txt
+test-run-full.txt
+
+# Load output files
+load-*.txt
+
+# OpenXR demos and test outputs (ad-hoc development)
+openxr-*.st
+openxr-*.txt
+vr-*.txt
+
+# Misc text outputs
+ansi-test-run.txt
+ansi-test-runner.st
+
+# Generated test report markdown files
+TEST-REPORT-*.md
+
+# Claude Code local settings (user-specific)
+.claude/
