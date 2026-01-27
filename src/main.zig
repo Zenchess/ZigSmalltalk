@@ -53,8 +53,10 @@ pub fn main() !void {
 
     std.debug.print("VM start\n", .{});
 
-    const stdout = std.fs.File.stdout();
-    const stdin = std.fs.File.stdin();
+    const stdout_file = std.io.getStdOut();
+    const stdout = stdout_file.writer();
+    const stdin_file = std.io.getStdIn();
+    const stdin = stdin_file.reader();
 
     // Process command line arguments for files to load
     const args = try std.process.argsAlloc(allocator);

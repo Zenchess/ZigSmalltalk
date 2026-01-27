@@ -1,323 +1,200 @@
+
 const std = @import("std");
-const terminal = @import("terminal.zig");
+const assert = std.debug.assert;
+const terminal_mod = @import("terminal.zig");
 const style_mod = @import("style.zig");
-
 const Style = style_mod.Style;
-const Rgb = terminal.Rgb;
-const ansi = terminal.ansi;
+const Color = style_mod.Color;
+const Attribute = style_mod.Attribute;
 
+/// Represents a single cell in the terminal screen buffer.
 pub const Cell = struct {
-    char: u21 = ' ',
-    style: Style = Style.default,
-
-    pub fn eql(self: Cell, other: Cell) bool {
-        return self.char == other.char and self.style.eql(other.style);
-    }
+    ch: u8,
+    style: Style,
 };
 
+/// Represents the terminal screen buffer.
 pub const Screen = struct {
+    terminal: *terminal_mod.Terminal,
     allocator: std.mem.Allocator,
-    cells: []Cell,
-    prev_cells: []Cell,
     width: u16,
     height: u16,
-    cursor_x: u16 = 0,
-    cursor_y: u16 = 0,
-    cursor_visible: bool = true,
+    buffer: []Cell,
+    prev_buffer: []Cell,
+    dirty: []bool,
+    full_redraw_pending: bool,
 
-    pub fn init(allocator: std.mem.Allocator, width: u16, height: u16) !Screen {
-        const size = @as(usize, width) * @as(usize, height);
-        const cells = try allocator.alloc(Cell, size);
-        const prev_cells = try allocator.alloc(Cell, size);
+    pub fn init(allocator: std.mem.Allocator, terminal: *terminal_mod.Terminal, width: u16, height: u16) !Screen {
+        const buffer_len = width * height;
+        const buffer = try allocator.alloc(Cell, buffer_len);
+        const prev_buffer = try allocator.alloc(Cell, buffer_len);
+        const dirty = try allocator.alloc(bool, buffer_len);
 
-        for (cells) |*cell| {
-            cell.* = Cell{};
-        }
-        for (prev_cells) |*cell| {
-            cell.* = Cell{ .char = 0 }; // Different from default to force initial draw
-        }
-
-        return Screen{
+        var screen = Screen{
             .allocator = allocator,
-            .cells = cells,
-            .prev_cells = prev_cells,
+            .terminal = terminal,
             .width = width,
             .height = height,
+            .buffer = buffer,
+            .prev_buffer = prev_buffer,
+            .dirty = dirty,
+            .full_redraw_pending = true, // Force full redraw on first frame
         };
+        screen.clear(); // Initialize buffers
+        return screen;
     }
 
     pub fn deinit(self: *Screen) void {
-        self.allocator.free(self.cells);
-        self.allocator.free(self.prev_cells);
+        self.allocator.free(self.buffer);
+        self.allocator.free(self.prev_buffer);
+        self.allocator.free(self.dirty);
     }
 
-    pub fn resize(self: *Screen, width: u16, height: u16) !void {
-        const size = @as(usize, width) * @as(usize, height);
+    pub fn resize(self: *Screen, new_width: u16, new_height: u16) !void {
+        if (new_width == self.width and new_height == self.height) return;
 
-        self.allocator.free(self.cells);
-        self.allocator.free(self.prev_cells);
+        const new_buffer_len = new_width * new_height;
+        const new_buffer = try self.allocator.alloc(Cell, new_buffer_len);
+        const new_prev_buffer = try self.allocator.alloc(Cell, new_buffer_len);
+        const new_dirty = try self.allocator.alloc(bool, new_buffer_len);
 
-        self.cells = try self.allocator.alloc(Cell, size);
-        self.prev_cells = try self.allocator.alloc(Cell, size);
-
-        for (self.cells) |*cell| {
-            cell.* = Cell{};
+        // Clear new buffers
+        for (0..new_buffer_len) |i| {
+            new_buffer[i] = Cell{ .ch = ' ', .style = Style.default() };
+            new_prev_buffer[i] = Cell{ .ch = ' ', .style = Style.default() };
+            new_dirty[i] = true;
         }
-        for (self.prev_cells) |*cell| {
-            cell.* = Cell{ .char = 0 };
+
+        // Copy existing content to the new buffer, clipping if necessary
+        var y: u16 = 0;
+        while (y < @min(self.height, new_height)) : (y += 1) {
+            var x: u16 = 0;
+            while (x < @min(self.width, new_width)) : (x += 1) {
+                const old_idx = self.idx(x, y);
+                const new_idx = (y * new_width) + x;
+                new_buffer[new_idx] = self.buffer[old_idx];
+            }
         }
 
-        self.width = width;
-        self.height = height;
+        self.allocator.free(self.buffer);
+        self.allocator.free(self.prev_buffer);
+        self.allocator.free(self.dirty);
+
+        self.buffer = new_buffer;
+        self.prev_buffer = new_prev_buffer;
+        self.dirty = new_dirty;
+        self.width = new_width;
+        self.height = new_height;
+        self.full_redraw_pending = true;
     }
 
+    /// Clears the screen buffer and marks all cells as dirty.
     pub fn clear(self: *Screen) void {
-        for (self.cells) |*cell| {
-            cell.* = Cell{};
-        }
-        // Hide cursor by default; components that need it will set cursor_visible = true
-        self.cursor_visible = false;
-    }
-
-    pub fn clearWithStyle(self: *Screen, s: Style) void {
-        for (self.cells) |*cell| {
-            cell.* = Cell{ .char = ' ', .style = s };
+        const default_cell = Cell{ .ch = ' ', .style = Style.default() };
+        for (0..self.buffer.len) |i| {
+            self.buffer[i] = default_cell;
+            self.prev_buffer[i] = default_cell; // Also clear prev buffer
+            self.dirty[i] = true; // Mark all as dirty
         }
     }
 
-    fn idx(self: *Screen, x: u16, y: u16) ?usize {
-        if (x >= self.width or y >= self.height) return null;
-        return @as(usize, y) * @as(usize, self.width) + @as(usize, x);
+    /// Sets a cell's character and style at the given coordinates.
+    pub fn put(self: *Screen, x: u16, y: u16, ch: u8, style: Style) void {
+        if (x >= self.width or y >= self.height) return;
+        const i = self.idx(x, y);
+        self.buffer[i] = Cell{ .ch = ch, .style = style };
     }
 
-    pub fn setCell(self: *Screen, x: u16, y: u16, char: u21, s: Style) void {
-        if (self.idx(x, y)) |i| {
-            self.cells[i] = Cell{ .char = char, .style = s };
+    /// Draws a string to the screen buffer.
+    pub fn putStr(self: *Screen, x: u16, y: u16, text: []const u8, style: Style) void {
+        var current_x = x;
+        for (text) |ch| {
+            if (current_x >= self.width) break;
+            self.put(current_x, y, ch, style);
+            current_x += 1;
         }
     }
 
-    pub fn getCell(self: *Screen, x: u16, y: u16) ?Cell {
-        if (self.idx(x, y)) |i| {
-            return self.cells[i];
-        }
-        return null;
-    }
-
-    pub fn drawText(self: *Screen, x: u16, y: u16, text: []const u8, s: Style) void {
-        var col = x;
-        var i: usize = 0;
-        while (i < text.len) {
-            const len = std.unicode.utf8ByteSequenceLength(text[i]) catch 1;
-            const codepoint = std.unicode.utf8Decode(text[i..@min(i + len, text.len)]) catch ' ';
-
-            self.setCell(col, y, codepoint, s);
-            col += 1;
-            i += len;
-
-            if (col >= self.width) break;
+    /// Draws a string to the screen buffer, truncating if it exceeds width.
+    pub fn putStrTruncate(self: *Screen, x: u16, y: u16, text: []const u8, max_width: u16, style: Style) void {
+        var current_x = x;
+        for (text) |ch| {
+            if (current_x >= self.width or (current_x - x) >= max_width) break;
+            self.put(current_x, y, ch, style);
+            current_x += 1;
         }
     }
 
-    pub fn drawTextClipped(self: *Screen, x: u16, y: u16, text: []const u8, max_width: u16, s: Style) void {
-        var col = x;
-        var i: usize = 0;
-        const end_col = @min(x + max_width, self.width);
-
-        while (i < text.len and col < end_col) {
-            const len = std.unicode.utf8ByteSequenceLength(text[i]) catch 1;
-            const codepoint = std.unicode.utf8Decode(text[i..@min(i + len, text.len)]) catch ' ';
-
-            self.setCell(col, y, codepoint, s);
-            col += 1;
-            i += len;
+    /// Draws a vertical line character.
+    pub fn putVLine(self: *Screen, x: u16, y1: u16, y2: u16, ch: u8, style: Style) void {
+        var y = y1;
+        while (y <= y2) : (y += 1) {
+            self.put(x, y, ch, style);
         }
     }
 
-    pub fn fillRect(self: *Screen, x: u16, y: u16, w: u16, h: u16, char: u21, s: Style) void {
-        var row: u16 = y;
-        while (row < y + h and row < self.height) : (row += 1) {
-            var col: u16 = x;
-            while (col < x + w and col < self.width) : (col += 1) {
-                self.setCell(col, row, char, s);
+    /// Draws a horizontal line character.
+    pub fn putHLine(self: *Screen, x1: u16, x2: u16, y: u16, ch: u8, style: Style) void {
+        var x = x1;
+        while (x <= x2) : (x += 1) {
+            self.put(x, y, ch, style);
+        }
+    }
+
+    /// Fills a rectangular region with a character and style.
+    pub fn fill(self: *Screen, x: u16, y: u16, width: u16, height: u16, ch: u8, style: Style) void {
+        var current_y = y;
+        while (current_y < y + height) : (current_y += 1) {
+            var current_x = x;
+            while (current_x < x + width) : (current_x += 1) {
+                self.put(current_x, current_y, ch, style);
             }
         }
     }
 
-    pub fn drawHLine(self: *Screen, x: u16, y: u16, length: u16, char: u21, s: Style) void {
-        var col = x;
-        while (col < x + length and col < self.width) : (col += 1) {
-            self.setCell(col, y, char, s);
-        }
-    }
-
-    pub fn drawVLine(self: *Screen, x: u16, y: u16, length: u16, char: u21, s: Style) void {
-        var row = y;
-        while (row < y + length and row < self.height) : (row += 1) {
-            self.setCell(x, row, char, s);
-        }
-    }
-
-    pub fn drawBox(self: *Screen, x: u16, y: u16, w: u16, h: u16, s: Style) void {
-        if (w < 2 or h < 2) return;
-
-        const box = style_mod.box;
-
-        // Corners
-        self.drawText(x, y, box.top_left, s);
-        self.drawText(x + w - 1, y, box.top_right, s);
-        self.drawText(x, y + h - 1, box.bottom_left, s);
-        self.drawText(x + w - 1, y + h - 1, box.bottom_right, s);
-
-        // Horizontal lines
-        var col: u16 = x + 1;
-        while (col < x + w - 1) : (col += 1) {
-            self.drawText(col, y, box.horizontal, s);
-            self.drawText(col, y + h - 1, box.horizontal, s);
-        }
-
-        // Vertical lines
-        var row: u16 = y + 1;
-        while (row < y + h - 1) : (row += 1) {
-            self.drawText(x, row, box.vertical, s);
-            self.drawText(x + w - 1, row, box.vertical, s);
-        }
-    }
-
-    pub fn drawBoxRounded(self: *Screen, x: u16, y: u16, w: u16, h: u16, s: Style) void {
-        if (w < 2 or h < 2) return;
-
-        const box = style_mod.box;
-
-        // Rounded corners
-        self.drawText(x, y, box.round_top_left, s);
-        self.drawText(x + w - 1, y, box.round_top_right, s);
-        self.drawText(x, y + h - 1, box.round_bottom_left, s);
-        self.drawText(x + w - 1, y + h - 1, box.round_bottom_right, s);
-
-        // Horizontal lines
-        var col: u16 = x + 1;
-        while (col < x + w - 1) : (col += 1) {
-            self.drawText(col, y, box.horizontal, s);
-            self.drawText(col, y + h - 1, box.horizontal, s);
-        }
-
-        // Vertical lines
-        var row: u16 = y + 1;
-        while (row < y + h - 1) : (row += 1) {
-            self.drawText(x, row, box.vertical, s);
-            self.drawText(x + w - 1, row, box.vertical, s);
-        }
-    }
-
-    pub fn setCursor(self: *Screen, x: u16, y: u16) void {
-        self.cursor_x = x;
-        self.cursor_y = y;
-    }
-
+    /// Flushes the screen buffer to the terminal, only drawing changed cells.
     pub fn flush(self: *Screen) void {
-        // Hide cursor during rendering to prevent flicker
-        ansi.hideCursor();
-
-        var current_style: ?Style = null;
+        var current_style = Style.default;
+        self.terminal.ansi.resetStyle(self.terminal.writer) catch {};
 
         var y: u16 = 0;
         while (y < self.height) : (y += 1) {
             var x: u16 = 0;
-            var line_dirty = false;
-
-            // Check if this line has any changes
             while (x < self.width) : (x += 1) {
-                if (self.idx(x, y)) |i| {
-                    if (!self.cells[i].eql(self.prev_cells[i])) {
-                        line_dirty = true;
-                        break;
+                const i = self.idx(x, y);
+                const current_cell = self.buffer[i];
+                const prev_cell = self.prev_buffer[i];
+
+                if (self.full_redraw_pending or current_cell.ch != prev_cell.ch or !current_cell.style.eql(prev_cell.style)) {
+                    self.terminal.ansi.cursorGoTo(self.terminal.writer, x + 1, y + 1) catch {};
+                    if (!current_cell.style.eql(current_style)) {
+                        current_cell.style.apply(self.terminal.writer);
+                        current_style = current_cell.style;
                     }
-                }
-            }
-
-            if (!line_dirty) continue;
-
-            // Draw the dirty line
-            ansi.moveCursor(y, 0);
-            x = 0;
-            while (x < self.width) : (x += 1) {
-                if (self.idx(x, y)) |i| {
-                    const cell = self.cells[i];
-
-                    // Update style if changed
-                    if (current_style == null or !current_style.?.eql(cell.style)) {
-                        cell.style.apply();
-                        current_style = cell.style;
-                    }
-
-                    // Write character
-                    ansi.writeChar(cell.char);
-
-                    // Update prev buffer
-                    self.prev_cells[i] = cell;
+                    self.terminal.writer.writeAll(&.{current_cell.ch}) catch {};
+                    self.prev_buffer[i] = current_cell;
                 }
             }
         }
-
-        // Reset style
-        ansi.resetStyle();
-
-        // Position cursor
-        if (self.cursor_visible) {
-            ansi.moveCursor(self.cursor_y, self.cursor_x);
-            ansi.showCursor();
-        } else {
-            ansi.hideCursor();
-        }
+        self.terminal.ansi.cursorGoTo(self.terminal.writer, 1, self.height) catch {};
+        self.terminal.ansi.flush(self.terminal.writer) catch {};
+        self.full_redraw_pending = false;
     }
 
-    pub fn forceFullRedraw(self: *Screen) void {
-        // Mark all prev_cells as different to force redraw
-        for (self.prev_cells) |*cell| {
-            cell.char = 0;
-        }
-    }
-
-    /// Flush all cells unconditionally (for use after resize)
+    /// Forces a full redraw of the entire screen on the next flush.
     pub fn flushFull(self: *Screen) void {
-        // Hide cursor during rendering to prevent flicker
-        ansi.hideCursor();
+        self.full_redraw_pending = true;
+        self.flush();
+    }
 
-        var current_style: ?Style = null;
+    /// Marks that a full redraw is needed on the next flush.
+    pub fn forceFullRedraw(self: *Screen) void {
+        self.full_redraw_pending = true;
+    }
 
-        var y: u16 = 0;
-        while (y < self.height) : (y += 1) {
-            // Move to start of each line and draw everything
-            ansi.moveCursor(y, 0);
-            var x: u16 = 0;
-            while (x < self.width) : (x += 1) {
-                if (self.idx(x, y)) |i| {
-                    const cell = self.cells[i];
-
-                    // Update style if changed
-                    if (current_style == null or !current_style.?.eql(cell.style)) {
-                        cell.style.apply();
-                        current_style = cell.style;
-                    }
-
-                    // Write character
-                    ansi.writeChar(cell.char);
-
-                    // Update prev buffer
-                    self.prev_cells[i] = cell;
-                }
-            }
-        }
-
-        // Reset style
-        ansi.resetStyle();
-
-        // Position cursor
-        if (self.cursor_visible) {
-            ansi.moveCursor(self.cursor_y, self.cursor_x);
-            ansi.showCursor();
-        } else {
-            ansi.hideCursor();
-        }
+    fn idx(self: *Screen, x: u16, y: u16) usize {
+        assert(x < self.width);
+        assert(y < self.height);
+        return (y * self.width) + x;
     }
 };

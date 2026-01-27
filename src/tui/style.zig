@@ -139,21 +139,21 @@ pub const Style = struct {
         return s;
     }
 
-    pub fn apply(self: Style) void {
+    pub fn apply(self: Style, writer: anytype) void {
         const ansi = terminal.ansi;
-        ansi.resetStyle();
+        ansi.resetStyle(writer) catch {};
 
-        if (self.bold) ansi.setBold();
-        if (self.dim) ansi.setDim();
-        if (self.italic) ansi.setItalic();
-        if (self.underline) ansi.setUnderline();
-        if (self.reverse) ansi.setReverse();
+        if (self.bold) ansi.setBold(writer) catch {};
+        if (self.dim) ansi.setDim(writer) catch {};
+        if (self.italic) ansi.setItalic(writer) catch {};
+        if (self.underline) ansi.setUnderline(writer) catch {};
+        if (self.reverse) ansi.setReverse(writer) catch {};
 
         if (self.fg) |fg| {
-            ansi.setFgRgb(fg.r, fg.g, fg.b);
+            ansi.setFgRgb(writer, fg.r, fg.g, fg.b) catch {};
         }
         if (self.bg) |bg| {
-            ansi.setBgRgb(bg.r, bg.g, bg.b);
+            ansi.setBgRgb(writer, bg.r, bg.g, bg.b) catch {};
         }
     }
 
