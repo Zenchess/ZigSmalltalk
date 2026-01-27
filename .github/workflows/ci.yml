@@ -7,7 +7,7 @@ on:
     branches: [master, main]
 
 env:
-  ZIG_VERSION: "0.14.0"
+  ZIG_VERSION: "0.15.2"
 
 jobs:
   build:
@@ -16,11 +16,14 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            zig-arch: x86_64-linux
+            zig-file: zig-x86_64-linux-0.15.2.tar.xz
+            zig-dir: zig-x86_64-linux-0.15.2
           - os: macos-latest
-            zig-arch: aarch64-macos
+            zig-file: zig-aarch64-macos-0.15.2.tar.xz
+            zig-dir: zig-aarch64-macos-0.15.2
           - os: windows-latest
-            zig-arch: x86_64-windows
+            zig-file: zig-x86_64-windows-0.15.2.zip
+            zig-dir: zig-x86_64-windows-0.15.2
 
     runs-on: ${{ matrix.os }}
 
@@ -28,25 +31,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Zig (Linux)
-        if: runner.os == 'Linux'
+      - name: Setup Zig (Linux/macOS)
+        if: runner.os != 'Windows'
         run: |
-          curl -L "https://ziglang.org/download/${{ env.ZIG_VERSION }}/zig-linux-x86_64-${{ env.ZIG_VERSION }}.tar.xz" | tar -xJ
-          echo "$PWD/zig-linux-x86_64-${{ env.ZIG_VERSION }}" >> $GITHUB_PATH
-
-      - name: Setup Zig (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          curl -L "https://ziglang.org/download/${{ env.ZIG_VERSION }}/zig-macos-aarch64-${{ env.ZIG_VERSION }}.tar.xz" | tar -xJ
-          echo "$PWD/zig-macos-aarch64-${{ env.ZIG_VERSION }}" >> $GITHUB_PATH
+          curl -L "https://ziglang.org/download/${{ env.ZIG_VERSION }}/${{ matrix.zig-file }}" | tar -xJ
+          echo "$PWD/${{ matrix.zig-dir }}" >> $GITHUB_PATH
 
       - name: Setup Zig (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          Invoke-WebRequest -Uri "https://ziglang.org/download/${{ env.ZIG_VERSION }}/zig-windows-x86_64-${{ env.ZIG_VERSION }}.zip" -OutFile zig.zip
+          Invoke-WebRequest -Uri "https://ziglang.org/download/${{ env.ZIG_VERSION }}/${{ matrix.zig-file }}" -OutFile zig.zip
           Expand-Archive zig.zip -DestinationPath .
-          echo "$PWD\zig-windows-x86_64-${{ env.ZIG_VERSION }}" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          echo "$PWD\${{ matrix.zig-dir }}" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       - name: Verify Zig
         run: zig version
@@ -71,8 +68,8 @@ jobs:
 
       - name: Setup Zig
         run: |
-          curl -L "https://ziglang.org/download/${{ env.ZIG_VERSION }}/zig-linux-x86_64-${{ env.ZIG_VERSION }}.tar.xz" | tar -xJ
-          echo "$PWD/zig-linux-x86_64-${{ env.ZIG_VERSION }}" >> $GITHUB_PATH
+          curl -L "https://ziglang.org/download/${{ env.ZIG_VERSION }}/zig-x86_64-linux-${{ env.ZIG_VERSION }}.tar.xz" | tar -xJ
+          echo "$PWD/zig-x86_64-linux-${{ env.ZIG_VERSION }}" >> $GITHUB_PATH
 
       - name: Build VM
         run: zig build
@@ -93,8 +90,8 @@ jobs:
 
       - name: Setup Zig
         run: |
-          curl -L "https://ziglang.org/download/${{ env.ZIG_VERSION }}/zig-linux-x86_64-${{ env.ZIG_VERSION }}.tar.xz" | tar -xJ
-          echo "$PWD/zig-linux-x86_64-${{ env.ZIG_VERSION }}" >> $GITHUB_PATH
+          curl -L "https://ziglang.org/download/${{ env.ZIG_VERSION }}/zig-x86_64-linux-${{ env.ZIG_VERSION }}.tar.xz" | tar -xJ
+          echo "$PWD/zig-x86_64-linux-${{ env.ZIG_VERSION }}" >> $GITHUB_PATH
 
       - name: Check Formatting
         run: |
