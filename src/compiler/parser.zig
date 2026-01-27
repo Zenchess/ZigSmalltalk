@@ -966,9 +966,15 @@ test "Parser - binary message" {
 
     const node = try parser.parseExpression();
     defer {
-        // Clean up - this is simplified, real cleanup would be recursive
+        // Clean up receiver node
         allocator.destroy(node.data.message.receiver);
+        // Clean up each argument node
+        for (node.data.message.arguments) |arg| {
+            allocator.destroy(arg);
+        }
+        // Free the arguments slice
         allocator.free(node.data.message.arguments);
+        // Clean up the main node
         allocator.destroy(node);
     }
 

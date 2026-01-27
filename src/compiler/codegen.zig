@@ -1121,7 +1121,7 @@ test "CodeGenerator - simple integer" {
     };
 
     const method = try gen.compileDoIt(&node);
-    // Note: method is allocated through the heap, which is cleaned up by heap.deinit()
+    defer method.destroy(allocator);
 
     try std.testing.expectEqual(@as(u8, 0), method.header.num_args);
 }
@@ -1163,6 +1163,6 @@ test "CodeGenerator - binary message" {
     };
 
     const method = try gen.compileDoIt(&send);
-    _ = method;
+    defer method.destroy(allocator);
     // Verify bytecodes contain push 3, push 4, send_plus, return_top
 }

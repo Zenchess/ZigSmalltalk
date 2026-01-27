@@ -261,9 +261,15 @@ pub const CompiledMethod = struct {
         return @as([*]u8, @ptrCast(self))[0..self.byteSize()];
     }
 
+    /// Get the compiled method as an aligned byte slice for proper deallocation
+    pub fn asBytesAligned(self: *CompiledMethod) []align(@alignOf(CompiledMethod)) u8 {
+        const ptr: [*]align(@alignOf(CompiledMethod)) u8 = @ptrCast(self);
+        return ptr[0..self.byteSize()];
+    }
+
     /// Free storage for this compiled method using the allocator it was created with
     pub fn destroy(self: *CompiledMethod, allocator: std.mem.Allocator) void {
-        allocator.free(self.asBytes());
+        allocator.free(self.asBytesAligned());
     }
 
     /// Get the source code if stored
