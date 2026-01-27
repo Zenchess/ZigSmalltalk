@@ -2492,6 +2492,24 @@ fn primCharFromCode(interp: *Interpreter) InterpreterError!Value {
 // ============================================================================
 
 /// Primitive 81 - Universal block value dispatcher
+// =============================================================================
+// BLOCK EVALUATION PRIMITIVES
+// =============================================================================
+// TODO: Refactor duplication in block primitives
+// There are 7 nearly-identical functions: primBlockValueZero, primBlockValue1-4,
+// primBlockValueWithArgs, plus evaluateBlock, evaluateBlockWith1, evaluateBlockWith2.
+// Each contains ~150 lines of duplicated logic for:
+//   - Block validation
+//   - State saving/restoration
+//   - Heap context setup
+//   - Error handling
+// This duplication led to bugs where fixes applied to one function weren't
+// propagated to others (see heap context fixes in evaluateBlockWith2).
+//
+// Proposed refactoring: Create unified executeBlockWithArguments(block, args[])
+// that handles all cases, with primBlockValueN as thin wrappers.
+// =============================================================================
+
 /// In Dolphin Smalltalk, primitive 81 is used by ALL BlockClosure value methods:
 /// - BlockClosure >> value (0 args)
 /// - BlockClosure >> value: (1 arg)
@@ -3896,9 +3914,9 @@ fn evaluateBlock(interp: *Interpreter, block: Value) InterpreterError!Value {
         // Heap context format - for closure variable capture
         interp.heap_context = outer_temp_base_val;
         interp.home_heap_context = home_temp_base_val;
-        // Stack indices aren't used with heap contexts
-        interp.outer_temp_base = interp.sp;
-        interp.home_temp_base = interp.sp;
+        // Use saved values for stack access (needed for store_outer_temp optimization)
+        interp.outer_temp_base = saved_temp_base;
+        interp.home_temp_base = saved_home_temp_base;
     } else {
         // Stack-based format
         interp.outer_temp_base = @intCast(outer_temp_base_val.asSmallInt());
@@ -4549,8 +4567,12 @@ fn primToDo(interp: *Interpreter) InterpreterError!Value {
         _ = interp.interpretLoop() catch |err| {
             interp.primitive_block_depth -= 1;
 
-            // If exception was caught and handled by primExceptionSignal, don't restore state
+            // If exception was caught and handled by primExceptionSignal, restore heap contexts
+            // and propagate the error for primOnDo to handle
             if (err == InterpreterError.SmalltalkException and interp.exception_handled) {
+                // MUST restore heap contexts to prevent state leakage after exception handling
+                interp.heap_context = saved_heap_context;
+                interp.home_heap_context = saved_home_heap_context;
                 return err;
             }
 
@@ -4961,19 +4983,21 @@ fn evaluateBlockWith2(interp: *Interpreter, block: Value, arg1: Value, arg2: Val
         return InterpreterError.PrimitiveFailed;
     }
 
-    // Validate that block has at least 6 fields to prevent out-of-bounds access
-    if (block_obj.header.size < 6) {
+    // Validate that block has the expected number of fields
+    if (block_obj.header.size < Heap.BLOCK_NUM_FIELDS) {
         return InterpreterError.PrimitiveFailed;
     }
 
-    // Get block data: [outerTempBase, startPC, numArgs, method, receiver]
-    const outer_temp_base_val = block_obj.getField(0, 6);
-    const start_pc = block_obj.getField(1, 6);
-    const num_args_val = block_obj.getField(2, 6);
-    const method_val = block_obj.getField(3, 6);
-    const block_receiver = block_obj.getField(4, 6);
+    // Get block data using the standard block layout
+    const outer_context_val = block_obj.getField(Heap.BLOCK_FIELD_OUTER_CONTEXT, Heap.BLOCK_NUM_FIELDS);
+    const start_pc = block_obj.getField(Heap.BLOCK_FIELD_START_PC, Heap.BLOCK_NUM_FIELDS);
+    const num_args_val = block_obj.getField(Heap.BLOCK_FIELD_NUM_ARGS, Heap.BLOCK_NUM_FIELDS);
+    const method_val = block_obj.getField(Heap.BLOCK_FIELD_METHOD, Heap.BLOCK_NUM_FIELDS);
+    const block_receiver = block_obj.getField(Heap.BLOCK_FIELD_RECEIVER, Heap.BLOCK_NUM_FIELDS);
+    const home_context_val = block_obj.getField(Heap.BLOCK_FIELD_HOME_CONTEXT, Heap.BLOCK_NUM_FIELDS);
+    const num_temps_val = block_obj.getField(Heap.BLOCK_FIELD_NUM_TEMPS, Heap.BLOCK_NUM_FIELDS);
 
-    if (!outer_temp_base_val.isSmallInt() or !start_pc.isSmallInt() or !num_args_val.isSmallInt() or !method_val.isObject()) {
+    if (!start_pc.isSmallInt() or !num_args_val.isSmallInt() or !method_val.isObject()) {
         return InterpreterError.PrimitiveFailed;
     }
 
@@ -4982,38 +5006,91 @@ fn evaluateBlockWith2(interp: *Interpreter, block: Value, arg1: Value, arg2: Val
         return InterpreterError.PrimitiveFailed;
     }
 
+    // Get number of block-local temps
+    const num_temps: usize = if (num_temps_val.isSmallInt() and num_temps_val.asSmallInt() > 0)
+        @intCast(num_temps_val.asSmallInt())
+    else
+        0;
+
     const saved_ip = interp.ip;
     const saved_method = interp.method;
     const saved_sp = interp.sp;
     const saved_temp_base = interp.temp_base;
     const saved_outer_temp_base = interp.outer_temp_base;
+    const saved_home_temp_base = interp.home_temp_base;
     const saved_receiver = interp.receiver;
     const saved_context_ptr = interp.context_ptr;
-    
+    const saved_heap_context = interp.heap_context;
+    const saved_home_heap_context = interp.home_heap_context;
+
     interp.method = @ptrCast(@alignCast(method_val.asObject()));
     interp.ip = @intCast(start_pc.asSmallInt());
     interp.receiver = block_receiver;
-    interp.outer_temp_base = @intCast(outer_temp_base_val.asSmallInt());
-    interp.temp_base = interp.sp;
+
+    // Handle heap contexts or stack indices
+    if (outer_context_val.isObject() and outer_context_val.asObject().header.class_index == Heap.CLASS_METHOD_CONTEXT) {
+        interp.heap_context = outer_context_val;
+        interp.home_heap_context = home_context_val;
+        interp.outer_temp_base = saved_temp_base;
+        interp.home_temp_base = saved_home_temp_base;
+    } else if (outer_context_val.isSmallInt()) {
+        interp.outer_temp_base = @intCast(outer_context_val.asSmallInt());
+        interp.home_temp_base = if (home_context_val.isSmallInt()) @intCast(home_context_val.asSmallInt()) else saved_home_temp_base;
+        interp.heap_context = Value.nil;
+        interp.home_heap_context = Value.nil;
+    } else {
+        interp.outer_temp_base = saved_temp_base;
+        interp.home_temp_base = saved_home_temp_base;
+        interp.heap_context = Value.nil;
+        interp.home_heap_context = Value.nil;
+    }
+
+    // Push receiver placeholder first, then set temp_base
+    try interp.push(block_receiver);
+    interp.temp_base = interp.sp - 1;
+
     interp.primitive_block_bases[interp.primitive_block_depth] = interp.context_ptr;
     interp.primitive_block_depth += 1;
 
-    // Push receiver and arguments
-    try interp.push(block_receiver);
+    // Push the two arguments
     try interp.push(arg1);
     try interp.push(arg2);
-    const total_temps = interp.method.header.num_temps;
-    const local_temps = if (total_temps > 2) total_temps - 2 else 0;
-    var k: usize = 0;
-    while (k < local_temps) : (k += 1) {
+
+    // Allocate space for block temporaries
+    var ti: usize = 0;
+    while (ti < num_temps) : (ti += 1) {
         try interp.push(Value.nil);
+    }
+
+    // Create heap context for block's args and temps
+    const outer_ctx = interp.heap_context;
+    const heap_ctx = try interp.createHeapContext(2 + num_temps); // 2 args + temps
+    // Copy args and temps from stack into the new heap context
+    var field_idx: usize = Heap.CONTEXT_NUM_FIXED_FIELDS;
+    var stack_idx: usize = interp.temp_base + 1;
+    while (field_idx < Heap.CONTEXT_NUM_FIXED_FIELDS + 2 + num_temps) : ({
+        field_idx += 1;
+        stack_idx += 1;
+    }) {
+        const val = interp.stack[stack_idx];
+        heap_ctx.setField(field_idx, val, heap_ctx.header.size);
+    }
+    if (!outer_ctx.isNil()) {
+        heap_ctx.setField(Heap.CONTEXT_FIELD_SENDER, outer_ctx, heap_ctx.header.size);
+    }
+    interp.heap_context = Value.fromObject(heap_ctx);
+    if (interp.home_heap_context.isNil()) {
+        interp.home_heap_context = outer_ctx;
     }
 
     const result = interp.interpretLoop() catch |err| {
         interp.primitive_block_depth -= 1;
 
-        // If exception was caught and handled by primExceptionSignal, don't restore state
+        // If exception was caught and handled by primExceptionSignal, restore heap contexts
+        // and propagate the error for primOnDo to handle
         if (err == InterpreterError.SmalltalkException and interp.exception_handled) {
+            interp.heap_context = saved_heap_context;
+            interp.home_heap_context = saved_home_heap_context;
             return err;
         }
 
@@ -5026,8 +5103,11 @@ fn evaluateBlockWith2(interp: *Interpreter, block: Value, arg1: Value, arg2: Val
         }
         interp.temp_base = saved_temp_base;
         interp.outer_temp_base = saved_outer_temp_base;
+        interp.home_temp_base = saved_home_temp_base;
         interp.receiver = saved_receiver;
         interp.context_ptr = saved_context_ptr;
+        interp.heap_context = saved_heap_context;
+        interp.home_heap_context = saved_home_heap_context;
         return err;
     };
 
@@ -5037,8 +5117,11 @@ fn evaluateBlockWith2(interp: *Interpreter, block: Value, arg1: Value, arg2: Val
     interp.sp = saved_sp;
     interp.temp_base = saved_temp_base;
     interp.outer_temp_base = saved_outer_temp_base;
+    interp.home_temp_base = saved_home_temp_base;
     interp.receiver = saved_receiver;
     interp.context_ptr = saved_context_ptr;
+    interp.heap_context = saved_heap_context;
+    interp.home_heap_context = saved_home_heap_context;
 
     return result;
 }

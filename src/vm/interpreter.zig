@@ -411,28 +411,29 @@ pub const Interpreter = struct {
         }
     }
 
-    /// Initialize common selectors for fast arithmetic dispatch
-    pub fn initCommonSelectors(self: *Interpreter) void {
-        self.selector_plus = self.heap.internSymbol("+") catch Value.nil;
-        self.selector_minus = self.heap.internSymbol("-") catch Value.nil;
-        self.selector_times = self.heap.internSymbol("*") catch Value.nil;
-        self.selector_divide = self.heap.internSymbol("/") catch Value.nil;
-        self.selector_modulo = self.heap.internSymbol("\\\\") catch Value.nil;
-        self.selector_less = self.heap.internSymbol("<") catch Value.nil;
-        self.selector_greater = self.heap.internSymbol(">") catch Value.nil;
-        self.selector_less_equal = self.heap.internSymbol("<=") catch Value.nil;
-        self.selector_greater_equal = self.heap.internSymbol(">=") catch Value.nil;
-        self.selector_equal = self.heap.internSymbol("=") catch Value.nil;
-        self.selector_not_equal = self.heap.internSymbol("~=") catch Value.nil;
-        self.selector_bitand = self.heap.internSymbol("bitAnd:") catch Value.nil;
-        self.selector_bitor = self.heap.internSymbol("bitOr:") catch Value.nil;
-        self.selector_bitxor = self.heap.internSymbol("bitXor:") catch Value.nil;
-        self.selector_bitshift = self.heap.internSymbol("bitShift:") catch Value.nil;
+    /// Initialize common selectors for fast arithmetic dispatch.
+    /// Returns error if symbol interning fails (critical initialization failure).
+    pub fn initCommonSelectors(self: *Interpreter) !void {
+        self.selector_plus = try self.heap.internSymbol("+");
+        self.selector_minus = try self.heap.internSymbol("-");
+        self.selector_times = try self.heap.internSymbol("*");
+        self.selector_divide = try self.heap.internSymbol("/");
+        self.selector_modulo = try self.heap.internSymbol("\\\\");
+        self.selector_less = try self.heap.internSymbol("<");
+        self.selector_greater = try self.heap.internSymbol(">");
+        self.selector_less_equal = try self.heap.internSymbol("<=");
+        self.selector_greater_equal = try self.heap.internSymbol(">=");
+        self.selector_equal = try self.heap.internSymbol("=");
+        self.selector_not_equal = try self.heap.internSymbol("~=");
+        self.selector_bitand = try self.heap.internSymbol("bitAnd:");
+        self.selector_bitor = try self.heap.internSymbol("bitOr:");
+        self.selector_bitxor = try self.heap.internSymbol("bitXor:");
+        self.selector_bitshift = try self.heap.internSymbol("bitShift:");
         // Boolean conditional selectors
-        self.selector_ifTrue = self.heap.internSymbol("ifTrue:") catch Value.nil;
-        self.selector_ifFalse = self.heap.internSymbol("ifFalse:") catch Value.nil;
-        self.selector_ifTrueIfFalse = self.heap.internSymbol("ifTrue:ifFalse:") catch Value.nil;
-        self.selector_ifFalseIfTrue = self.heap.internSymbol("ifFalse:ifTrue:") catch Value.nil;
+        self.selector_ifTrue = try self.heap.internSymbol("ifTrue:");
+        self.selector_ifFalse = try self.heap.internSymbol("ifFalse:");
+        self.selector_ifTrueIfFalse = try self.heap.internSymbol("ifTrue:ifFalse:");
+        self.selector_ifFalseIfTrue = try self.heap.internSymbol("ifFalse:ifTrue:");
     }
 
     /// Flush the method cache (call when methods are added/modified)
@@ -1060,7 +1061,10 @@ pub const Interpreter = struct {
     pub fn execute(self: *Interpreter, method: *CompiledMethod, recv: Value, args: []const Value) InterpreterError!Value {
         // Initialize common selectors for fast arithmetic dispatch (once)
         if (self.selector_plus.isNil()) {
-            self.initCommonSelectors();
+            self.initCommonSelectors() catch |err| {
+                std.debug.print("CRITICAL: Failed to initialize selectors: {}\n", .{err});
+                return InterpreterError.OutOfMemory;
+            };
         }
 
         // Ensure we have a main process if none exists
