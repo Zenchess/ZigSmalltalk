@@ -29,7 +29,7 @@ jobs:
       - name: Setup Zig
         uses: mlugg/setup-zig@v1
         with:
-          version: latest
+          version: master
 
       - name: Build
         run: zig build
@@ -52,7 +52,7 @@ jobs:
       - name: Setup Zig
         uses: mlugg/setup-zig@v1
         with:
-          version: latest
+          version: master
 
       - name: Build VM
         run: zig build
@@ -74,7 +74,7 @@ jobs:
       - name: Setup Zig
         uses: mlugg/setup-zig@v1
         with:
-          version: latest
+          version: master
 
       - name: Check Formatting
         run: |
