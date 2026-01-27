@@ -891,6 +891,34 @@ pub fn createPrimitiveMethod(heap: *Heap, num_args: u8, primitive_index: u16) !*
     return method;
 }
 
+/// Create a method that just returns self (for methods like Integer>>truncated)
+pub fn createReturnSelfMethod(num_args: u8) !*object.CompiledMethod {
+    const bytecode_size: usize = 1;
+    const num_literals: usize = 0;
+
+    const header_size = @sizeOf(object.CompiledMethod.MethodHeader);
+    const literals_size = num_literals * @sizeOf(Value);
+    const total_size = header_size + literals_size + bytecode_size;
+
+    const mem = try std.heap.page_allocator.alignedAlloc(u8, std.mem.Alignment.of(object.CompiledMethod), total_size);
+    const method: *object.CompiledMethod = @ptrCast(mem.ptr);
+
+    method.header = .{
+        .num_args = num_args,
+        .num_temps = num_args,
+        .num_literals = 0,
+        .primitive_index = 0,
+        .flags = .{},
+        .bytecode_size = @intCast(bytecode_size),
+    };
+
+    // Bytecode: return self
+    const bytecodes_ptr: [*]u8 = @ptrFromInt(@intFromPtr(method) + header_size + literals_size);
+    bytecodes_ptr[0] = 0xA0; // return_receiver
+
+    return method;
+}
+
 /// Install core methods in bootstrap classes
 /// Uses Dolphin-compatible primitive numbers for SmallInteger, Object, etc.
 pub fn installCoreMethods(heap: *Heap) !void {
@@ -1086,6 +1114,12 @@ pub fn installCoreMethods(heap: *Heap) !void {
 
     // SmallInteger >> asFloat
     try installMethod(heap, small_int_class, "asFloat", try createPrimitiveMethod(heap, 0, @intFromEnum(Primitive.small_as_float))); // 168
+
+    // SmallInteger >> truncated, rounded, floor, ceiling - integers return self
+    try installMethod(heap, small_int_class, "truncated", try createReturnSelfMethod(0));
+    try installMethod(heap, small_int_class, "rounded", try createReturnSelfMethod(0));
+    try installMethod(heap, small_int_class, "floor", try createReturnSelfMethod(0));
+    try installMethod(heap, small_int_class, "ceiling", try createReturnSelfMethod(0));
 
     // SmallInteger >> to: and to:by: (create Interval objects)
     try installMethod(heap, small_int_class, "to:", try createPrimitiveMethod(heap, 1, @intFromEnum(Primitive.to_interval)));
