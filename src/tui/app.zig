@@ -123,9 +123,9 @@ pub const App = struct {
 
         const screen = try Screen.init(allocator, width, height);
 
-        // Calculate layout regions
-        const tabbar_rect = Rect.init(0, 0, width, 1);
-        const content_rect = Rect.init(0, 1, width, height -| 2);
+        // Calculate layout regions (no tab bar - content starts at row 0)
+        const tabbar_rect = Rect.init(0, 0, width, 0); // Zero height - hidden
+        const content_rect = Rect.init(0, 0, width, height -| 1);
         const statusbar_rect = Rect.init(0, height -| 1, width, 1);
 
         const tabs = [_]@import("widgets/tabbar.zig").Tab{
@@ -651,8 +651,8 @@ pub const App = struct {
             return;
         }
 
-        // Check if click is in content area (between tab bar and status bar)
-        const content_rect = Rect.init(0, 1, width, height -| 2);
+        // Check if click is in content area (above status bar)
+        const content_rect = Rect.init(0, 0, width, height -| 1);
         if (content_rect.contains(mouse.x, mouse.y)) {
             // Pass to active tab
             switch (self.active_tab) {
@@ -741,14 +741,14 @@ pub const App = struct {
             self.needs_full_redraw = false;
         }
 
-        // Update rects based on current size
-        const tabbar_rect = Rect.init(0, 0, width, 1);
-        const content_rect = Rect.init(0, 1, width, height -| 2);
+        // Update rects based on current size (no tab bar - content starts at row 0)
+        const tabbar_rect = Rect.init(0, 0, width, 0); // Zero height - hidden
+        const content_rect = Rect.init(0, 0, width, height -| 1);
         const statusbar_rect = Rect.init(0, height -| 1, width, 1);
 
-        // Draw tab bar
+        // Tab bar hidden - don't draw it
         self.tabbar.state.rect = tabbar_rect;
-        self.tabbar.draw(&self.screen);
+        // self.tabbar.draw(&self.screen); // Hidden
 
         // Update and draw active tab
         self.updateFocus();
