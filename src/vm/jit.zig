@@ -1108,11 +1108,10 @@ pub const JIT = struct {
             return false;
         }
 
-        // Temporaries beyond arguments currently require more frame setup; skip for safety
-        if (method.header.num_temps > 0) {
-            // std.debug.print("JIT ineligible: has {} temps\n", .{method.header.num_temps});
-            return false;
-        }
+        // Temporaries - now enabled after stack pointer bug fix
+        // if (method.header.num_temps > 0) {
+        //     return false;
+        // }
 
         const bc = method.getBytecodes();
         var ip: usize = 0;
@@ -1122,7 +1121,9 @@ pub const JIT = struct {
             ip += 1;
 
             // Short-form opcodes are generally OK
-            if (Opcode.isPushReceiverVariable(opcode)) continue;
+            // NOTE: push_receiver_variable is NOT JIT-eligible because emitPushReceiverVariable
+            // is a stub that just pushes nil. Once proper implementation is added, enable this.
+            if (Opcode.isPushReceiverVariable(opcode)) return false;
             if (Opcode.isPushTemporary(opcode)) continue;
             if (Opcode.isStoreTemporary(opcode)) continue;
             if (Opcode.isPopStoreTemporary(opcode)) continue;
@@ -1567,9 +1568,8 @@ pub const JIT = struct {
         }
         // Cache sp in r12: mov r12, [rbx + SP_OFFSET]
         buf.movRegMem(.r12, .rbx, INTERP_SP_OFFSET);
-        // Cache stack base in r13: lea r13, [rbx + STACK_OFFSET]
-        buf.movRegReg(.r13, .rbx);
-        buf.addRegImm32(.r13, INTERP_STACK_OFFSET);
+        // Cache stack base in r13: load interpreter.stack.ptr (stack is a slice, ptr is first field)
+        buf.movRegMem(.r13, .rbx, INTERP_STACK_OFFSET);
     }
 
     /// Epilogue: Write back sp and restore registers

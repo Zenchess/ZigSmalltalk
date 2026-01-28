@@ -38,6 +38,28 @@
       ],
       "link": "C:\\programming\\ZigSmalltalk\\vendor\\openxr-loader\\x64\\lib\\openxr_loader.lib",
       "enabled": true
+    },
+    {
+      "name": "FacilIO",
+      "headers": [
+        "/home/jacob/programming/ZigSmalltalk/vendor/facil.io/lib/facil/fiobj/fiobj.h",
+        "/home/jacob/programming/ZigSmalltalk/vendor/facil.io/lib/facil/http/http.h",
+        "/home/jacob/programming/ZigSmalltalk/vendor/facil.io/lib/facil/http/websockets.h"
+      ],
+      "functions": [
+        "fio_start",
+        "fio_stop",
+        "http_listen",
+        "http_send_body",
+        "http_set_header",
+        "http_finish",
+        "http_send_error",
+        "websocket_write",
+        "websocket_close",
+        "websocket_attach"
+      ],
+      "link": "/home/jacob/programming/ZigSmalltalk/vendor/facil.io/tmp/libfacil.so",
+      "enabled": true
     }
   ]
 }

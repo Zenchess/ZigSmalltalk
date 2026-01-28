@@ -158,6 +158,70 @@ Raylib InitWindow: 800 with: 600 and: 'Raylib Window'.
 Check the FFI package for methods generated on your library name, and External Structures you can use (variables generated, for instance you can send a Vector2 to raylib with:
 Vector2 new x: 500; y: 500; yourself
 
+### FFI Callbacks
+
+ZigSmalltalk supports passing Smalltalk blocks to C functions as callback function pointers. When C code invokes the function pointer, the Smalltalk block executes with marshalled arguments.
+
+This uses libffi closures to generate callable C function pointers at runtime.
+
+#### Creating a Callback
+
+```smalltalk
+"Create a callback with C signature and Smalltalk block handler"
+callback := FFICallback
+    signature: 'int(int,int)'
+    block: [:a :b | a + b].
+
+"Get the C function pointer (as an integer address)"
+ptr := callback functionPointer.
+
+"The callback is now valid and can be passed to C libraries"
+callback isValid.  "=> true"
+```
+
+#### Signature Format
+
+Signatures follow the format `returnType(argType1,argType2,...)`:
+
+| Signature | C Equivalent |
+|-----------|--------------|
+| `'void(int)'` | `void (*)(int)` |
+| `'int(int,int)'` | `int (*)(int, int)` |
+| `'void(pointer,int,int)'` | `void (*)(void*, int, int)` |
+| `'pointer(pointer)'` | `void* (*)(void*)` |
+
+Supported types: `void`, `int`, `uint`, `int8`-`int64`, `uint8`-`uint64`, `float`, `double`, `pointer`, `string`
+
+#### Example: Comparison Function for qsort
+
+```smalltalk
+"Create a comparator callback for sorting integers"
+comparator := FFICallback
+    signature: 'int(pointer,pointer)'
+    block: [:a :b |
+        | val1 val2 |
+        val1 := a readInt32.
+        val2 := b readInt32.
+        val1 - val2  "negative if a<b, 0 if equal, positive if a>b"
+    ].
+
+"Pass to C's qsort function"
+LibC qsort: arrayPtr count: 10 size: 4 compare: comparator functionPointer.
+```
+
+#### Freeing Callbacks
+
+Callbacks should be freed when no longer needed to release the closure memory:
+
+```smalltalk
+callback free.
+callback isValid.  "=> false"
+```
+
+#### Thread Safety
+
+Callbacks invoked from the main thread execute immediately. Callbacks from other threads are queued and processed when `FFICallback processEvents` is called from the main thread.
+
 
 ### File Format
 

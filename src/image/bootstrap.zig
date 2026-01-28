@@ -977,6 +977,7 @@ pub fn installCoreMethods(heap: *Heap) !void {
     try installMethod(heap, small_int_class, "to:do:", try createPrimitiveMethod(heap, 2, @intFromEnum(Primitive.to_do)));
     try installMethod(heap, small_int_class, "to:by:do:", try createPrimitiveMethod(heap, 3, @intFromEnum(Primitive.to_by_do)));
     try installMethod(heap, small_int_class, "factorial", try createPrimitiveMethod(heap, 0, @intFromEnum(Primitive.factorial)));
+    try installMethod(heap, small_int_class, "squared", try createPrimitiveMethod(heap, 0, @intFromEnum(Primitive.squared)));
     try installMethod(heap, small_int_class, "printString", try createPrimitiveMethod(heap, 0, @intFromEnum(Primitive.small_int_print_string))); // 44
 
     // String methods - Dolphin compatible
@@ -994,6 +995,8 @@ pub fn installCoreMethods(heap: *Heap) !void {
     try installMethod(heap, string_class, ">=", try createPrimitiveMethod(heap, 1, @intFromEnum(Primitive.string_greater_or_equal)));
     try installMethod(heap, string_class, "=", try createPrimitiveMethod(heap, 1, @intFromEnum(Primitive.string_equal)));
     try installMethod(heap, string_class, "copyFrom:to:", try createPrimitiveMethod(heap, 2, @intFromEnum(Primitive.string_copy_from_to)));
+    try installMethod(heap, string_class, "asUppercase", try createPrimitiveMethod(heap, 0, @intFromEnum(Primitive.string_as_upper)));
+    try installMethod(heap, string_class, "asLowercase", try createPrimitiveMethod(heap, 0, @intFromEnum(Primitive.string_as_lower)));
     try installMethod(heap, string_class, "ffiCall:with:", try createPrimitiveMethod(heap, 2, @intFromEnum(Primitive.ffi_call_with_struct))); // 792
 
     // Symbol methods - Symbol is used as receiver in FFI calls (e.g., #Raylib ffiCall:with:)
@@ -1048,6 +1051,7 @@ pub fn installCoreMethods(heap: *Heap) !void {
     try installMethod(heap, object_class, "error:", try createPrimitiveMethod(heap, 1, @intFromEnum(Primitive.error_message)));
     try installMethod(heap, object_class, "halt", try createPrimitiveMethod(heap, 0, @intFromEnum(Primitive.halt)));
     try installMethod(heap, object_class, "respondsTo:", try createPrimitiveMethod(heap, 1, @intFromEnum(Primitive.responds_to)));
+    try installMethod(heap, object_class, "inspect", try createPrimitiveMethod(heap, 0, @intFromEnum(Primitive.inspect)));
 
     // Reflection methods
     try installMethod(heap, object_class, "perform:", try createPrimitiveMethod(heap, 1, @intFromEnum(Primitive.perform)));
@@ -1118,6 +1122,7 @@ pub fn installCoreMethods(heap: *Heap) !void {
     try installMethod(heap, float_class, "truncated", try createPrimitiveMethod(heap, 0, @intFromEnum(Primitive.float_truncated))); // 166
     try installMethod(heap, float_class, "abs", try createPrimitiveMethod(heap, 0, @intFromEnum(Primitive.float_abs))); // 205
     try installMethod(heap, float_class, "negated", try createPrimitiveMethod(heap, 0, @intFromEnum(Primitive.float_negate))); // our extension
+    try installMethod(heap, float_class, "squared", try createPrimitiveMethod(heap, 0, @intFromEnum(Primitive.squared)));
     try installMethod(heap, float_class, "printString", try createPrimitiveMethod(heap, 0, @intFromEnum(Primitive.float_print_string))); // 169
 
     // Float math functions

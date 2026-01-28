@@ -31,9 +31,13 @@ pub const TranscriptTab = struct {
     lines: std.ArrayList(TranscriptLine),
     scroll_offset: usize = 0,
     auto_scroll: bool = true,
+    selected_line: ?usize = null,
 
     // Buffer for building lines
     line_buffer: std.ArrayList(u8),
+
+    // Callback to send selected line to workspace
+    on_send_to_workspace: ?*const fn ([]const u8) void = null,
 
     pub fn init(allocator: std.mem.Allocator, rect: Rect) !TranscriptTab {
         return TranscriptTab{
@@ -126,18 +130,37 @@ pub const TranscriptTab = struct {
     pub fn handleKey(self: *TranscriptTab, key: Key) EventResult {
         switch (key) {
             .up => {
-                if (self.scroll_offset > 0) {
-                    self.scroll_offset -= 1;
-                    self.auto_scroll = false;
+                // Move selection up
+                if (self.selected_line) |sel| {
+                    if (sel > 0) {
+                        self.selected_line = sel - 1;
+                        // Scroll to keep selection visible
+                        if (sel - 1 < self.scroll_offset) {
+                            self.scroll_offset = sel - 1;
+                        }
+                    }
+                } else if (self.lines.items.len > 0) {
+                    // Select last visible line
+                    const visible = self.visibleLines();
+                    self.selected_line = @min(self.scroll_offset + visible - 1, self.lines.items.len - 1);
                 }
+                self.auto_scroll = false;
                 return .consumed;
             },
             .down => {
-                if (self.scroll_offset < self.lines.items.len -| self.visibleLines()) {
-                    self.scroll_offset += 1;
-                }
-                if (self.scroll_offset >= self.lines.items.len -| self.visibleLines()) {
-                    self.auto_scroll = true;
+                // Move selection down
+                if (self.selected_line) |sel| {
+                    if (sel + 1 < self.lines.items.len) {
+                        self.selected_line = sel + 1;
+                        // Scroll to keep selection visible
+                        const visible = self.visibleLines();
+                        if (sel + 1 >= self.scroll_offset + visible) {
+                            self.scroll_offset = sel + 2 -| visible;
+                        }
+                    }
+                } else if (self.lines.items.len > 0) {
+                    // Select first visible line
+                    self.selected_line = self.scroll_offset;
                 }
                 return .consumed;
             },
@@ -149,6 +172,12 @@ pub const TranscriptTab = struct {
                     self.scroll_offset = 0;
                 }
                 self.auto_scroll = false;
+                // Update selection to stay in view
+                if (self.selected_line) |sel| {
+                    if (sel >= self.scroll_offset + visible) {
+                        self.selected_line = self.scroll_offset + visible - 1;
+                    }
+                }
                 return .consumed;
             },
             .page_down => {
@@ -158,19 +187,56 @@ pub const TranscriptTab = struct {
                     self.scroll_offset = self.lines.items.len -| visible;
                     self.auto_scroll = true;
                 }
+                // Update selection to stay in view
+                if (self.selected_line) |sel| {
+                    if (sel < self.scroll_offset) {
+                        self.selected_line = self.scroll_offset;
+                    }
+                }
                 return .consumed;
             },
             .home => {
                 self.scroll_offset = 0;
+                self.selected_line = if (self.lines.items.len > 0) 0 else null;
                 self.auto_scroll = false;
                 return .consumed;
             },
             .end => {
                 self.scrollToBottom();
+                self.selected_line = if (self.lines.items.len > 0) self.lines.items.len - 1 else null;
                 self.auto_scroll = true;
                 return .consumed;
             },
+            .enter => {
+                // Send selected line to workspace
+                self.sendSelectedToWorkspace();
+                return .consumed;
+            },
+            .char => |c| {
+                if (c == 'w' or c == 'W') {
+                    // Send selected line to workspace
+                    self.sendSelectedToWorkspace();
+                    return .consumed;
+                }
+            },
+            .escape => {
+                // Clear selection
+                self.selected_line = null;
+                return .consumed;
+            },
             else => return .ignored,
+        }
+        return .ignored;
+    }
+
+    fn sendSelectedToWorkspace(self: *TranscriptTab) void {
+        if (self.selected_line) |sel| {
+            if (sel < self.lines.items.len) {
+                const line = self.lines.items[sel];
+                if (self.on_send_to_workspace) |callback| {
+                    callback(line.text);
+                }
+            }
         }
     }
 
@@ -184,12 +250,21 @@ pub const TranscriptTab = struct {
             self.scroll(3);
         }
 
-        // Handle click in content area - disable auto-scroll on click
+        // Handle click in content area - select line
         if (mouse.event_type == .press and mouse.button == .left) {
             if (content.contains(mouse.x, mouse.y)) {
                 self.auto_scroll = false;
+                // Calculate which line was clicked
+                const y_offset = mouse.y - content.y;
+                const line_index = self.scroll_offset + y_offset;
+                if (line_index < self.lines.items.len) {
+                    self.selected_line = line_index;
+                }
             }
         }
+
+        // Double-click to send to workspace
+        // Note: Would need to track click timing for true double-click
     }
 
     pub fn scroll(self: *TranscriptTab, delta: i32) void {
@@ -232,13 +307,25 @@ pub const TranscriptTab = struct {
             if (line_idx >= self.lines.items.len) break;
 
             const line = self.lines.items[line_idx];
-            const line_style = switch (line.style) {
+            const is_selected = self.selected_line != null and self.selected_line.? == line_idx;
+
+            const line_style = if (is_selected)
+                Style{ .fg = style_mod.ui.background, .bg = style_mod.ui.selection }
+            else switch (line.style) {
                 .normal => style_mod.styles.normal,
                 .error_style => style_mod.styles.error_style,
                 .warning => Style{ .fg = style_mod.ui.warning_text, .bg = style_mod.ui.background },
                 .info => Style{ .fg = style_mod.ui.info_text, .bg = style_mod.ui.background },
                 .success => Style{ .fg = style_mod.ui.success_text, .bg = style_mod.ui.background },
             };
+
+            // For selected line, fill the entire line with highlight color
+            if (is_selected) {
+                var col: u16 = 0;
+                while (col < content.width) : (col += 1) {
+                    screen.setCell(content.x + col, content.y + row, ' ', line_style);
+                }
+            }
 
             screen.drawTextClipped(content.x, content.y + row, line.text, content.width, line_style);
         }

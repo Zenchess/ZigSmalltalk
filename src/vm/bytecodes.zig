@@ -455,6 +455,15 @@ pub const Primitive = enum(u16) {
     dll_call_ptr = 873, // Call function pointer with signature and args
 
     // ========================================================================
+    // FFI Callback primitives (880-889)
+    // ========================================================================
+    ffi_callback_create = 880, // FFICallback >> primCreate:signature: - create callback from block
+    ffi_callback_pointer = 881, // FFICallback >> primGetPointer: - get C function pointer
+    ffi_callback_free = 882, // FFICallback >> primFree: - free callback
+    ffi_callback_process_events = 883, // FFICallback class >> processEvents - process pending callback events
+    ffi_callback_test = 884, // FFICallback >> primTest:with: - test invoke callback with args
+
+    // ========================================================================
     // Object system (Dolphin: 100-119)
     // ========================================================================
     basic_resize = 101, // Object >> basicResize:
@@ -563,6 +572,7 @@ pub const Primitive = enum(u16) {
     between_and = 549, // Magnitude >> between:and:
     not_equal = 550, // Object >> ~=
     factorial = 551, // Integer >> factorial (optimized)
+    squared = 580, // Number >> squared (self * self)
 
     // Interval creation (our extensions)
     to_interval = 552, // SmallInteger >> to: (creates Interval)
@@ -744,6 +754,7 @@ pub const Primitive = enum(u16) {
     // System introspection
     all_classes = 964, // Smalltalk >> allClasses - return array of all classes
     responds_to = 965, // Object >> respondsTo: aSymbol - check if object understands selector
+    inspect = 966, // Object >> inspect - open inspector on object (TUI mode)
 
     _,
 };

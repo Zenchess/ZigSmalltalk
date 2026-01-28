@@ -1088,3 +1088,184 @@ drawElements: mode count: count type: type indices: indices
     funcPtr isNil ifTrue: [^nil].
     ^funcPtr ffiCallWithSignature: 'void(uint32,int32,uint32,pointer)' args: { mode. count. type. indices }!
 !
+
+"FFI Callback Support - Pass Smalltalk blocks to C functions expecting callback pointers"
+
+Object subclass: #FFICallback
+    instanceVariableNames: 'handle block signature functionPointer'
+    classVariableNames: ''
+    poolDictionaries: ''
+    classInstanceVariableNames: ''!
+
+!FFICallback class methodsFor: 'instance creation'!
+
+signature: signatureStr block: blockObj
+    "Create a callback with the given C signature and Smalltalk block handler.
+     Signature format: 'returnType(argType1,argType2,...)'
+     Types: void, int, uint, int8-64, uint8-64, float, double, pointer, string
+
+     Example:
+       cb := FFICallback signature: 'int(pointer,pointer)' block: [:a :b |
+           (a int32At: 0) - (b int32At: 0)
+       ].
+       funcPtr := cb functionPointer.  'Pass to C library'"
+    | h inst |
+    "Workaround: force parameter access before primitive call"
+    signatureStr class.
+    blockObj class.
+    h := self primCreateCallback: signatureStr block: blockObj.
+    h isNil ifTrue: [^self error: 'Failed to create FFI callback'].
+    inst := self basicNew.
+    inst handle: h.
+    inst signature: signatureStr.
+    inst block: blockObj.
+    inst initFunctionPointer.
+    ^inst!
+
+primCreateCallback: signatureStr block: blockObj
+    "Primitive to create callback. Returns handle or nil.
+     Note: primitive expects block as second keyword, signature as first."
+    <primitive: 880>
+    ^nil!
+
+new
+    ^self basicNew initialize!
+!
+
+!FFICallback methodsFor: 'initialization'!
+
+initialize
+    handle := nil.
+    block := nil.
+    signature := nil.
+    functionPointer := nil.
+    ^self!
+
+initSignature: aString block: aBlock
+    handle := self primCreate: aBlock signature: aString.
+    handle isNil ifTrue: [^self error: 'Failed to create FFI callback'].
+    signature := aString.
+    block := aBlock.
+    functionPointer := self primGetPointer: handle.
+    ^self!
+
+setSignatureString: sigString setBlock: blockArg
+    "Alternative initializer with different parameter names"
+    handle := self primCreate: blockArg signature: sigString.
+    handle isNil ifTrue: [^self error: 'Failed to create FFI callback'].
+    signature := sigString.
+    block := blockArg.
+    functionPointer := self primGetPointer: handle.
+    ^self!
+
+setHandle: h signature: s block: b
+    "Set the callback fields after creation"
+    handle := h.
+    signature := s.
+    block := b.
+    functionPointer := self primGetPointer: handle.
+    ^self!
+
+handle: h
+    "Set handle"
+    handle := h!
+
+signature: s
+    "Set signature"
+    signature := s!
+
+block: b
+    "Set block"
+    block := b!
+
+initFunctionPointer
+    "Initialize the function pointer from the handle"
+    functionPointer := self primGetPointer: handle!
+!
+
+!FFICallback methodsFor: 'accessing'!
+
+functionPointer
+    "Return the C function pointer (as an integer address).
+     This can be passed to C functions expecting callback function pointers."
+    ^functionPointer!
+
+asParameter
+    "For passing to FFI calls - returns the function pointer"
+    ^functionPointer!
+
+block
+    "Return the Smalltalk block that will be invoked"
+    ^block!
+
+signature
+    "Return the C signature string"
+    ^signature!
+
+handle
+    "Return the internal callback handle"
+    ^handle!
+
+isValid
+    "Return true if this callback is still valid"
+    ^handle notNil!
+!
+
+!FFICallback methodsFor: 'finalization'!
+
+free
+    "Explicitly free the callback resources.
+     After calling this, the callback should not be used."
+    handle notNil ifTrue: [
+        self primFree: handle.
+        handle := nil.
+        functionPointer := nil
+    ]!
+
+invalidate
+    "Alias for free"
+    self free!
+!
+
+!FFICallback methodsFor: 'primitives'!
+
+primCreate: aBlock signature: aString
+    "Create a callback and return its handle"
+    <primitive: 880>
+    ^nil!
+
+primGetPointer: aHandle
+    "Get the C function pointer for a callback handle"
+    <primitive: 881>
+    ^nil!
+
+primFree: aHandle
+    "Free a callback"
+    <primitive: 882>
+    ^self!
+!
+
+!FFICallback class methodsFor: 'event processing'!
+
+processEvents
+    "Process any pending callback events from other threads.
+     Call this periodically from your main loop if using callbacks
+     that may be invoked from non-Smalltalk threads."
+    <primitive: 883>
+    ^self!
+!
+
+!FFICallback methodsFor: 'testing'!
+
+testInvokeWith: arg1 with: arg2
+    "Test invoking this callback from Zig code, simulating a C call.
+     Only works for callbacks with signature 'int(int,int)'.
+     Returns the result from the block."
+    <primitive: 884>
+    ^self error: 'Callback test invocation failed'!
+
+testInvoke
+    "Test invoking this callback with default arguments (10, 20).
+     Returns the result from the block."
+    ^self testInvokeWith: 10 with: 20!
+!

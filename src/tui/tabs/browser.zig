@@ -312,6 +312,37 @@ pub const BrowserTab = struct {
         self.class_tree.rebuildFlatList();
     }
 
+    /// Select a class by name and trigger loading its methods
+    pub fn selectClassByName(self: *BrowserTab, class_name: []const u8) bool {
+        // First ensure all classes are shown
+        self.showAllClasses();
+
+        // Find the class in the flat list
+        for (self.class_tree.flat_list.items, 0..) |node, i| {
+            if (std.mem.eql(u8, node.text, class_name)) {
+                // Found it - select it
+                self.class_tree.selected_index = i;
+                self.selected_class_name = node.text;
+                self.active_pane = .classes;
+
+                // Ensure it's visible by scrolling
+                const visible_height = self.class_tree.state.rect.height -| 2;
+                if (i >= self.class_tree.scroll_offset + visible_height) {
+                    self.class_tree.scroll_offset = i -| (visible_height / 2);
+                } else if (i < self.class_tree.scroll_offset) {
+                    self.class_tree.scroll_offset = i;
+                }
+
+                // Trigger loading the class methods
+                if (self.on_select_class) |cb| {
+                    cb(self, class_name);
+                }
+                return true;
+            }
+        }
+        return false;
+    }
+
     fn findNode(_: *BrowserTab, node: *TreeNode, name: []const u8) ?*TreeNode {
         if (std.mem.eql(u8, node.text, name)) {
             return node;

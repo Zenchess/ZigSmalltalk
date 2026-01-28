@@ -7,6 +7,8 @@ const debugger = @import("debugger.zig");
 const scheduler = @import("scheduler.zig");
 const overlapped = @import("overlapped.zig");
 const jit = @import("jit.zig");
+const build_options = @import("build_options");
+const ffi_callbacks = if (build_options.ffi_enabled) @import("ffi_callbacks.zig") else undefined;
 
 const Value = object.Value;
 const Object = object.Object;
@@ -152,6 +154,9 @@ pub const Interpreter = struct {
     // Overlapped FFI call pool for non-blocking native calls
     overlapped_pool: OverlappedPool,
 
+    // FFI callback registry (for creating C function pointers from Smalltalk blocks)
+    callback_registry: if (build_options.ffi_enabled) ?*ffi_callbacks.FFICallbackRegistry else void,
+
     // Allocator for dynamic allocations
     allocator: std.mem.Allocator,
 
@@ -247,6 +252,7 @@ pub const Interpreter = struct {
             .transcript_callback = null,
             .process_scheduler = Scheduler.init(allocator),
             .overlapped_pool = OverlappedPool.init(allocator),
+            .callback_registry = if (build_options.ffi_enabled) null else {},
             .allocator = allocator,
             .instruction_count = 0,
             // Initialize method cache to empty
@@ -482,6 +488,27 @@ pub const Interpreter = struct {
         // Clean up other resources
         self.overlapped_pool.deinit();
         self.process_scheduler.deinit();
+        // Clean up callback registry if enabled
+        if (build_options.ffi_enabled) {
+            if (self.callback_registry) |registry| {
+                registry.deinit();
+                self.allocator.destroy(registry);
+                self.callback_registry = null;
+            }
+        }
+    }
+
+    /// Get or create the FFI callback registry
+    pub fn getCallbackRegistry(self: *Interpreter) ?*ffi_callbacks.FFICallbackRegistry {
+        if (!build_options.ffi_enabled) return null;
+
+        if (self.callback_registry == null) {
+            // Create the registry on first use
+            const registry = self.allocator.create(ffi_callbacks.FFICallbackRegistry) catch return null;
+            registry.* = ffi_callbacks.FFICallbackRegistry.init(self.allocator, self, self.heap);
+            self.callback_registry = registry;
+        }
+        return self.callback_registry;
     }
 
     // ========================================================================
@@ -1929,38 +1956,6 @@ pub const Interpreter = struct {
                     if (num_fields == 0) num_fields = obj.header.size; // fallback to actual object size
                 }
             }
-            // Debug: trace some receiver variable accesses on class objects
-            if (DEBUG_VERBOSE and obj.header.class_index == Heap.CLASS_CLASS and debug_receiver_idx2_count < 20) {
-                debug_receiver_idx2_count += 1;
-                var name_buf: []const u8 = "<?>"; // Default if lookup fails
-                if (num_fields > Heap.CLASS_FIELD_NAME) {
-                    const name_val = obj.getField(Heap.CLASS_FIELD_NAME, num_fields);
-                    if (name_val.isObject()) {
-                        const name_obj = name_val.asObject();
-                        if (name_obj.header.class_index == Heap.CLASS_SYMBOL) {
-                            name_buf = name_obj.bytes(name_obj.header.size);
-                        }
-                    }
-                }
-                std.debug.print("DEBUG pushRecVar idx={}, recv name={s}, obj.class_idx={}, num_fields={}, class.class_idx={}\n", .{
-                    index,
-                    name_buf,
-                    obj.header.class_index,
-                    num_fields,
-                    if (class.isObject()) class.asObject().header.class_index else 0xFFFF_FFFF,
-                });
-                const val_dbg = if (index < num_fields) obj.getField(index, num_fields) else Value.nil;
-                std.debug.print("  field[{}] type=", .{index});
-                if (val_dbg.isSmallInt()) {
-                    std.debug.print("SmallInt({})\n", .{val_dbg.asSmallInt()});
-                } else if (val_dbg.isObject()) {
-                    std.debug.print("Object(class_idx={})\n", .{val_dbg.asObject().header.class_index});
-                } else if (val_dbg.isNil()) {
-                    std.debug.print("nil\n", .{});
-                } else {
-                    std.debug.print("other\n", .{});
-                }
-            }
             if (index < num_fields) {
                 const val = obj.getField(index, num_fields);
                 try self.push(val);
@@ -2383,9 +2378,8 @@ pub const Interpreter = struct {
             if (ic_entry.cached_method) |found_method| {
                 const method_holder = ic_entry.cached_holder;
 
-                // Fast JIT path - DISABLED to debug: force JIT through jit_runtime_send
-                if (false) {
-                    const code = ic_entry.cached_jit_code.?;
+                // Fast JIT path - use cached JIT code if available
+                if (ic_entry.cached_jit_code) |code| {
                     // Inline the logic from runCachedJitMethod for InlineCacheEntry
                     const saved_method = self.method;
                     const saved_method_class = self.method_class;
@@ -2441,8 +2435,8 @@ pub const Interpreter = struct {
                     return;
                 }
 
-                // Slow JIT path - DISABLED to debug
-                if (false) {
+                // Slow JIT path - compile on demand if eligible
+                if (self.jit_enabled) {
                     if (self.jit_compiler) |jit_ptr| {
                         var compiled = jit_ptr.getCompiled(found_method);
                         if (compiled == null and JIT.isJitEligible(found_method)) {
@@ -3626,7 +3620,7 @@ pub const Interpreter = struct {
         table[0x83] = &handleSendMinus;
         table[0x84] = &handleSendTimes;
         table[0x85] = &handleSendDivide;
-        // 0x86 = send_mod - use fallback
+        table[0x86] = &handleSendMod;
         table[0x87] = &handleSendLessThan;
         table[0x88] = &handleSendGreaterThan;
         table[0x89] = &handleSendLessOrEqual;
@@ -4267,6 +4261,30 @@ pub const Interpreter = struct {
         }
     }
 
+    fn handleSendMod(self: *Interpreter) DispatchResult {
+        // FAST PATH: Inline SmallInteger modulo (\\)
+        if (self.sp >= 2) {
+            const b = self.stack[self.sp - 1];
+            const a = self.stack[self.sp - 2];
+            if (a.isSmallInt() and b.isSmallInt()) {
+                const bv = b.asSmallInt();
+                if (bv != 0) {
+                    const av = a.asSmallInt();
+                    const result = @mod(av, bv);
+                    self.stack[self.sp - 2] = Value.fromSmallInt(@intCast(result));
+                    self.sp -= 1;
+                    return .continue_dispatch;
+                }
+            }
+        }
+        if (self.sendSpecialBinary(.mod, "\\\\")) {
+            return .continue_dispatch;
+        } else |err| {
+            self.dispatch_error = err;
+            return .return_error;
+        }
+    }
+
     fn handleSendLessThan(self: *Interpreter) DispatchResult {
         // FAST PATH: Inline SmallInteger comparison
         if (self.sp >= 2) {
@@ -4676,6 +4694,7 @@ pub const Interpreter = struct {
                             num_fields = @intCast(format_val.asSmallInt() & 0xFF);
                             if (num_fields == 0) num_fields = obj.header.size;
                         }
+
                     }
                     self.stack[self.sp] = obj.getField(index, num_fields);
                 } else {
@@ -4721,6 +4740,7 @@ pub const Interpreter = struct {
                             num_fields = @intCast(format_val.asSmallInt() & 0xFF);
                             if (num_fields == 0) num_fields = obj.header.size;
                         }
+
                     }
                     const val = if (self.sp > 0) self.stack[self.sp - 1] else Value.nil;
                     obj.setField(index, val, num_fields);

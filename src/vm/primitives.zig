@@ -9,6 +9,7 @@ const ffi = if (build_options.ffi_enabled) @import("ffi.zig") else undefined;
 const ffi_autogen = if (build_options.ffi_enabled) @import("ffi_autogen.zig") else undefined;
 const ffi_runtime = if (build_options.ffi_enabled) @import("ffi_runtime.zig") else undefined;
 const ffi_generated = if (build_options.ffi_enabled) @import("ffi_generated.zig") else undefined;
+const ffi_callbacks = if (build_options.ffi_enabled) @import("ffi_callbacks.zig") else undefined;
 const filein = @import("../image/filein.zig");
 const app_mod = @import("../tui/app.zig");
 const obj_loader = @import("obj_loader.zig");
@@ -190,6 +191,7 @@ pub fn executePrimitive(interp: *Interpreter, prim_index: u16) InterpreterError!
         .between_and => primBetweenAnd(interp),
         .not_equal => primNotEqual(interp),
         .factorial => primFactorial(interp),
+        .squared => primSquared(interp),
 
         // Interval creation
         .to_interval => primToInterval(interp),
@@ -311,6 +313,13 @@ pub fn executePrimitive(interp: *Interpreter, prim_index: u16) InterpreterError!
         .dll_get_proc => primDllGetProc(interp),
         .dll_free => primDllFree(interp),
         .dll_call_ptr => primDllCallPtr(interp),
+
+        // FFI Callback primitives
+        .ffi_callback_create => primFFICallbackCreate(interp),
+        .ffi_callback_pointer => primFFICallbackPointer(interp),
+        .ffi_callback_free => primFFICallbackFree(interp),
+        .ffi_callback_process_events => primFFICallbackProcessEvents(interp),
+        .ffi_callback_test => primFFICallbackTest(interp),
 
         // File I/O primitives
         .file_open => primFileOpen(interp),
@@ -461,6 +470,7 @@ pub fn executePrimitive(interp: *Interpreter, prim_index: u16) InterpreterError!
 
         .all_classes => primAllClasses(interp),
         .responds_to => primRespondsTo(interp),
+        .inspect => primInspect(interp),
 
         else => InterpreterError.PrimitiveFailed,
     };
@@ -733,6 +743,35 @@ fn primFactorial(interp: *Interpreter) InterpreterError!Value {
     }
 
     return Value.fromSmallInt(@intCast(result));
+}
+
+fn primSquared(interp: *Interpreter) InterpreterError!Value {
+    const n = try interp.pop();
+
+    if (n.isSmallInt()) {
+        const val: i64 = n.asSmallInt();
+        const result = val * val;
+        // Check for overflow - SmallInt max is about 2^60
+        const max: i64 = std.math.maxInt(i61);
+        const min: i64 = std.math.minInt(i61);
+        if (result >= min and result <= max) {
+            return Value.fromSmallInt(@intCast(result));
+        }
+    }
+
+    // Also handle Float
+    const fv = interp.heap.getFloatValue(n);
+    if (fv != null) {
+        const val = fv.?;
+        const result = val * val;
+        return interp.heap.allocateFloat(result) catch {
+            try interp.push(n);
+            return InterpreterError.PrimitiveFailed;
+        };
+    }
+
+    try interp.push(n);
+    return InterpreterError.PrimitiveFailed;
 }
 
 // ============================================================================
@@ -12185,6 +12224,150 @@ fn primDllCallPtr(interp: *Interpreter) InterpreterError!Value {
 }
 
 // ============================================================================
+// FFI Callback Primitives (880-889)
+// ============================================================================
+
+/// Primitive 880: Create an FFI callback from a block and signature
+/// Stack: receiver, block, signatureString
+/// Returns: callback ID (Integer) or fails
+fn primFFICallbackCreate(interp: *Interpreter) InterpreterError!Value {
+    if (!build_options.ffi_enabled) return InterpreterError.PrimitiveFailed;
+
+    // For method `primCreateCallback: signatureStr block: blockObj` or `signature: s block: b`:
+    // Stack order (bottom to top): receiver, arg1 (first keyword), arg2 (second keyword)
+    // Pop order: arg2 (second keyword = block), arg1 (first keyword = signature), receiver
+    const block_val = try interp.pop(); // second keyword arg (block:)
+    const signature_val = try interp.pop(); // first keyword arg (signature: or primCreateCallback:)
+    _ = try interp.pop(); // receiver
+
+    // Get signature string
+    if (!signature_val.isObject()) {
+        return InterpreterError.PrimitiveFailed;
+    }
+    const sig_obj = signature_val.asObject();
+    if (sig_obj.header.class_index != Heap.CLASS_STRING and
+        sig_obj.header.class_index != Heap.CLASS_BYTE_ARRAY)
+    {
+        return InterpreterError.PrimitiveFailed;
+    }
+    const signature = sig_obj.bytes(sig_obj.header.size);
+
+    // Validate block
+    if (!block_val.isObject()) {
+        return InterpreterError.PrimitiveFailed;
+    }
+    const block_obj = block_val.asObject();
+    if (block_obj.header.class_index != Heap.CLASS_BLOCK_CLOSURE) {
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    // Get or create callback registry
+    const registry = interp.getCallbackRegistry() orelse return InterpreterError.PrimitiveFailed;
+
+    // Create the callback
+    const callback_id = registry.createCallback(block_val, signature) catch {
+        return InterpreterError.PrimitiveFailed;
+    };
+
+    return Value.fromSmallInt(@intCast(callback_id));
+}
+
+/// Primitive 881: Get the C function pointer for a callback ID
+/// Stack: receiver, callbackId (Integer)
+/// Returns: function pointer as Integer
+fn primFFICallbackPointer(interp: *Interpreter) InterpreterError!Value {
+    if (!build_options.ffi_enabled) return InterpreterError.PrimitiveFailed;
+
+    const id_val = try interp.pop();
+    _ = try interp.pop(); // receiver
+
+    if (!id_val.isSmallInt()) return InterpreterError.PrimitiveFailed;
+    const callback_id: u32 = @intCast(id_val.asSmallInt());
+
+    const registry = interp.getCallbackRegistry() orelse return InterpreterError.PrimitiveFailed;
+    const fn_ptr = registry.getFunctionPointer(callback_id) orelse return InterpreterError.PrimitiveFailed;
+
+    return Value.fromSmallInt(@intCast(@intFromPtr(fn_ptr)));
+}
+
+/// Primitive 882: Free a callback
+/// Stack: receiver, callbackId (Integer)
+/// Returns: receiver
+fn primFFICallbackFree(interp: *Interpreter) InterpreterError!Value {
+    if (!build_options.ffi_enabled) return InterpreterError.PrimitiveFailed;
+
+    const id_val = try interp.pop();
+    const receiver = try interp.pop();
+
+    if (!id_val.isSmallInt()) return receiver;
+    const callback_id: u32 = @intCast(id_val.asSmallInt());
+
+    const registry = interp.getCallbackRegistry() orelse return receiver;
+    _ = registry.freeCallback(callback_id);
+
+    return receiver;
+}
+
+/// Primitive 883: Process pending callback events
+/// Stack: receiver
+/// Returns: number of events processed
+fn primFFICallbackProcessEvents(interp: *Interpreter) InterpreterError!Value {
+    if (!build_options.ffi_enabled) return Value.fromSmallInt(0);
+
+    _ = try interp.pop(); // receiver
+
+    const registry = interp.getCallbackRegistry() orelse return Value.fromSmallInt(0);
+    registry.processPendingEvents();
+
+    return Value.fromSmallInt(0); // TODO: return actual count
+}
+
+/// Primitive 884: Test callback invocation
+/// Stack: receiver, arg1 (Integer), arg2 (Integer)
+/// Uses the callback's stored function pointer
+/// Returns: result from callback (Integer)
+/// This directly calls the function pointer as if C code were calling it.
+fn primFFICallbackTest(interp: *Interpreter) InterpreterError!Value {
+    if (!build_options.ffi_enabled) return InterpreterError.PrimitiveFailed;
+
+    // Pop args in reverse order: arg2, arg1, receiver
+    const arg2_val = try interp.pop();
+    const arg1_val = try interp.pop();
+    const receiver = try interp.pop();
+
+    if (!arg1_val.isSmallInt() or !arg2_val.isSmallInt()) {
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    // Get the function pointer from the receiver (FFICallback instance)
+    if (!receiver.isObject()) {
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    // Get functionPointer field (index 3: handle, block, signature, functionPointer)
+    const recv_obj = receiver.asObject();
+    const fn_ptr_val = recv_obj.getField(3, 4); // functionPointer is field 3
+
+    if (!fn_ptr_val.isSmallInt()) {
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    const fn_ptr_int = fn_ptr_val.asSmallInt();
+    const arg1: i32 = @intCast(arg1_val.asSmallInt());
+    const arg2: i32 = @intCast(arg2_val.asSmallInt());
+
+    // Cast to function pointer type: int (*)(int, int)
+    const CallbackFn = *const fn (i32, i32) callconv(.c) i32;
+    const fn_ptr: CallbackFn = @ptrFromInt(@as(usize, @intCast(fn_ptr_int)));
+
+    // Call the function pointer directly - this will invoke genericCallbackHandler
+    // which will marshal args and invoke the Smalltalk block
+    const result = fn_ptr(arg1, arg2);
+
+    return Value.fromSmallInt(result);
+}
+
+// ============================================================================
 // Terminal Primitives for Smalltalk TUI (940-963)
 // ============================================================================
 
@@ -12777,6 +12960,19 @@ fn primRespondsTo(interp: *Interpreter) InterpreterError!Value {
     } else {
         return Value.false;
     }
+}
+
+/// Object >> inspect - Open the inspector on this object (TUI mode only)
+fn primInspect(interp: *Interpreter) InterpreterError!Value {
+    const receiver = try interp.pop();
+
+    // Call the inspector callback if set (from TUI app)
+    if (app_mod.g_app) |app| {
+        app.openInspector(receiver);
+    }
+
+    // Return self
+    return receiver;
 }
 
 // ============================================================================

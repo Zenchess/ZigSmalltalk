@@ -51,8 +51,6 @@ const banner =
 pub fn main() !void {
     const allocator = std.heap.c_allocator;
 
-    std.debug.print("VM start\n", .{});
-
     const stdout = std.fs.File.stdout();
     const stdin = std.fs.File.stdin();
 
@@ -300,7 +298,7 @@ pub fn main() !void {
     var load_order_path: ?[]const u8 = null;
     var repl_mode = true;
     var tui_mode = false;
-    var jit_requested = false;
+    var jit_requested = true; // JIT enabled by default
     var arg_index: usize = 1;
     while (arg_index < args.len) : (arg_index += 1) {
         if (std.mem.eql(u8, args[arg_index], "--image") and arg_index + 1 < args.len) {
@@ -363,11 +361,7 @@ pub fn main() !void {
 
     // Enable JIT after core loads to avoid compiling transient boot code
     if (jit_requested) {
-        std.debug.print("Enabling JIT after load-order processing\n", .{});
-        interp.enableJit() catch |err| {
-            std.debug.print("Warning: Failed to enable JIT: {any}\n", .{err});
-        };
-        std.debug.print("JIT compilation enabled\n", .{});
+        interp.enableJit() catch {};
     }
 
     // Load core libraries before command-line files so they can be overridden
@@ -406,6 +400,11 @@ pub fn main() !void {
         // Load exception handling (MessageNotUnderstood, on:do:, etc.)
         core_file_in.loadFile("src/smalltalk/exception-handling.st") catch {
             core_file_in.loadFile("exception-handling.st") catch {};
+        };
+
+        // Load FFI support classes (ExternalStructure, FFICallback, etc.)
+        core_file_in.loadFile("src/image/ffi.st") catch {
+            core_file_in.loadFile("ffi.st") catch {};
         };
     }
 

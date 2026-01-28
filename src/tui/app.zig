@@ -11,7 +11,9 @@ const TranscriptTab = @import("tabs/transcript.zig").TranscriptTab;
 const WorkspaceTab = @import("tabs/workspace.zig").WorkspaceTab;
 const BrowserTab = @import("tabs/browser.zig").BrowserTab;
 const FFIConfigTab = @import("tabs/ffi_config.zig").FFIConfigTab;
+const InspectorTab = @import("tabs/inspector.zig").InspectorTab;
 const transcript_mod = @import("tabs/transcript.zig");
+const inspector_mod = @import("tabs/inspector.zig");
 
 const Terminal = terminal_mod.Terminal;
 const Screen = screen_mod.Screen;
@@ -80,6 +82,7 @@ pub const App = struct {
     workspace: WorkspaceTab,
     browser: BrowserTab,
     ffi_config: FFIConfigTab,
+    inspector: InspectorTab,
 
     // Package management
     package_registry: PackageRegistry,
@@ -130,6 +133,7 @@ pub const App = struct {
             .{ .title = "Workspace", .shortcut = '2' },
             .{ .title = "Browser", .shortcut = '3' },
             .{ .title = "FFI Config", .shortcut = '4' },
+            .{ .title = "Inspector", .shortcut = '5' },
         };
         var tabbar = TabBar.init(tabbar_rect, &tabs);
         tabbar.active_tab = 1; // Start on Workspace tab
@@ -142,6 +146,7 @@ pub const App = struct {
         const workspace = try WorkspaceTab.init(allocator, content_rect);
         var browser = try BrowserTab.init(allocator, content_rect);
         const ffi_config = try FFIConfigTab.init(allocator, content_rect);
+        const inspector = try InspectorTab.init(allocator, content_rect, heap);
 
         // Create package registry with system packages
         var package_registry = PackageRegistry.init(allocator);
@@ -167,6 +172,7 @@ pub const App = struct {
             .workspace = workspace,
             .browser = browser,
             .ffi_config = ffi_config,
+            .inspector = inspector,
             .package_registry = package_registry,
             .workspace_items = &[_]StatusItem{
                 .{ .text = "Execute", .key = "Ctrl+D" },
@@ -196,7 +202,7 @@ pub const App = struct {
         try app.transcript.addLine("", .normal);
         try app.transcript.addInfo("Keyboard Shortcuts");
         try app.transcript.addLine("", .normal);
-        try app.transcript.addLine("  Tabs:      F1 Transcript  F2 Workspace  F3 Browser  F4 FFI Config", .normal);
+        try app.transcript.addLine("  Tabs:      F1 Transcript  F2 Workspace  F3 Browser  F4 FFI  F5 Inspector", .normal);
         try app.transcript.addLine("  Image:     F9 Save        F12 Save As", .normal);
         try app.transcript.addLine("  System:    Ctrl+Q Quit", .normal);
         try app.transcript.addLine("", .normal);
@@ -235,6 +241,16 @@ pub const App = struct {
         app.browser.on_save_package = &browserSavePackage;
         app.browser.on_create_package = &browserCreatePackage;
 
+        // Set up transcript send-to-workspace callback
+        app.transcript.on_send_to_workspace = &transcriptSendToWorkspace;
+
+        // Set up inspector callbacks
+        app.inspector.on_send_to_workspace = &transcriptSendToWorkspace;
+        app.inspector.on_do_it = &inspectorDoIt;
+        app.inspector.on_print_it = &inspectorPrintIt;
+        app.inspector.on_inspect_it = &inspectorInspectIt;
+        app.inspector.on_browse = &inspectorBrowse;
+
         // Set global app pointer for callbacks
         g_app = app;
 
@@ -250,6 +266,7 @@ pub const App = struct {
         self.workspace.deinit();
         self.browser.deinit();
         self.ffi_config.deinit();
+        self.inspector.deinit();
         self.package_registry.deinit();
         self.screen.deinit();
         self.terminal.deinit();
@@ -452,6 +469,10 @@ pub const App = struct {
                 self.switchToTab(3);
                 return;
             },
+            .f5 => {
+                self.switchToTab(4);
+                return;
+            },
             .ctrl_shift_s, .f9 => {
                 // F9 for Save Image (F11 gets captured by terminal for fullscreen)
                 // Copy path to local buffer to avoid issues with heap.image_path being modified
@@ -484,6 +505,10 @@ pub const App = struct {
                     },
                     '4' => {
                         self.switchToTab(3);
+                        return;
+                    },
+                    '5' => {
+                        self.switchToTab(4);
                         return;
                     },
                     else => {},
@@ -520,7 +545,7 @@ pub const App = struct {
                         9 => { // Ctrl+I - Inspect It
                             const code = self.workspace.getSelectedOrCurrentLine() catch return;
                             defer self.allocator.free(code);
-                            self.executeCode(code, true);
+                            self.inspectCode(code);
                             return;
                         },
                         else => {},
@@ -582,6 +607,12 @@ pub const App = struct {
             // Fall through to tab bar if not consumed
         }
 
+        // Handle inspector tab
+        if (self.active_tab == 4) {
+            const result = self.inspector.handleKey(key);
+            if (result == .consumed) return;
+        }
+
         // Handle tab bar input (for switching between main tabs)
         const tab_result = self.tabbar.handleKey(key);
         if (tab_result == .consumed) {
@@ -589,7 +620,7 @@ pub const App = struct {
             return;
         }
 
-        // Pass to active tab (browser and ffi_config handled above)
+        // Pass to active tab (browser, ffi_config, and inspector handled above)
         const result = switch (self.active_tab) {
             0 => self.transcript.handleKey(key),
             1 => self.workspace.handleKey(key),
@@ -645,6 +676,7 @@ pub const App = struct {
                     }
                 },
                 3 => self.ffi_config.handleMouse(mouse),
+                4 => self.inspector.handleMouse(mouse),
                 else => {},
             }
             return;
@@ -657,6 +689,7 @@ pub const App = struct {
                 0 => self.transcript.scroll(scroll_dir),
                 1 => self.workspace.scroll(scroll_dir),
                 2 => self.browser.scroll(scroll_dir),
+                4 => self.inspector.scroll(scroll_dir),
                 else => {},
             }
         }
@@ -684,6 +717,7 @@ pub const App = struct {
         self.workspace.focused = self.active_tab == 1;
         self.browser.focused = self.active_tab == 2;
         self.ffi_config.focused = self.active_tab == 3;
+        self.inspector.focused = self.active_tab == 4;
     }
 
     fn switchToTab(self: *App, tab: usize) void {
@@ -738,6 +772,11 @@ pub const App = struct {
             3 => {
                 self.ffi_config.updateRect(content_rect);
                 self.ffi_config.draw(&self.screen);
+                self.statusbar.setItems(self.default_items);
+            },
+            4 => {
+                self.inspector.updateRect(content_rect);
+                self.inspector.draw(&self.screen);
                 self.statusbar.setItems(self.default_items);
             },
             else => {},
@@ -1045,6 +1084,35 @@ pub const App = struct {
         }
     }
 
+    /// Execute code and open inspector on the result
+    pub fn inspectCode(self: *App, code: []const u8) void {
+        const trimmed = std.mem.trim(u8, code, " \t\r\n");
+
+        // Add execution message to transcript
+        self.transcript.addInfo("Inspecting...") catch {};
+
+        // Compile and execute
+        const result = self.compileAndExecute(trimmed) catch |err| {
+            var buf: [256]u8 = undefined;
+            const err_msg = std.fmt.bufPrint(&buf, "Error: {s}", .{@errorName(err)}) catch "Error";
+            self.transcript.addError(err_msg) catch {};
+            return;
+        };
+
+        // Open inspector on the result
+        self.openInspector(result);
+    }
+
+    /// Open the inspector tab with the given value
+    pub fn openInspector(self: *App, value: Value) void {
+        self.inspector.inspect(value) catch {
+            self.transcript.addError("Failed to inspect object") catch {};
+            return;
+        };
+        self.switchToTab(4); // Switch to inspector tab
+        self.transcript.addSuccess("Inspecting object") catch {};
+    }
+
     /// Load a .st file using filein
     fn loadFileIn(self: *App, path: []const u8) void {
         var buf: [512]u8 = undefined;
@@ -1077,6 +1145,10 @@ pub const App = struct {
     }
 
     fn compileAndExecute(self: *App, source: []const u8) !Value {
+        return self.compileAndExecuteWithSelf(source, Value.nil);
+    }
+
+    fn compileAndExecuteWithSelf(self: *App, source: []const u8, receiver: Value) !Value {
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
         const temp_alloc = arena.allocator();
@@ -1091,8 +1163,8 @@ pub const App = struct {
 
         const method = try gen.compileDoIt(ast);
 
-        // Execute
-        return try self.interpreter.execute(method, Value.nil, &[_]Value{});
+        // Execute with custom receiver (self)
+        return try self.interpreter.execute(method, receiver, &[_]Value{});
     }
 
     fn formatValue(self: *App, buf: []u8, value: Value) []const u8 {
@@ -1855,6 +1927,86 @@ pub const App = struct {
         return null;
     }
 };
+
+// Callback for transcript/inspector - send text to workspace
+fn transcriptSendToWorkspace(text: []const u8) void {
+    const app = g_app orelse return;
+
+    // Insert text into workspace
+    for (text) |c| {
+        if (c == '\n') {
+            _ = app.workspace.editor.handleKey(.enter);
+        } else if (c != '\r') {
+            _ = app.workspace.editor.handleKey(.{ .char = c });
+        }
+    }
+    // Add newline after
+    _ = app.workspace.editor.handleKey(.enter);
+
+    // Switch to workspace tab
+    app.switchToTab(1);
+    app.statusbar.setMessage("Text sent to workspace");
+}
+
+// Callback for inspector - Do It (evaluate without showing result)
+fn inspectorDoIt(code: []const u8, self_value: Value) void {
+    const app = g_app orelse return;
+
+    _ = app.compileAndExecuteWithSelf(code, self_value) catch {
+        app.statusbar.setMessage("Error evaluating expression");
+        return;
+    };
+
+    app.statusbar.setMessage("Done");
+}
+
+// Callback for inspector - Print It (evaluate and return result string)
+fn inspectorPrintIt(code: []const u8, self_value: Value) ?[]const u8 {
+    const app = g_app orelse return null;
+
+    const result = app.compileAndExecuteWithSelf(code, self_value) catch |err| {
+        // Show error in transcript for debugging
+        app.transcript.addError(std.fmt.allocPrint(app.allocator, "Error: {s}", .{@errorName(err)}) catch "Error") catch {};
+        app.statusbar.setMessage("Error evaluating expression");
+        return null;
+    };
+
+    // Format result as string
+    var buf: [256]u8 = undefined;
+    const formatted = app.formatValue(&buf, result);
+
+    app.statusbar.setMessage("OK");
+
+    // Return a copy (caller must free)
+    return app.allocator.dupe(u8, formatted) catch null;
+}
+
+// Callback for inspector - Inspect It (evaluate and inspect result)
+fn inspectorInspectIt(code: []const u8, self_value: Value) void {
+    const app = g_app orelse return;
+
+    const result = app.compileAndExecuteWithSelf(code, self_value) catch {
+        app.statusbar.setMessage("Error evaluating expression");
+        return;
+    };
+
+    // Open inspector on result
+    app.inspector.inspect(result) catch {};
+    app.statusbar.setMessage("Inspecting result");
+}
+
+// Callback for inspector - Browse class in Browser tab
+fn inspectorBrowse(class_name: []const u8) void {
+    const app = g_app orelse return;
+
+    // Select the class in browser and switch to browser tab
+    if (app.browser.selectClassByName(class_name)) {
+        app.switchToTab(2); // Browser tab
+        app.statusbar.setMessage("Browsing class");
+    } else {
+        app.statusbar.setMessage("Class not found in browser");
+    }
+}
 
 // Callback for browser - create a new class
 fn browserCreateClass(browser: *BrowserTab, class_name: []const u8, superclass_name: []const u8, inst_vars: []const u8) void {

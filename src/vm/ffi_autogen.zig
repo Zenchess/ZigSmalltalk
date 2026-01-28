@@ -687,10 +687,11 @@ pub fn generateRegistryFor(comptime CImport: type, comptime func_names: []const 
 
 /// FFI Library - contains all auto-generated bindings for a C import
 pub fn FFILibrary(comptime CImport: type, comptime lib_name: []const u8, comptime func_names: []const []const u8) type {
+    const funcs = generateRegistryFor(CImport, func_names);
     return struct {
         pub const name = lib_name;
         pub const c = CImport;
-        pub const functions = generateRegistryFor(CImport, func_names);
+        pub const functions: []const FFIFunction = &funcs;
 
         /// Look up a function by name
         pub fn getFunction(func_name: []const u8) ?FFIFunction {

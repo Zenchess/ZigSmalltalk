@@ -77,18 +77,42 @@ FILES=$(grep -v '^$' load-order-fixed.txt | grep -v '^#' | tr '\n' ' ')
 - `Object>>respondsTo:` - checks if object understands a selector
 - `Smalltalk>>allClasses` - returns array of all classes in the system
 - Array methods: `includes:`, `indexOf:`, `indexOf:ifAbsent:`, `reversed`
+- `\\` (modulo) - fast handler added to interpreter (interpreter.zig:4269)
+- `String>>asUppercase`, `String>>asLowercase` - primitives installed
+- `Number>>squared` - new primitive for SmallInteger and Float
 
-**Bug Fix Details:**
+**ADDED (2026-01-28) - FFI Callbacks:**
+- FFICallback class for creating C-callable function pointers from Smalltalk blocks
+- Uses libffi closures (ffi_prep_closure_loc) to generate callable code at runtime
+- Primitives 880-884: primFFICallbackCreate, primFFICallbackPointer, primFFICallbackFree, primFFICallbackProcessEvents, primFFICallbackTest
+- Key files: `src/vm/ffi_callbacks.zig`, `src/image/ffi.st`
+- **Fully tested end-to-end**: C code calling function pointer correctly invokes Smalltalk block
+- Example usage:
+  ```smalltalk
+  "Create callback"
+  cb := FFICallback signature: 'int(int,int)' block: [:a :b | a + b].
+  ptr := cb functionPointer.  "Returns integer address of C function pointer"
+
+  "Test invocation (simulates C calling the function pointer)"
+  result := cb testInvokeWith: 10 with: 20.  "=> 30"
+  ```
+
+**Bug Fix Details (2026-01-24):**
 The bug was in `makeHandlerPushTemp` (interpreter.zig:4560). The fast-path handler
 for `push_temporary_N` opcodes always read from the stack, ignoring `heap_context`.
 Block arguments are stored in `heap_context` when a block is executed via `value:`,
 so the fix was to check `heap_context` first before falling back to stack access.
 
+**FIXED (2026-01-28) - Instance Variable Access in JIT:**
+Simple getter methods (like `handle` returning `^handle`) were returning nil because
+the JIT compiler's `emitPushReceiverVariable` was a stub that just pushed nil. The fix
+was to make methods containing `push_receiver_variable` bytecodes NOT JIT-eligible
+(jit.zig:1124) until proper implementation is added. This allows the interpreter's
+dispatch loop to handle instance variable access correctly.
+
 **Missing Methods (MessageNotUnderstood):**
-- `\\` (modulo)
-- `asLowercase`, `asUppercase`, `squared`
-- `ifNil:`
-- `beginsWith:`, `endsWith:`
+- `ifNil:` - defined in ANSI library (Object.cls, UndefinedObject.cls)
+- `beginsWith:`, `endsWith:` - defined in ANSI library (String.cls, SequenceableCollection.cls)
 - `@` (Point creation)
 - `OrderedCollection>>add:`
 

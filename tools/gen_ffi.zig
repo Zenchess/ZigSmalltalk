@@ -408,8 +408,8 @@ fn generateFile(allocator: std.mem.Allocator, libraries: []const Library) !void 
         try file.writeAll("/// GLX for glXGetProcAddress\npub const GLX = @cImport({\n    @cInclude(\"GL/glx.h\");\n});\n\n");
     }
 
-    // Generate combined 'c' import for backwards compatibility (excluding GLEW to avoid conflicts)
-    // Always include standard C headers for malloc, free, math functions, etc.
+    // Generate combined 'c' import for backwards compatibility
+    // Only include standard C headers to avoid symbol conflicts with external libraries
     try file.writeAll(
         \\/// Combined C imports (for backwards compatibility)
         \\pub const c = @cImport({
@@ -417,20 +417,9 @@ fn generateFile(allocator: std.mem.Allocator, libraries: []const Library) !void 
         \\    @cInclude("stdlib.h");
         \\    @cInclude("string.h");
         \\    @cInclude("math.h");
+        \\});
         \\
     );
-    for (libraries) |lib| {
-        // Skip GLEW libraries since they conflict with other GL includes
-        if (lib.glew) continue;
-        for (lib.headers) |header| {
-            var buf: [256]u8 = undefined;
-            var escape_buf: [1024]u8 = undefined;
-            const escaped_header = escapeBackslashes(header, &escape_buf);
-            const len = std.fmt.bufPrint(&buf, "    @cInclude(\"{s}\");\n", .{escaped_header}) catch continue;
-            try file.writeAll(len);
-        }
-    }
-    try file.writeAll("});\n\n");
 
     // Generate list of available libraries
     try file.writeAll("/// List of configured libraries\npub const library_names = [_][]const u8{\n");
