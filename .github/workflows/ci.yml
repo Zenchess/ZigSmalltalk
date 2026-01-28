@@ -1,15 +1,17 @@
 name: CI
 
-on:
-  push:
-    branches: [master, main]
-  pull_request:
-    branches: [master, main]
+# CI temporarily disabled - requires Zig 0.15.x which is not yet officially released
+# The project uses Zig 0.15.x features (.empty ArrayList syntax) but:
+# - Zig 0.14.0 (stable) doesn't have these features
+# - Zig 0.16.0-dev (master) has breaking build.zig API changes
+# Re-enable when Zig 0.15.x is released
 
-env:
-  # Zig 0.15.x dev version - x86_64-linux only for now
-  # macOS/Windows builds disabled until 0.15.x is officially released
-  ZIG_VERSION: "0.15.0-dev.654+6156612f4"
+on:
+  workflow_dispatch:  # Manual trigger only for now
+  # push:
+  #   branches: [master, main]
+  # pull_request:
+  #   branches: [master, main]
 
 jobs:
   build-linux:
@@ -19,73 +21,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Dependencies
+      - name: Notice
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libgl-dev
-
-      - name: Setup Zig
-        run: |
-          curl -L "https://ziglang.org/builds/zig-linux-x86_64-${{ env.ZIG_VERSION }}.tar.xz" | tar -xJ
-          echo "$PWD/zig-linux-x86_64-${{ env.ZIG_VERSION }}" >> $GITHUB_PATH
-
-      - name: Verify Zig
-        run: zig version
-
-      - name: Build
-        run: zig build
-
-      - name: Run Zig Tests
-        run: zig build test
-
-      - name: Build Release
-        run: zig build -Doptimize=ReleaseFast
-
-  # Run ANSI Smalltalk tests on Linux
-  ansi-tests:
-    runs-on: ubuntu-latest
-    needs: build-linux
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install Dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libgl-dev
-
-      - name: Setup Zig
-        run: |
-          curl -L "https://ziglang.org/builds/zig-linux-x86_64-${{ env.ZIG_VERSION }}.tar.xz" | tar -xJ
-          echo "$PWD/zig-linux-x86_64-${{ env.ZIG_VERSION }}" >> $GITHUB_PATH
-
-      - name: Build VM
-        run: zig build
-
-      - name: Run ANSI Test Suite
-        run: |
-          # Load ANSI test files and run test suite
-          FILES=$(grep -v '^$' load-order-fixed.txt | grep -v '^#' | tr '\n' ' ')
-          timeout 120 ./zig-out/bin/zig-smalltalk $FILES ansi-tests/run-tests-simple.st || true
-        continue-on-error: true  # ANSI tests may have some failures
-
-  lint:
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Zig
-        run: |
-          curl -L "https://ziglang.org/builds/zig-linux-x86_64-${{ env.ZIG_VERSION }}.tar.xz" | tar -xJ
-          echo "$PWD/zig-linux-x86_64-${{ env.ZIG_VERSION }}" >> $GITHUB_PATH
-
-      - name: Check Formatting
-        run: |
-          # Check if any .zig files need formatting
-          find src -name "*.zig" -exec zig fmt --check {} + || {
-            echo "::warning::Some files need formatting. Run 'zig fmt src/' to fix."
-            exit 0  # Don't fail the build, just warn
-          }
+          echo "CI is temporarily disabled pending Zig 0.15.x release"
+          echo "The project requires Zig 0.15.x features not available in 0.14.0 stable"
+          echo "Run locally with: zig build"
