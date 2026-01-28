@@ -1016,6 +1016,9 @@ pub const Debugger = struct {
                 \\  state, info  - Print execution state
                 \\  all, a       - Print everything
                 \\
+                \\  restart, rewind     - Restart current method from beginning
+                \\  restart <n>         - Restart frame N (use 'bt' to see frames)
+                \\
                 \\  bp <name>    - Set breakpoint on method name
                 \\  bpc <class>  - Set breakpoint on class
                 \\  bpl          - List breakpoints
@@ -1081,6 +1084,30 @@ pub const Debugger = struct {
             } else {
                 std.debug.print("Invalid breakpoint index\n", .{});
             }
+        } else if (std.mem.eql(u8, cmd, "restart") or std.mem.eql(u8, cmd, "rewind")) {
+            // Restart current frame (frame 0)
+            self.restartAtContext(self.interp.context_ptr);
+            std.debug.print("Restarted current method at beginning\n", .{});
+            self.printState();
+        } else if (std.mem.startsWith(u8, cmd, "restart ") or std.mem.startsWith(u8, cmd, "rewind ")) {
+            // Restart specific frame by number
+            const space_idx = std.mem.indexOf(u8, cmd, " ") orelse cmd.len;
+            const frame_str = std.mem.trim(u8, cmd[space_idx..], " ");
+            const frame_num = std.fmt.parseInt(usize, frame_str, 10) catch {
+                std.debug.print("Invalid frame number. Use 'bt' to see frame numbers.\n", .{});
+                return;
+            };
+            
+            // Frame 0 is current, Frame N means N frames back
+            if (frame_num > self.interp.context_ptr) {
+                std.debug.print("Invalid frame {d}. Current depth is {d}. Use 'bt' to see frames.\n", .{ frame_num, self.interp.context_ptr });
+                return;
+            }
+            
+            const ctx_index = self.interp.context_ptr - frame_num;
+            self.restartAtContext(ctx_index);
+            std.debug.print("Restarted frame {d}\n", .{frame_num});
+            self.printState();
         } else {
             std.debug.print("Unknown command: {s}\nType 'help' for commands.\n", .{cmd});
         }

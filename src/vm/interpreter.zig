@@ -1897,6 +1897,7 @@ pub const Interpreter = struct {
     }
 
     pub fn currentMethodSource(self: *Interpreter) []const u8 {
+        // First try the current method
         const lits = self.method.getLiterals();
         if (lits.len > 0) {
             const last = lits[lits.len - 1];
@@ -1907,6 +1908,30 @@ pub const Interpreter = struct {
                 }
             }
         }
+        
+        // If no source in current method, check if receiver is a BlockClosure
+        // and try to get source from the block's parent method
+        if (self.receiver.isObject()) {
+            const recv_obj = self.receiver.asObject();
+            if (recv_obj.header.class_index == Heap.CLASS_BLOCK_CLOSURE) {
+                // Get the parent method from the block closure
+                const parent_method_val = recv_obj.getField(Heap.BLOCK_FIELD_METHOD, recv_obj.header.size);
+                if (parent_method_val.isObject()) {
+                    const parent_method: *CompiledMethod = @ptrCast(@alignCast(parent_method_val.asObject()));
+                    const parent_lits = parent_method.getLiterals();
+                    if (parent_lits.len > 0) {
+                        const parent_last = parent_lits[parent_lits.len - 1];
+                        if (parent_last.isObject()) {
+                            const parent_src_obj = parent_last.asObject();
+                            if (parent_src_obj.header.class_index == Heap.CLASS_STRING) {
+                                return parent_src_obj.bytes(parent_src_obj.header.size);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
         return "<?>"; // Unknown
     }
 

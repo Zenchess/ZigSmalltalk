@@ -465,7 +465,7 @@ pub const DebuggerTab = struct {
                 }
                 return true;
             },
-            .f9 => {
+            .f10 => {
                 // Continue
                 if (self.is_halted) {
                     if (debugger_mod.globalDebugger) |dbg| {
@@ -476,7 +476,16 @@ pub const DebuggerTab = struct {
                 return true;
             },
             .char => |c| {
-                if (c == 'r' or c == 'R') {
+                if (c == 'c' or c == 'C') {
+                    // Continue (alternative to F10)
+                    if (self.is_halted) {
+                        if (debugger_mod.globalDebugger) |dbg| {
+                            dbg.continueExecution();
+                            self.onContinue();
+                        }
+                    }
+                    return true;
+                } else if (c == 'r' or c == 'R') {
                     // Restart current frame
                     if (self.is_halted and self.selected_frame < self.stack_frames.len) {
                         if (debugger_mod.globalDebugger) |dbg| {
@@ -731,7 +740,7 @@ pub const DebuggerTab = struct {
     fn drawHelpBar(self: *DebuggerTab, screen: *Screen, rect: Rect) void {
         _ = self;
         const y = rect.y + rect.height - 2;
-        const help = " F7:Into  F8:Over  Shift+F8:Out  F9:Continue  R:Restart ";
+        const help = " F7:Into  F8:Over  F10/C:Continue  R:Restart  Tab:Switch Pane ";
         screen.drawText(rect.x + 1, y, help, style_mod.styles.status);
     }
 };
