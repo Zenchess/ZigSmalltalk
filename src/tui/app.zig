@@ -12,8 +12,11 @@ const WorkspaceTab = @import("tabs/workspace.zig").WorkspaceTab;
 const BrowserTab = @import("tabs/browser.zig").BrowserTab;
 const FFIConfigTab = @import("tabs/ffi_config.zig").FFIConfigTab;
 const InspectorTab = @import("tabs/inspector.zig").InspectorTab;
+const DebuggerTab = @import("tabs/debugger.zig").DebuggerTab;
+const ProcessTab = @import("tabs/process.zig").ProcessTab;
 const transcript_mod = @import("tabs/transcript.zig");
 const inspector_mod = @import("tabs/inspector.zig");
+const debugger_mod = @import("../vm/debugger.zig");
 
 const Terminal = terminal_mod.Terminal;
 const Screen = screen_mod.Screen;
@@ -83,6 +86,11 @@ pub const App = struct {
     browser: BrowserTab,
     ffi_config: FFIConfigTab,
     inspector: InspectorTab,
+    debugger_tab: DebuggerTab,
+    process_tab: ProcessTab,
+
+    // Debugger state
+    debugger_active: bool = false, // True when debugger has halted
 
     // Package management
     package_registry: PackageRegistry,
@@ -134,6 +142,8 @@ pub const App = struct {
             .{ .title = "Browser", .shortcut = '3' },
             .{ .title = "FFI Config", .shortcut = '4' },
             .{ .title = "Inspector", .shortcut = '5' },
+            .{ .title = "Debugger", .shortcut = '6' },
+            .{ .title = "Processes", .shortcut = '7' },
         };
         var tabbar = TabBar.init(tabbar_rect, &tabs);
         tabbar.active_tab = 1; // Start on Workspace tab
@@ -147,6 +157,8 @@ pub const App = struct {
         var browser = try BrowserTab.init(allocator, content_rect);
         const ffi_config = try FFIConfigTab.init(allocator, content_rect);
         const inspector = try InspectorTab.init(allocator, content_rect, heap);
+        const debugger_tab = try DebuggerTab.init(allocator, content_rect, heap);
+        const process_tab = try ProcessTab.init(allocator, content_rect, heap);
 
         // Create package registry with system packages
         var package_registry = PackageRegistry.init(allocator);
@@ -173,6 +185,8 @@ pub const App = struct {
             .browser = browser,
             .ffi_config = ffi_config,
             .inspector = inspector,
+            .debugger_tab = debugger_tab,
+            .process_tab = process_tab,
             .package_registry = package_registry,
             .workspace_items = &[_]StatusItem{
                 .{ .text = "Execute", .key = "Ctrl+D" },
@@ -202,7 +216,7 @@ pub const App = struct {
         try app.transcript.addLine("", .normal);
         try app.transcript.addInfo("Keyboard Shortcuts");
         try app.transcript.addLine("", .normal);
-        try app.transcript.addLine("  Tabs:      F1 Transcript  F2 Workspace  F3 Browser  F4 FFI  F5 Inspector", .normal);
+        try app.transcript.addLine("  Tabs:      F1 Transcript  F2 Workspace  F3 Browser  F4 FFI  F5 Debugger  F6 Processes", .normal);
         try app.transcript.addLine("  Image:     F9 Save        F12 Save As", .normal);
         try app.transcript.addLine("  System:    Ctrl+Q Quit", .normal);
         try app.transcript.addLine("", .normal);
@@ -254,7 +268,20 @@ pub const App = struct {
         // Set global app pointer for callbacks
         g_app = app;
 
+        // Initialize debugger with TUI callback
+        _ = debugger_mod.initTuiDebugger(interp, &onDebuggerHalt);
+
         return app;
+    }
+
+    /// Callback when debugger halts - switch to debugger tab
+    fn onDebuggerHalt() void {
+        if (g_app) |app| {
+            app.debugger_active = true;
+            app.debugger_tab.onHalt();
+            app.switchToTab(5); // Switch to debugger tab
+            app.needs_full_redraw = true;
+        }
     }
 
     pub fn deinit(self: *App) void {
@@ -267,6 +294,8 @@ pub const App = struct {
         self.browser.deinit();
         self.ffi_config.deinit();
         self.inspector.deinit();
+        self.debugger_tab.deinit();
+        self.process_tab.deinit();
         self.package_registry.deinit();
         self.screen.deinit();
         self.terminal.deinit();
@@ -470,7 +499,12 @@ pub const App = struct {
                 return;
             },
             .f5 => {
-                self.switchToTab(4);
+                self.switchToTab(5); // Debugger
+                return;
+            },
+            .f6 => {
+                self.switchToTab(6); // Processes
+                self.process_tab.refresh();
                 return;
             },
             .ctrl_shift_s, .f9 => {
@@ -509,6 +543,15 @@ pub const App = struct {
                     },
                     '5' => {
                         self.switchToTab(4);
+                        return;
+                    },
+                    '6' => {
+                        self.switchToTab(5); // Debugger
+                        return;
+                    },
+                    '7' => {
+                        self.switchToTab(6); // Processes
+                        self.process_tab.refresh();
                         return;
                     },
                     else => {},
@@ -613,6 +656,16 @@ pub const App = struct {
             if (result == .consumed) return;
         }
 
+        // Handle debugger tab
+        if (self.active_tab == 5) {
+            if (self.debugger_tab.handleKey(key)) return;
+        }
+
+        // Handle process tab
+        if (self.active_tab == 6) {
+            if (self.process_tab.handleKey(key)) return;
+        }
+
         // Handle tab bar input (for switching between main tabs)
         const tab_result = self.tabbar.handleKey(key);
         if (tab_result == .consumed) {
@@ -677,6 +730,8 @@ pub const App = struct {
                 },
                 3 => self.ffi_config.handleMouse(mouse),
                 4 => self.inspector.handleMouse(mouse),
+                5 => self.debugger_tab.handleMouse(mouse),
+                6 => self.process_tab.handleMouse(mouse),
                 else => {},
             }
             return;
@@ -690,6 +745,8 @@ pub const App = struct {
                 1 => self.workspace.scroll(scroll_dir),
                 2 => self.browser.scroll(scroll_dir),
                 4 => self.inspector.scroll(scroll_dir),
+                5 => self.debugger_tab.scroll(scroll_dir),
+                6 => self.process_tab.scroll(scroll_dir),
                 else => {},
             }
         }
@@ -718,6 +775,8 @@ pub const App = struct {
         self.browser.focused = self.active_tab == 2;
         self.ffi_config.focused = self.active_tab == 3;
         self.inspector.focused = self.active_tab == 4;
+        self.debugger_tab.focused = self.active_tab == 5;
+        self.process_tab.focused = self.active_tab == 6;
     }
 
     fn switchToTab(self: *App, tab: usize) void {
@@ -777,6 +836,16 @@ pub const App = struct {
             4 => {
                 self.inspector.updateRect(content_rect);
                 self.inspector.draw(&self.screen);
+                self.statusbar.setItems(self.default_items);
+            },
+            5 => {
+                self.debugger_tab.updateRect(content_rect);
+                self.debugger_tab.draw(&self.screen);
+                self.statusbar.setItems(self.default_items);
+            },
+            6 => {
+                self.process_tab.updateRect(content_rect);
+                self.process_tab.draw(&self.screen);
                 self.statusbar.setItems(self.default_items);
             },
             else => {},

@@ -7021,8 +7021,18 @@ fn primError(interp: *Interpreter) InterpreterError!Value {
 
 fn primHalt(interp: *Interpreter) InterpreterError!Value {
     _ = try interp.pop(); // receiver
-    std.debug.print("Halt!\n", .{});
-    return Value.nil;
+
+    // Trigger debugger if available
+    const debugger = @import("debugger.zig");
+    if (debugger.globalDebugger) |dbg| {
+        dbg.triggerHalt();
+        // Return receiver to allow continuation after stepping
+        return interp.receiver;
+    }
+
+    // No debugger - just print and continue
+    std.debug.print("Halt! (no debugger attached)\n", .{});
+    return interp.receiver;
 }
 
 // ============================================================================

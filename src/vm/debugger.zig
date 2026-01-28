@@ -30,6 +30,31 @@ pub const Breakpoint = struct {
     hit_count: usize,
 };
 
+/// Stack frame information for TUI display
+pub const StackFrameInfo = struct {
+    context_index: usize,
+    method: *CompiledMethod,
+    method_class: Value,
+    selector: []const u8,
+    class_name: []const u8,
+    receiver: Value,
+    ip: usize,
+    temp_base: usize,
+    num_args: usize,
+    num_temps: usize,
+};
+
+/// Local variable information
+pub const LocalVariable = struct {
+    name: []const u8,
+    value: Value,
+    is_argument: bool,
+    index: usize,
+};
+
+/// TUI halt callback type
+pub const OnHaltCallback = *const fn () void;
+
 /// Interactive debugger for the Smalltalk VM
 pub const Debugger = struct {
     interp: *Interpreter,
@@ -37,9 +62,14 @@ pub const Debugger = struct {
     breakpoints: [64]Breakpoint,
     num_breakpoints: usize,
     step_out_context: usize, // Context level to step out to
+    halt_context_index: usize, // Context where halt occurred
     last_command: []const u8,
     stdin: std.fs.File,
     stdout: std.fs.File,
+
+    // TUI integration
+    on_halt: ?OnHaltCallback = null,
+    tui_mode: bool = false, // When true, don't use stdin/stdout prompt
 
     pub fn init(interp: *Interpreter) Debugger {
         return .{
@@ -48,10 +78,229 @@ pub const Debugger = struct {
             .breakpoints = undefined,
             .num_breakpoints = 0,
             .step_out_context = 0,
+            .halt_context_index = 0,
             .last_command = "",
             .stdin = std.fs.File.stdin(),
             .stdout = std.fs.File.stdout(),
+            .on_halt = null,
+            .tui_mode = false,
         };
+    }
+
+    /// Set the TUI callback for when debugger halts
+    pub fn setOnHalt(self: *Debugger, callback: ?OnHaltCallback) void {
+        self.on_halt = callback;
+        self.tui_mode = callback != null;
+    }
+
+    /// Trigger a halt (called by primHalt)
+    pub fn triggerHalt(self: *Debugger) void {
+        self.halt_context_index = self.interp.context_ptr;
+        self.mode = .paused;
+        debugEnabled = true;
+        if (self.on_halt) |cb| {
+            cb();
+        }
+    }
+
+    /// Step into - execute one bytecode then pause
+    pub fn stepInto(self: *Debugger) void {
+        self.mode = .step;
+    }
+
+    /// Step over - execute until back at same context level
+    pub fn stepOver(self: *Debugger) void {
+        self.step_out_context = self.interp.context_ptr;
+        self.mode = .step_over;
+    }
+
+    /// Step out - execute until lower context level
+    pub fn stepOut(self: *Debugger) void {
+        self.step_out_context = self.interp.context_ptr;
+        self.mode = .step_out;
+    }
+
+    /// Continue normal execution
+    pub fn continueExecution(self: *Debugger) void {
+        self.mode = .run;
+    }
+
+    /// Get stack frames for TUI display
+    pub fn getStackFrames(self: *Debugger, allocator: std.mem.Allocator) ![]StackFrameInfo {
+        var frames: std.ArrayList(StackFrameInfo) = .empty;
+
+        // Current context (frame 0)
+        try frames.append(allocator, self.makeFrameInfo(
+            self.interp.method,
+            self.interp.method_class,
+            self.interp.receiver,
+            self.interp.ip,
+            self.interp.temp_base,
+            self.interp.context_ptr,
+        ));
+
+        // Saved contexts
+        var i: usize = self.interp.context_ptr;
+        while (i > 0) {
+            i -= 1;
+            const ctx = self.interp.contexts[i];
+            try frames.append(allocator, self.makeFrameInfo(
+                ctx.method,
+                ctx.method_class,
+                ctx.receiver,
+                ctx.ip,
+                ctx.temp_base,
+                i,
+            ));
+            if (frames.items.len >= 50) break; // Limit stack depth
+        }
+
+        return frames.toOwnedSlice(allocator);
+    }
+
+    fn makeFrameInfo(_: *Debugger, method: *CompiledMethod, method_class: Value, recv: Value, ip: usize, temp_base: usize, ctx_index: usize) StackFrameInfo {
+        const lits = method.getLiterals();
+
+        // Get selector from last literal
+        var selector: []const u8 = "<unknown>";
+        if (lits.len > 0) {
+            const last = lits[lits.len - 1];
+            if (last.isObject()) {
+                const obj = last.asObject();
+                if (obj.header.class_index == Heap.CLASS_STRING or obj.header.class_index == Heap.CLASS_SYMBOL) {
+                    selector = obj.bytes(obj.header.size);
+                    // Truncate at first newline
+                    if (std.mem.indexOf(u8, selector, "\n")) |nl| {
+                        selector = selector[0..nl];
+                    }
+                }
+            }
+        }
+
+        // Get class name
+        var class_name: []const u8 = "<unknown>";
+        if (method_class.isObject()) {
+            const class_obj = method_class.asObject();
+            const name_val = class_obj.getField(Heap.CLASS_FIELD_NAME, Heap.CLASS_NUM_FIELDS);
+            if (name_val.isObject()) {
+                const name_obj = name_val.asObject();
+                if (name_obj.header.class_index == Heap.CLASS_SYMBOL) {
+                    class_name = name_obj.bytes(name_obj.header.size);
+                }
+            }
+        }
+
+        return StackFrameInfo{
+            .context_index = ctx_index,
+            .method = method,
+            .method_class = method_class,
+            .selector = selector,
+            .class_name = class_name,
+            .receiver = recv,
+            .ip = ip,
+            .temp_base = temp_base,
+            .num_args = method.header.num_args,
+            .num_temps = method.header.num_temps,
+        };
+    }
+
+    /// Get method source code
+    pub fn getMethodSource(self: *Debugger, method: *CompiledMethod) []const u8 {
+        _ = self;
+        const lits = method.getLiterals();
+        if (lits.len > 0) {
+            const last = lits[lits.len - 1];
+            if (last.isObject()) {
+                const obj = last.asObject();
+                if (obj.header.class_index == Heap.CLASS_STRING) {
+                    return obj.bytes(obj.header.size);
+                }
+            }
+        }
+        return "";
+    }
+
+    /// Get locals for a given frame
+    pub fn getLocals(self: *Debugger, frame: StackFrameInfo, allocator: std.mem.Allocator) ![]LocalVariable {
+        var locals: std.ArrayList(LocalVariable) = .empty;
+
+        // Get argument and temp names from method source if available
+        const num_args = frame.num_args;
+        const num_temps = frame.num_temps;
+
+        // Arguments
+        var i: usize = 0;
+        while (i < num_args) : (i += 1) {
+            const idx = frame.temp_base + i;
+            if (idx < self.interp.sp) {
+                try locals.append(allocator, .{
+                    .name = "arg",
+                    .value = self.interp.stack[idx],
+                    .is_argument = true,
+                    .index = i,
+                });
+            }
+        }
+
+        // Temps (after args)
+        i = num_args;
+        while (i < num_temps) : (i += 1) {
+            const idx = frame.temp_base + i;
+            if (idx < self.interp.sp) {
+                try locals.append(allocator, .{
+                    .name = "temp",
+                    .value = self.interp.stack[idx],
+                    .is_argument = false,
+                    .index = i - num_args,
+                });
+            }
+        }
+
+        return locals.toOwnedSlice(allocator);
+    }
+
+    /// Get instance variables of receiver
+    pub fn getInstanceVars(_: *Debugger, recv: Value, allocator: std.mem.Allocator) ![]LocalVariable {
+        var vars: std.ArrayList(LocalVariable) = .empty;
+
+        if (recv.isObject()) {
+            const obj = recv.asObject();
+            const size = obj.header.size;
+            // Don't show bytes for strings/symbols
+            if (obj.header.class_index != Heap.CLASS_STRING and obj.header.class_index != Heap.CLASS_SYMBOL) {
+                var i: usize = 0;
+                while (i < size and i < 20) : (i += 1) {
+                    try vars.append(allocator, .{
+                        .name = "instVar",
+                        .value = obj.getField(i, size),
+                        .is_argument = false,
+                        .index = i,
+                    });
+                }
+            }
+        }
+
+        return vars.toOwnedSlice(allocator);
+    }
+
+    /// Restart execution at a specific context
+    pub fn restartAtContext(self: *Debugger, ctx_index: usize) void {
+        if (ctx_index >= self.interp.context_ptr) {
+            // Restart current method
+            self.interp.ip = 0;
+            self.interp.sp = self.interp.temp_base + self.interp.method.header.num_temps;
+        } else {
+            // Rewind to earlier context
+            self.interp.context_ptr = ctx_index + 1;
+            const ctx = self.interp.contexts[ctx_index];
+            self.interp.method = ctx.method;
+            self.interp.method_class = ctx.method_class;
+            self.interp.receiver = ctx.receiver;
+            self.interp.temp_base = ctx.temp_base;
+            self.interp.ip = 0;
+            self.interp.sp = ctx.temp_base + ctx.method.header.num_temps;
+        }
+        self.mode = .paused;
     }
 
     /// Add a breakpoint
@@ -139,18 +388,21 @@ pub const Debugger = struct {
                 // Only pause if breakpoint hit
                 if (self.checkBreakpoints()) {
                     self.mode = .paused;
+                    self.notifyHalt();
                     return true;
                 }
                 return false;
             },
             .step => {
                 self.mode = .paused;
+                self.notifyHalt();
                 return true;
             },
             .step_over => {
                 // Continue until we're back at the same or lower context level
                 if (self.interp.context_ptr <= self.step_out_context) {
                     self.mode = .paused;
+                    self.notifyHalt();
                     return true;
                 }
                 return false;
@@ -159,11 +411,20 @@ pub const Debugger = struct {
                 // Continue until we're at a lower context level
                 if (self.interp.context_ptr < self.step_out_context) {
                     self.mode = .paused;
+                    self.notifyHalt();
                     return true;
                 }
                 return false;
             },
             .paused => return true,
+        }
+    }
+
+    /// Notify TUI when halted (if in TUI mode)
+    fn notifyHalt(self: *Debugger) void {
+        self.halt_context_index = self.interp.context_ptr;
+        if (self.on_halt) |cb| {
+            cb();
         }
     }
 
@@ -860,6 +1121,34 @@ pub fn shouldBreak() bool {
 /// Enter debugger prompt
 pub fn enterDebugger() void {
     if (globalDebugger) |dbg| {
+        if (dbg.tui_mode) {
+            // In TUI mode, just stay paused - TUI handles interaction
+            // The halt callback already notified the TUI
+            return;
+        }
         dbg.prompt();
     }
+}
+
+/// Get the global debugger instance
+pub fn getDebugger() ?*Debugger {
+    return globalDebugger;
+}
+
+/// Set the TUI halt callback on the global debugger
+pub fn setTuiCallback(callback: ?OnHaltCallback) void {
+    if (globalDebugger) |dbg| {
+        dbg.setOnHalt(callback);
+    }
+}
+
+/// Initialize debugger in TUI mode (no prompt, uses callbacks)
+pub fn initTuiDebugger(interp: *Interpreter, callback: OnHaltCallback) *Debugger {
+    const dbg = std.heap.page_allocator.create(Debugger) catch return undefined;
+    dbg.* = Debugger.init(interp);
+    dbg.setOnHalt(callback);
+    globalDebugger = dbg;
+    // Don't enable by default - wait for halt
+    debugEnabled = false;
+    return dbg;
 }
