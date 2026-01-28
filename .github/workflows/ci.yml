@@ -39,8 +39,56 @@ jobs:
       - name: Build Release
         run: zig build -Doptimize=ReleaseFast
 
-  # macOS and Windows builds disabled until FFI cross-platform issues are resolved
-  # The FFI library (libffi) has compilation issues on macOS CI and OpenGL linking issues
+  build-macos:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Zig
+        run: |
+          curl -L "https://ziglang.org/download/${{ env.ZIG_VERSION }}/zig-macos-aarch64-${{ env.ZIG_VERSION }}.tar.xz" | tar -xJ
+          echo "$PWD/zig-macos-aarch64-${{ env.ZIG_VERSION }}" >> $GITHUB_PATH
+
+      - name: Verify Zig
+        run: zig version
+
+      - name: Build (without FFI)
+        run: zig build -Dno-ffi
+        # FFI disabled on macOS CI due to cross-compilation issues with libffi
+
+      - name: Run Zig Tests
+        run: zig build test -Dno-ffi
+
+      - name: Build Release
+        run: zig build -Doptimize=ReleaseFast -Dno-ffi
+
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Zig
+        run: |
+          curl -L "https://ziglang.org/download/${{ env.ZIG_VERSION }}/zig-windows-x86_64-${{ env.ZIG_VERSION }}.zip" -o zig.zip
+          7z x zig.zip
+          echo "$PWD/zig-windows-x86_64-${{ env.ZIG_VERSION }}" >> $env:GITHUB_PATH
+
+      - name: Verify Zig
+        run: zig version
+
+      - name: Build (without FFI)
+        run: zig build -Dno-ffi
+        # FFI disabled on Windows CI due to OpenGL/linking issues
+
+      - name: Run Zig Tests
+        run: zig build test -Dno-ffi
+
+      - name: Build Release
+        run: zig build -Doptimize=ReleaseFast -Dno-ffi
 
   # Run ANSI Smalltalk tests on Linux
   ansi-tests:

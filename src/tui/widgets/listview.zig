@@ -233,9 +233,9 @@ pub const ListView = struct {
         var row: u16 = 0;
         while (row < content.height) : (row += 1) {
             const char: u21 = if (row >= thumb_pos and row < thumb_pos + thumb_size)
-                style_mod.box.block_full[0]
+                style_mod.box.block_full
             else
-                style_mod.box.block_light[0];
+                style_mod.box.block_light;
             screen.setCell(scrollbar_x, content.y + row, char, style_mod.styles.dim);
         }
     }

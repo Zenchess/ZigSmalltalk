@@ -349,7 +349,7 @@ pub const TreeView = struct {
                     style_mod.box.tree_expanded
                 else
                     style_mod.box.tree_collapsed;
-                screen.drawText(col, content.y + row, indicator, item_style);
+                screen.setCell(col, content.y + row, indicator, item_style);
                 col += 2;
             } else {
                 col += 2;
@@ -392,9 +392,9 @@ pub const TreeView = struct {
         var row: u16 = 0;
         while (row < content.height) : (row += 1) {
             const char: u21 = if (row >= thumb_pos and row < thumb_pos + thumb_size)
-                style_mod.box.block_full[0]
+                style_mod.box.block_full
             else
-                style_mod.box.block_light[0];
+                style_mod.box.block_light;
             screen.setCell(scrollbar_x, content.y + row, char, style_mod.styles.dim);
         }
     }

@@ -1022,6 +1022,10 @@ pub fn installCoreMethods(heap: *Heap) !void {
     try installMethod(heap, array_class, "detect:", try createPrimitiveMethod(heap, 1, @intFromEnum(Primitive.array_detect)));
     try installMethod(heap, array_class, "detect:ifNone:", try createPrimitiveMethod(heap, 2, @intFromEnum(Primitive.array_detect_if_none)));
     try installMethod(heap, array_class, "inject:into:", try createPrimitiveMethod(heap, 2, @intFromEnum(Primitive.array_inject_into)));
+    try installMethod(heap, array_class, "includes:", try createPrimitiveMethod(heap, 1, @intFromEnum(Primitive.array_includes)));
+    try installMethod(heap, array_class, "indexOf:", try createPrimitiveMethod(heap, 1, @intFromEnum(Primitive.array_index_of)));
+    try installMethod(heap, array_class, "indexOf:ifAbsent:", try createPrimitiveMethod(heap, 2, @intFromEnum(Primitive.array_index_of_if_absent)));
+    try installMethod(heap, array_class, "reversed", try createPrimitiveMethod(heap, 0, @intFromEnum(Primitive.array_reversed)));
 
     // Object methods - Dolphin compatible
     try installMethod(heap, object_class, "class", try createPrimitiveMethod(heap, 0, @intFromEnum(Primitive.class))); // 111
@@ -1044,6 +1048,7 @@ pub fn installCoreMethods(heap: *Heap) !void {
     try installMethod(heap, object_class, "doesNotUnderstand:", try createPrimitiveMethod(heap, 1, @intFromEnum(Primitive.does_not_understand)));
     try installMethod(heap, object_class, "error:", try createPrimitiveMethod(heap, 1, @intFromEnum(Primitive.error_message)));
     try installMethod(heap, object_class, "halt", try createPrimitiveMethod(heap, 0, @intFromEnum(Primitive.halt)));
+    try installMethod(heap, object_class, "respondsTo:", try createPrimitiveMethod(heap, 1, @intFromEnum(Primitive.responds_to)));
 
     // Reflection methods
     try installMethod(heap, object_class, "perform:", try createPrimitiveMethod(heap, 1, @intFromEnum(Primitive.perform)));
@@ -1086,6 +1091,8 @@ pub fn installCoreMethods(heap: *Heap) !void {
     try installMethod(heap, true_class, "not", try createPrimitiveMethod(heap, 0, @intFromEnum(Primitive.boolean_not)));
     try installMethod(heap, true_class, "and:", try createPrimitiveMethod(heap, 1, @intFromEnum(Primitive.true_and)));
     try installMethod(heap, true_class, "or:", try createPrimitiveMethod(heap, 1, @intFromEnum(Primitive.true_or)));
+    try installMethod(heap, true_class, "&", try createPrimitiveMethod(heap, 1, @intFromEnum(Primitive.true_amp)));
+    try installMethod(heap, true_class, "|", try createPrimitiveMethod(heap, 1, @intFromEnum(Primitive.true_pipe)));
 
     // False methods (our extensions)
     try installMethod(heap, false_class, "ifTrue:", try createPrimitiveMethod(heap, 1, @intFromEnum(Primitive.false_if_true)));
@@ -1095,6 +1102,8 @@ pub fn installCoreMethods(heap: *Heap) !void {
     try installMethod(heap, false_class, "not", try createPrimitiveMethod(heap, 0, @intFromEnum(Primitive.boolean_not)));
     try installMethod(heap, false_class, "and:", try createPrimitiveMethod(heap, 1, @intFromEnum(Primitive.false_and)));
     try installMethod(heap, false_class, "or:", try createPrimitiveMethod(heap, 1, @intFromEnum(Primitive.false_or)));
+    try installMethod(heap, false_class, "&", try createPrimitiveMethod(heap, 1, @intFromEnum(Primitive.false_amp)));
+    try installMethod(heap, false_class, "|", try createPrimitiveMethod(heap, 1, @intFromEnum(Primitive.false_pipe)));
 
     // Float methods - Dolphin compatible primitive numbers
     const float_class = heap.getClass(Heap.CLASS_FLOAT).asObject();
@@ -1111,6 +1120,21 @@ pub fn installCoreMethods(heap: *Heap) !void {
     try installMethod(heap, float_class, "abs", try createPrimitiveMethod(heap, 0, @intFromEnum(Primitive.float_abs))); // 205
     try installMethod(heap, float_class, "negated", try createPrimitiveMethod(heap, 0, @intFromEnum(Primitive.float_negate))); // our extension
     try installMethod(heap, float_class, "printString", try createPrimitiveMethod(heap, 0, @intFromEnum(Primitive.float_print_string))); // 169
+
+    // Float math functions
+    try installMethod(heap, float_class, "sqrt", try createPrimitiveMethod(heap, 0, @intFromEnum(Primitive.float_sqrt)));
+    try installMethod(heap, float_class, "sin", try createPrimitiveMethod(heap, 0, @intFromEnum(Primitive.float_sin)));
+    try installMethod(heap, float_class, "cos", try createPrimitiveMethod(heap, 0, @intFromEnum(Primitive.float_cos)));
+    try installMethod(heap, float_class, "tan", try createPrimitiveMethod(heap, 0, @intFromEnum(Primitive.float_tan)));
+    try installMethod(heap, float_class, "exp", try createPrimitiveMethod(heap, 0, @intFromEnum(Primitive.float_exp)));
+    try installMethod(heap, float_class, "ln", try createPrimitiveMethod(heap, 0, @intFromEnum(Primitive.float_ln)));
+    try installMethod(heap, float_class, "log10", try createPrimitiveMethod(heap, 0, @intFromEnum(Primitive.float_log10)));
+    try installMethod(heap, float_class, "floor", try createPrimitiveMethod(heap, 0, @intFromEnum(Primitive.float_floor)));
+    try installMethod(heap, float_class, "ceiling", try createPrimitiveMethod(heap, 0, @intFromEnum(Primitive.float_ceiling)));
+    try installMethod(heap, float_class, "rounded", try createPrimitiveMethod(heap, 0, @intFromEnum(Primitive.float_rounded)));
+    try installMethod(heap, float_class, "arcSin", try createPrimitiveMethod(heap, 0, @intFromEnum(Primitive.float_arcsin)));
+    try installMethod(heap, float_class, "arcCos", try createPrimitiveMethod(heap, 0, @intFromEnum(Primitive.float_arccos)));
+    try installMethod(heap, float_class, "arcTan", try createPrimitiveMethod(heap, 0, @intFromEnum(Primitive.float_arctan)));
 
     // SmallInteger >> asFloat
     try installMethod(heap, small_int_class, "asFloat", try createPrimitiveMethod(heap, 0, @intFromEnum(Primitive.small_as_float))); // 168
@@ -1152,6 +1176,7 @@ pub fn installCoreMethods(heap: *Heap) !void {
     try installMethod(heap, dictionary_class, "at:put:", try createPrimitiveMethod(heap, 2, @intFromEnum(Primitive.dict_at_put)));
     try installMethod(heap, dictionary_class, "at:ifAbsent:", try createPrimitiveMethod(heap, 2, @intFromEnum(Primitive.dict_at_if_absent)));
     try installMethod(heap, dictionary_class, "keys", try createPrimitiveMethod(heap, 0, @intFromEnum(Primitive.dict_keys)));
+    try installMethod(heap, dictionary_class, "allClasses", try createPrimitiveMethod(heap, 0, @intFromEnum(Primitive.all_classes)));
 
     // Object reflection methods
     try installMethod(heap, object_class, "isKindOf:", try createPrimitiveMethod(heap, 1, @intFromEnum(Primitive.is_kind_of)));

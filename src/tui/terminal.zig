@@ -190,7 +190,8 @@ pub const ansi = struct {
     }
 
     pub fn clear() void {
-        _ = getStdout().write("\x1b[2J") catch {};
+        // Clear screen and move cursor to home position (1,1)
+        _ = getStdout().write("\x1b[2J\x1b[H") catch {};
     }
 
     pub fn clearLine() void {

@@ -84,8 +84,9 @@ pub const App = struct {
     // Package management
     package_registry: PackageRegistry,
 
-    active_tab: usize = 0,
+    active_tab: usize = 1, // Default to Workspace tab
     running: bool = true,
+    needs_full_redraw: bool = true, // Start with full redraw
 
     // Status items for different tabs
     workspace_items: []const StatusItem,
@@ -130,7 +131,8 @@ pub const App = struct {
             .{ .title = "Browser", .shortcut = '3' },
             .{ .title = "FFI Config", .shortcut = '4' },
         };
-        const tabbar = TabBar.init(tabbar_rect, &tabs);
+        var tabbar = TabBar.init(tabbar_rect, &tabs);
+        tabbar.active_tab = 1; // Start on Workspace tab
 
         var statusbar = StatusBar.init(statusbar_rect);
         statusbar.setMessage("Ready");
@@ -170,6 +172,7 @@ pub const App = struct {
                 .{ .text = "Execute", .key = "Ctrl+D" },
                 .{ .text = "Print", .key = "Ctrl+P" },
                 .{ .text = "Inspect", .key = "Ctrl+I" },
+                .{ .text = "Save Image", .key = "F9" },
                 .{ .text = "Quit", .key = "Ctrl+Q" },
             },
             .browser_items = &[_]StatusItem{
@@ -177,25 +180,43 @@ pub const App = struct {
                 .{ .text = "Export", .key = "Ctrl+E" },
                 .{ .text = "New Pkg", .key = "Ctrl+N" },
                 .{ .text = "New Class", .key = "Ctrl+A" },
+                .{ .text = "Quit", .key = "Ctrl+Q" },
             },
             .default_items = &[_]StatusItem{
+                .{ .text = "Workspace", .key = "F2" },
+                .{ .text = "Browser", .key = "F3" },
+                .{ .text = "Save Image", .key = "F9" },
                 .{ .text = "Quit", .key = "Ctrl+Q" },
             },
         };
 
         // Add welcome message to transcript
         try app.transcript.addInfo("Zig Smalltalk TUI v0.1");
+        try app.transcript.addLine("A 64-bit Smalltalk implementation in Zig with JIT compilation", .normal);
         try app.transcript.addLine("", .normal);
-        try app.transcript.addLine("Switch Tabs:", .normal);
-        try app.transcript.addLine("  F1 - Transcript    F2 - Workspace    F3 - Browser    F4 - FFI Config", .normal);
+        try app.transcript.addInfo("Keyboard Shortcuts");
         try app.transcript.addLine("", .normal);
-        try app.transcript.addLine("Global Shortcuts:", .normal);
-        try app.transcript.addLine("  F9 - Save Image    F12 - Save Image As    Ctrl+Q - Quit", .normal);
+        try app.transcript.addLine("  Tabs:      F1 Transcript  F2 Workspace  F3 Browser  F4 FFI Config", .normal);
+        try app.transcript.addLine("  Image:     F9 Save        F12 Save As", .normal);
+        try app.transcript.addLine("  System:    Ctrl+Q Quit", .normal);
         try app.transcript.addLine("", .normal);
-        try app.transcript.addLine("Workspace: Ctrl+D execute | Ctrl+P print | Ctrl+I inspect", .normal);
-        try app.transcript.addLine("Browser:   Ctrl+S save | Ctrl+E export pkg | Ctrl+N new pkg | Ctrl+A new class", .normal);
+        try app.transcript.addInfo("Workspace Shortcuts");
         try app.transcript.addLine("", .normal);
-        try app.transcript.addLine("Packages: System packages in system-packages/, user packages in packages/", .normal);
+        try app.transcript.addLine("  Ctrl+D  Execute selected code (Do it)", .normal);
+        try app.transcript.addLine("  Ctrl+P  Print result of selected code", .normal);
+        try app.transcript.addLine("  Ctrl+I  Inspect result of selected code", .normal);
+        try app.transcript.addLine("", .normal);
+        try app.transcript.addInfo("Browser Shortcuts");
+        try app.transcript.addLine("", .normal);
+        try app.transcript.addLine("  Ctrl+S  Save method", .normal);
+        try app.transcript.addLine("  Ctrl+E  Export package to file", .normal);
+        try app.transcript.addLine("  Ctrl+N  Create new package", .normal);
+        try app.transcript.addLine("  Ctrl+A  Create new class", .normal);
+        try app.transcript.addLine("", .normal);
+        try app.transcript.addInfo("Packages");
+        try app.transcript.addLine("", .normal);
+        try app.transcript.addLine("  System packages:  system-packages/", .normal);
+        try app.transcript.addLine("  User packages:    packages/", .normal);
 
         // Set global transcript for primitive output redirection
         transcript_mod.setGlobalTranscript(&app.transcript);
@@ -416,27 +437,19 @@ pub const App = struct {
                 }
             },
             .f1 => {
-                self.active_tab = 0;
-                self.tabbar.setActiveTab(0);
-                self.updateFocus();
+                self.switchToTab(0);
                 return;
             },
             .f2 => {
-                self.active_tab = 1;
-                self.tabbar.setActiveTab(1);
-                self.updateFocus();
+                self.switchToTab(1);
                 return;
             },
             .f3 => {
-                self.active_tab = 2;
-                self.tabbar.setActiveTab(2);
-                self.updateFocus();
+                self.switchToTab(2);
                 return;
             },
             .f4 => {
-                self.active_tab = 3;
-                self.tabbar.setActiveTab(3);
-                self.updateFocus();
+                self.switchToTab(3);
                 return;
             },
             .ctrl_shift_s, .f9 => {
@@ -458,27 +471,19 @@ pub const App = struct {
             .alt => |c| {
                 switch (c) {
                     '1' => {
-                        self.active_tab = 0;
-                        self.tabbar.setActiveTab(0);
-                        self.updateFocus();
+                        self.switchToTab(0);
                         return;
                     },
                     '2' => {
-                        self.active_tab = 1;
-                        self.tabbar.setActiveTab(1);
-                        self.updateFocus();
+                        self.switchToTab(1);
                         return;
                     },
                     '3' => {
-                        self.active_tab = 2;
-                        self.tabbar.setActiveTab(2);
-                        self.updateFocus();
+                        self.switchToTab(2);
                         return;
                     },
                     '4' => {
-                        self.active_tab = 3;
-                        self.tabbar.setActiveTab(3);
-                        self.updateFocus();
+                        self.switchToTab(3);
                         return;
                     },
                     else => {},
@@ -580,8 +585,7 @@ pub const App = struct {
         // Handle tab bar input (for switching between main tabs)
         const tab_result = self.tabbar.handleKey(key);
         if (tab_result == .consumed) {
-            self.active_tab = self.tabbar.active_tab;
-            self.updateFocus();
+            self.switchToTab(self.tabbar.active_tab);
             return;
         }
 
@@ -608,9 +612,7 @@ pub const App = struct {
             for (self.tabbar.tabs, 0..) |tab, i| {
                 const tab_width = @as(u16, @intCast(tab.title.len)) + 4;
                 if (mouse.x >= x and mouse.x < x + tab_width) {
-                    self.active_tab = i;
-                    self.tabbar.setActiveTab(i);
-                    self.updateFocus();
+                    self.switchToTab(i);
                     return;
                 }
                 x += tab_width;
@@ -684,13 +686,26 @@ pub const App = struct {
         self.ffi_config.focused = self.active_tab == 3;
     }
 
+    fn switchToTab(self: *App, tab: usize) void {
+        if (tab != self.active_tab) {
+            self.active_tab = tab;
+            self.tabbar.setActiveTab(tab);
+            self.needs_full_redraw = true;
+        }
+    }
+
     fn render(self: *App) void {
         const width = self.screen.width;
         const height = self.screen.height;
 
-        // Clear screen and force full redraw to avoid rendering artifacts
+        // Clear screen buffer for new frame
         self.screen.clear();
-        self.screen.forceFullRedraw();
+
+        // Force full redraw when needed (initial render, tab switches, etc.)
+        if (self.needs_full_redraw) {
+            self.screen.forceFullRedraw();
+            self.needs_full_redraw = false;
+        }
 
         // Update rects based on current size
         const tabbar_rect = Rect.init(0, 0, width, 1);
@@ -741,7 +756,6 @@ pub const App = struct {
     fn loadClasses(self: *App) !void {
         // Iterate through class table and add to browser
         const class_table = self.heap.class_table.items;
-        std.debug.print("DEBUG loadClasses: class_table has {} entries\n", .{class_table.len});
 
         for (class_table) |class_val| {
             if (class_val.isNil() or !class_val.isObject()) continue;
@@ -814,7 +828,6 @@ pub const App = struct {
                     self.package_registry.addClassToPackage(pkg_name, name) catch {};
                 } else if (parent_name != null and std.mem.eql(u8, parent_name.?, "ExternalStructure")) {
                     // ExternalStructure subclasses go in FFI package
-                    std.debug.print("DEBUG: Adding ExternalStructure subclass '{s}' to FFI package\n", .{name});
                     self.package_registry.addClassToPackage("FFI", name) catch {};
                 } else {
                     self.package_registry.addClassToPackage(category_name, name) catch {};

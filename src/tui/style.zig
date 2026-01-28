@@ -184,62 +184,62 @@ pub const styles = struct {
     pub const title = Style{ .fg = theme.blue, .bg = ui.background, .bold = true };
 };
 
-// Box drawing characters
+// Box drawing characters as Unicode codepoints (u21)
 pub const box = struct {
-    pub const horizontal = "─";
-    pub const vertical = "│";
-    pub const top_left = "┌";
-    pub const top_right = "┐";
-    pub const bottom_left = "└";
-    pub const bottom_right = "┘";
-    pub const t_down = "┬";
-    pub const t_up = "┴";
-    pub const t_right = "├";
-    pub const t_left = "┤";
-    pub const cross = "┼";
+    pub const horizontal: u21 = '─'; // U+2500
+    pub const vertical: u21 = '│'; // U+2502
+    pub const top_left: u21 = '┌'; // U+250C
+    pub const top_right: u21 = '┐'; // U+2510
+    pub const bottom_left: u21 = '└'; // U+2514
+    pub const bottom_right: u21 = '┘'; // U+2518
+    pub const t_down: u21 = '┬'; // U+252C
+    pub const t_up: u21 = '┴'; // U+2534
+    pub const t_right: u21 = '├'; // U+251C
+    pub const t_left: u21 = '┤'; // U+2524
+    pub const cross: u21 = '┼'; // U+253C
 
     // Double line variants
-    pub const horizontal_double = "═";
-    pub const vertical_double = "║";
+    pub const horizontal_double: u21 = '═'; // U+2550
+    pub const vertical_double: u21 = '║'; // U+2551
 
     // Rounded corners
-    pub const round_top_left = "╭";
-    pub const round_top_right = "╮";
-    pub const round_bottom_left = "╰";
-    pub const round_bottom_right = "╯";
+    pub const round_top_left: u21 = '╭'; // U+256D
+    pub const round_top_right: u21 = '╮'; // U+256E
+    pub const round_bottom_left: u21 = '╰'; // U+2570
+    pub const round_bottom_right: u21 = '╯'; // U+256F
 
     // Block elements
-    pub const block_full = "█";
-    pub const block_light = "░";
-    pub const block_medium = "▒";
-    pub const block_dark = "▓";
+    pub const block_full: u21 = '█'; // U+2588
+    pub const block_light: u21 = '░'; // U+2591
+    pub const block_medium: u21 = '▒'; // U+2592
+    pub const block_dark: u21 = '▓'; // U+2593
 
     // Tree view
-    pub const tree_branch = "├";
-    pub const tree_last = "└";
-    pub const tree_vertical = "│";
-    pub const tree_horizontal = "─";
-    pub const tree_collapsed = "▶";
-    pub const tree_expanded = "▼";
+    pub const tree_branch: u21 = '├'; // U+251C
+    pub const tree_last: u21 = '└'; // U+2514
+    pub const tree_vertical: u21 = '│'; // U+2502
+    pub const tree_horizontal: u21 = '─'; // U+2500
+    pub const tree_collapsed: u21 = '▶'; // U+25B6
+    pub const tree_expanded: u21 = '▼'; // U+25BC
 };
 
-// Icons and symbols
+// Icons and symbols as Unicode codepoints (u21)
 pub const icons = struct {
-    pub const check = "✓";
-    pub const cross_icon = "✗";
-    pub const arrow_right = "→";
-    pub const arrow_left = "←";
-    pub const arrow_up = "↑";
-    pub const arrow_down = "↓";
-    pub const bullet = "•";
-    pub const circle_empty = "○";
-    pub const circle_filled = "●";
-    pub const square_empty = "□";
-    pub const square_filled = "■";
-    pub const folder = "📁";
-    pub const file = "📄";
-    pub const gear = "⚙";
-    pub const warning = "⚠";
-    pub const info_icon = "ℹ";
-    pub const question = "?";
+    pub const check: u21 = '✓'; // U+2713
+    pub const cross_icon: u21 = '✗'; // U+2717
+    pub const arrow_right: u21 = '→'; // U+2192
+    pub const arrow_left: u21 = '←'; // U+2190
+    pub const arrow_up: u21 = '↑'; // U+2191
+    pub const arrow_down: u21 = '↓'; // U+2193
+    pub const bullet: u21 = '•'; // U+2022
+    pub const circle_empty: u21 = '○'; // U+25CB
+    pub const circle_filled: u21 = '●'; // U+25CF
+    pub const square_empty: u21 = '□'; // U+25A1
+    pub const square_filled: u21 = '■'; // U+25A0
+    pub const folder: u21 = '📁'; // U+1F4C1
+    pub const file: u21 = '📄'; // U+1F4C4
+    pub const gear: u21 = '⚙'; // U+2699
+    pub const warning: u21 = '⚠'; // U+26A0
+    pub const info_icon: u21 = 'ℹ'; // U+2139
+    pub const question: u21 = '?'; // ASCII
 };

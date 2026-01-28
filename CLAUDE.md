@@ -5,7 +5,8 @@ A 64-bit Smalltalk implementation written in Zig with a terminal-based IDE. Feat
 
 ## Build & Run
 ```bash
-zig build              # Build the VM
+zig build              # Build the VM with FFI support
+zig build -Dno-ffi     # Build without FFI (for cross-platform CI)
 zig build run          # Run the TUI
 zig build test         # Run Zig unit tests
 ./zig-out/bin/zig-smalltalk file.st  # Load Smalltalk file
@@ -37,18 +38,18 @@ FILES=$(grep -v '^$' load-order-fixed.txt | grep -v '^#' | tr '\n' ' ')
 ./zig-out/bin/zig-smalltalk $FILES ansi-tests/run-tests-simple.st
 ```
 
-## Current Test Status (2026-01-24)
+## Current Test Status (2026-01-27)
 
 ### REPL Feature Tests (comprehensive-test-results.txt)
 
 **Working:**
 - Integer arithmetic: `+`, `-`, `*`, `/`, `//`
 - Comparisons: `<`, `>`, `<=`, `>=`, `=`, `~=`
-- Boolean: `true`, `false`, `not`
+- Boolean: `true`, `false`, `not`, `&`, `|` (eager evaluation)
 - Characters: `$a`, `$Z`
 - Strings: literals, `size`, `at:`, `,` (concat), `=`, `copyFrom:to:`
 - Symbols: `#hello`
-- Arrays: `#(1 2 3)`, `size`, `at:`
+- Arrays: `#(1 2 3)`, `size`, `at:`, `includes:`, `indexOf:`, `reversed`
 - nil: `nil`, `isNil`
 - Unary: `abs`, `negated`, `factorial`
 - Keywords: `max:`, `min:`
@@ -58,8 +59,10 @@ FILES=$(grep -v '^$' load-order-fixed.txt | grep -v '^#' | tr '\n' ' ')
 - Control: `ifTrue:ifFalse:`
 - Loops: `whileTrue:`, `timesRepeat:`
 - Dictionary: `at:put:`, `at:`
-- Type checks: `class`, `isKindOf:`
-- Integer: `even`, `odd`
+- Type checks: `class`, `isKindOf:`, `respondsTo:`
+- Integer: `even`, `odd`, `truncated`, `rounded`, `floor`, `ceiling`
+- Float math: `sqrt`, `sin`, `cos`, `tan`, `exp`, `ln`, `log10`, `arcSin`, `arcCos`, `arcTan`
+- Reflection: `respondsTo:`, `Smalltalk allClasses`
 
 **FIXED (2026-01-24) - Block Arguments Now Work:**
 - `[:x | x * 2] value: 5` => 10
@@ -68,6 +71,13 @@ FILES=$(grep -v '^$' load-order-fixed.txt | grep -v '^#' | tr '\n' ' ')
 - `#(1 2 3) do: [:each | ...]` - now works
 - `collect:`, `select:` - should work now
 
+**ADDED (2026-01-27):**
+- Boolean `&` and `|` operators (eager evaluation)
+- Float math functions: `sqrt`, `sin`, `cos`, `tan`, `exp`, `ln`, `log10`, `floor`, `ceiling`, `rounded`, `arcSin`, `arcCos`, `arcTan`
+- `Object>>respondsTo:` - checks if object understands a selector
+- `Smalltalk>>allClasses` - returns array of all classes in the system
+- Array methods: `includes:`, `indexOf:`, `indexOf:ifAbsent:`, `reversed`
+
 **Bug Fix Details:**
 The bug was in `makeHandlerPushTemp` (interpreter.zig:4560). The fast-path handler
 for `push_temporary_N` opcodes always read from the stack, ignoring `heap_context`.
@@ -75,9 +85,9 @@ Block arguments are stored in `heap_context` when a block is executed via `value
 so the fix was to check `heap_context` first before falling back to stack access.
 
 **Missing Methods (MessageNotUnderstood):**
-- `\\` (modulo), `&`, `|` (boolean)
+- `\\` (modulo)
 - `asLowercase`, `asUppercase`, `squared`
-- `ifNil:`, `respondsTo:`
+- `ifNil:`
 - `beginsWith:`, `endsWith:`
 - `@` (Point creation)
 - `OrderedCollection>>add:`

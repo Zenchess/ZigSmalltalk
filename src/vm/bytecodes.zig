@@ -383,6 +383,10 @@ pub const Primitive = enum(u16) {
     true_or = 512, // True >> or: aBlock
     false_and = 513, // False >> and: aBlock
     false_or = 514, // False >> or: aBlock
+    true_amp = 515, // True >> & aBoolean (eager and)
+    true_pipe = 516, // True >> | aBoolean (eager or)
+    false_amp = 517, // False >> & aBoolean (eager and)
+    false_pipe = 518, // False >> | aBoolean (eager or)
 
     // Error handling
     does_not_understand = 800, // Object >> doesNotUnderstand:
@@ -539,6 +543,10 @@ pub const Primitive = enum(u16) {
     array_detect = 534,
     array_detect_if_none = 535,
     array_inject_into = 536,
+    array_includes = 570, // Array >> includes:
+    array_index_of = 571, // Array >> indexOf:
+    array_index_of_if_absent = 572, // Array >> indexOf:ifAbsent:
+    array_reversed = 573, // Array >> reversed
     to_do = 537, // start to: stop do: [:i | ...]
     to_by_do = 538, // start to: stop by: step do: [:i | ...]
     times_repeat = 539, // Integer >> timesRepeat:
@@ -585,6 +593,22 @@ pub const Primitive = enum(u16) {
     stdout_write = 612,
     stdin_read = 613,
     stderr_write = 614,
+
+    // Float math functions (620-635)
+    float_sqrt = 620, // Float >> sqrt
+    float_sin = 621, // Float >> sin
+    float_cos = 622, // Float >> cos
+    float_tan = 623, // Float >> tan
+    float_exp = 624, // Float >> exp
+    float_ln = 625, // Float >> ln (natural log)
+    float_log10 = 626, // Float >> log10 (base 10 log)
+    float_floor = 627, // Float >> floor
+    float_ceiling = 628, // Float >> ceiling
+    float_rounded = 629, // Float >> rounded
+    float_arcsin = 630, // Float >> arcSin
+    float_arccos = 631, // Float >> arcCos
+    float_arctan = 632, // Float >> arcTan
+
     transcript_show = 650,
     transcript_cr = 651,
     transcript_next_put_all = 652,
@@ -720,6 +744,7 @@ pub const Primitive = enum(u16) {
 
     // System introspection
     all_classes = 964, // Smalltalk >> allClasses - return array of all classes
+    responds_to = 965, // Object >> respondsTo: aSymbol - check if object understands selector
 
     _,
 };

@@ -118,7 +118,7 @@ pub const TabBar = struct {
         // Draw bottom border line
         var col = rect.x;
         while (col < rect.x + rect.width) : (col += 1) {
-            screen.drawText(col, rect.y + rect.height - 1, style_mod.box.horizontal, style_mod.styles.border_style);
+            screen.setCell(col, rect.y + rect.height - 1, style_mod.box.horizontal, style_mod.styles.border_style);
         }
     }
 };

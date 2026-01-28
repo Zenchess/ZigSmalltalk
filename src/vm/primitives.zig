@@ -140,6 +140,10 @@ pub fn executePrimitive(interp: *Interpreter, prim_index: u16) InterpreterError!
         .true_or => primTrueOr(interp),
         .false_and => primFalseAnd(interp),
         .false_or => primFalseOr(interp),
+        .true_amp => primTrueAmp(interp),
+        .true_pipe => primTruePipe(interp),
+        .false_amp => primFalseAmp(interp),
+        .false_pipe => primFalsePipe(interp),
 
         // Error handling
         .does_not_understand => primDoesNotUnderstand(interp),
@@ -164,6 +168,10 @@ pub fn executePrimitive(interp: *Interpreter, prim_index: u16) InterpreterError!
         .array_detect => primArrayDetect(interp),
         .array_detect_if_none => primArrayDetectIfNone(interp),
         .array_inject_into => primArrayInjectInto(interp),
+        .array_includes => primArrayIncludes(interp),
+        .array_index_of => primArrayIndexOf(interp),
+        .array_index_of_if_absent => primArrayIndexOfIfAbsent(interp),
+        .array_reversed => primArrayReversed(interp),
         .to_do => primToDo(interp),
         .to_by_do => primToByDo(interp),
         .times_repeat => primTimesRepeat(interp),
@@ -213,6 +221,21 @@ pub fn executePrimitive(interp: *Interpreter, prim_index: u16) InterpreterError!
         .float_negate => primFloatNegate(interp),
         .float_print_string => primFloatPrintString(interp),
         .small_as_float => primSmallAsFloat(interp),
+
+        // Float math functions
+        .float_sqrt => primFloatSqrt(interp),
+        .float_sin => primFloatSin(interp),
+        .float_cos => primFloatCos(interp),
+        .float_tan => primFloatTan(interp),
+        .float_exp => primFloatExp(interp),
+        .float_ln => primFloatLn(interp),
+        .float_log10 => primFloatLog10(interp),
+        .float_floor => primFloatFloor(interp),
+        .float_ceiling => primFloatCeiling(interp),
+        .float_rounded => primFloatRounded(interp),
+        .float_arcsin => primFloatArcSin(interp),
+        .float_arccos => primFloatArcCos(interp),
+        .float_arctan => primFloatArcTan(interp),
 
         // ====================================================================
         // String operations
@@ -438,6 +461,7 @@ pub fn executePrimitive(interp: *Interpreter, prim_index: u16) InterpreterError!
         .terminal_fill_rect => primTerminalFillRect(interp),
 
         .all_classes => primAllClasses(interp),
+        .responds_to => primRespondsTo(interp),
 
         else => InterpreterError.PrimitiveFailed,
     };
@@ -4099,6 +4123,34 @@ fn primFalseOr(interp: *Interpreter) InterpreterError!Value {
     return evaluateBlock(interp, block);
 }
 
+// True >> & aBoolean - eager and, return the argument
+fn primTrueAmp(interp: *Interpreter) InterpreterError!Value {
+    const arg = try interp.pop();
+    _ = try interp.pop(); // recv (true)
+    return arg;
+}
+
+// True >> | aBoolean - eager or, return true
+fn primTruePipe(interp: *Interpreter) InterpreterError!Value {
+    _ = try interp.pop(); // arg (not needed)
+    _ = try interp.pop(); // recv (true)
+    return Value.@"true";
+}
+
+// False >> & aBoolean - eager and, return false
+fn primFalseAmp(interp: *Interpreter) InterpreterError!Value {
+    _ = try interp.pop(); // arg (not needed)
+    _ = try interp.pop(); // recv (false)
+    return Value.@"false";
+}
+
+// False >> | aBoolean - eager or, return the argument
+fn primFalsePipe(interp: *Interpreter) InterpreterError!Value {
+    const arg = try interp.pop();
+    _ = try interp.pop(); // recv (false)
+    return arg;
+}
+
 // ============================================================================
 // Loop Control Flow Primitives
 // ============================================================================
@@ -5454,6 +5506,159 @@ fn primArrayInjectInto(interp: *Interpreter) InterpreterError!Value {
     return accumulator;
 }
 
+// Array >> includes: anObject
+// Answer true if the array contains an element equal to anObject
+fn primArrayIncludes(interp: *Interpreter) InterpreterError!Value {
+    const target = try interp.pop();
+    const array = try interp.pop();
+
+    if (!array.isObject()) {
+        try interp.push(array);
+        try interp.push(target);
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    const array_obj = array.asObject();
+    const size: usize = array_obj.header.size;
+
+    // Search for the element using equality comparison
+    var i: usize = 0;
+    while (i < size) : (i += 1) {
+        const elem = array_obj.getField(i, size);
+        // Use identity for primitives, equality check for objects
+        if (elem.bits == target.bits) {
+            return Value.@"true";
+        }
+        // For objects, check equals
+        if (elem.isObject() and target.isObject()) {
+            if (try primEqualsHelper(interp, elem, target)) {
+                return Value.@"true";
+            }
+        }
+    }
+
+    return Value.@"false";
+}
+
+// Helper for equality check that returns bool instead of modifying stack
+fn primEqualsHelper(interp: *Interpreter, a: Value, b: Value) InterpreterError!bool {
+    // Simple identity check for non-objects
+    if (a.bits == b.bits) return true;
+
+    // For strings and symbols, compare bytes
+    if (a.isObject() and b.isObject()) {
+        const obj_a = a.asObject();
+        const obj_b = b.asObject();
+        // Same class?
+        if (obj_a.header.class_index != obj_b.header.class_index) return false;
+        // String or Symbol?
+        if (obj_a.header.class_index == Heap.CLASS_STRING or obj_a.header.class_index == Heap.CLASS_SYMBOL) {
+            const bytes_a = obj_a.bytes(obj_a.header.size);
+            const bytes_b = obj_b.bytes(obj_b.header.size);
+            return std.mem.eql(u8, bytes_a, bytes_b);
+        }
+        // For other objects, use identity
+        _ = interp;
+    }
+    return false;
+}
+
+// Array >> indexOf: anObject
+// Answer the index of the first element equal to anObject, or 0 if not found
+fn primArrayIndexOf(interp: *Interpreter) InterpreterError!Value {
+    const target = try interp.pop();
+    const array = try interp.pop();
+
+    if (!array.isObject()) {
+        try interp.push(array);
+        try interp.push(target);
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    const array_obj = array.asObject();
+    const size: usize = array_obj.header.size;
+
+    // Search for the element
+    var i: usize = 0;
+    while (i < size) : (i += 1) {
+        const elem = array_obj.getField(i, size);
+        if (elem.bits == target.bits) {
+            return Value.fromSmallInt(@intCast(i + 1)); // 1-based index
+        }
+        if (elem.isObject() and target.isObject()) {
+            if (try primEqualsHelper(interp, elem, target)) {
+                return Value.fromSmallInt(@intCast(i + 1));
+            }
+        }
+    }
+
+    return Value.fromSmallInt(0); // Not found
+}
+
+// Array >> indexOf: anObject ifAbsent: exceptionBlock
+// Answer the index of the first element equal to anObject, or evaluate block if not found
+fn primArrayIndexOfIfAbsent(interp: *Interpreter) InterpreterError!Value {
+    const exception_block = try interp.pop();
+    const target = try interp.pop();
+    const array = try interp.pop();
+
+    if (!array.isObject()) {
+        try interp.push(array);
+        try interp.push(target);
+        try interp.push(exception_block);
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    const array_obj = array.asObject();
+    const size: usize = array_obj.header.size;
+
+    // Search for the element
+    var i: usize = 0;
+    while (i < size) : (i += 1) {
+        const elem = array_obj.getField(i, size);
+        if (elem.bits == target.bits) {
+            return Value.fromSmallInt(@intCast(i + 1));
+        }
+        if (elem.isObject() and target.isObject()) {
+            if (try primEqualsHelper(interp, elem, target)) {
+                return Value.fromSmallInt(@intCast(i + 1));
+            }
+        }
+    }
+
+    // Not found - evaluate exception block
+    return evaluateBlock(interp, exception_block);
+}
+
+// Array >> reversed
+// Answer a new array with elements in reverse order
+fn primArrayReversed(interp: *Interpreter) InterpreterError!Value {
+    const array = try interp.pop();
+
+    if (!array.isObject()) {
+        try interp.push(array);
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    const array_obj = array.asObject();
+    const size: usize = array_obj.header.size;
+
+    // Allocate new array
+    const result = interp.heap.allocateObject(Heap.CLASS_ARRAY, @intCast(size), .variable) catch {
+        try interp.push(array);
+        return InterpreterError.OutOfMemory;
+    };
+
+    // Copy elements in reverse order
+    const result_fields = result.fields(size);
+    var i: usize = 0;
+    while (i < size) : (i += 1) {
+        result_fields[size - 1 - i] = array_obj.getField(i, size);
+    }
+
+    return Value.fromObject(result);
+}
+
 // ============================================================================
 // Process/Semaphore Primitives (Dolphin compatible: 85-100, 156, 189)
 // ============================================================================
@@ -6199,6 +6404,226 @@ fn primSmallAsFloat(interp: *Interpreter) InterpreterError!Value {
     if (a.isSmallInt()) {
         const f: f64 = @floatFromInt(a.asSmallInt());
         return interp.heap.allocateFloat(f) catch {
+            try interp.push(a);
+            return InterpreterError.OutOfMemory;
+        };
+    }
+
+    try interp.push(a);
+    return InterpreterError.PrimitiveFailed;
+}
+
+// ========================================================================
+// Float math functions
+// ========================================================================
+
+fn primFloatSqrt(interp: *Interpreter) InterpreterError!Value {
+    const a = try interp.pop();
+
+    const av = interp.heap.getFloatValue(a);
+    if (av != null) {
+        const v = av.?;
+        if (v >= 0) {
+            return interp.heap.allocateFloat(@sqrt(v)) catch {
+                try interp.push(a);
+                return InterpreterError.OutOfMemory;
+            };
+        }
+    }
+
+    try interp.push(a);
+    return InterpreterError.PrimitiveFailed;
+}
+
+fn primFloatSin(interp: *Interpreter) InterpreterError!Value {
+    const a = try interp.pop();
+
+    const av = interp.heap.getFloatValue(a);
+    if (av != null) {
+        return interp.heap.allocateFloat(@sin(av.?)) catch {
+            try interp.push(a);
+            return InterpreterError.OutOfMemory;
+        };
+    }
+
+    try interp.push(a);
+    return InterpreterError.PrimitiveFailed;
+}
+
+fn primFloatCos(interp: *Interpreter) InterpreterError!Value {
+    const a = try interp.pop();
+
+    const av = interp.heap.getFloatValue(a);
+    if (av != null) {
+        return interp.heap.allocateFloat(@cos(av.?)) catch {
+            try interp.push(a);
+            return InterpreterError.OutOfMemory;
+        };
+    }
+
+    try interp.push(a);
+    return InterpreterError.PrimitiveFailed;
+}
+
+fn primFloatTan(interp: *Interpreter) InterpreterError!Value {
+    const a = try interp.pop();
+
+    const av = interp.heap.getFloatValue(a);
+    if (av != null) {
+        return interp.heap.allocateFloat(@tan(av.?)) catch {
+            try interp.push(a);
+            return InterpreterError.OutOfMemory;
+        };
+    }
+
+    try interp.push(a);
+    return InterpreterError.PrimitiveFailed;
+}
+
+fn primFloatExp(interp: *Interpreter) InterpreterError!Value {
+    const a = try interp.pop();
+
+    const av = interp.heap.getFloatValue(a);
+    if (av != null) {
+        return interp.heap.allocateFloat(@exp(av.?)) catch {
+            try interp.push(a);
+            return InterpreterError.OutOfMemory;
+        };
+    }
+
+    try interp.push(a);
+    return InterpreterError.PrimitiveFailed;
+}
+
+fn primFloatLn(interp: *Interpreter) InterpreterError!Value {
+    const a = try interp.pop();
+
+    const av = interp.heap.getFloatValue(a);
+    if (av != null) {
+        const v = av.?;
+        if (v > 0) {
+            return interp.heap.allocateFloat(@log(v)) catch {
+                try interp.push(a);
+                return InterpreterError.OutOfMemory;
+            };
+        }
+    }
+
+    try interp.push(a);
+    return InterpreterError.PrimitiveFailed;
+}
+
+fn primFloatLog10(interp: *Interpreter) InterpreterError!Value {
+    const a = try interp.pop();
+
+    const av = interp.heap.getFloatValue(a);
+    if (av != null) {
+        const v = av.?;
+        if (v > 0) {
+            return interp.heap.allocateFloat(@log10(v)) catch {
+                try interp.push(a);
+                return InterpreterError.OutOfMemory;
+            };
+        }
+    }
+
+    try interp.push(a);
+    return InterpreterError.PrimitiveFailed;
+}
+
+fn primFloatFloor(interp: *Interpreter) InterpreterError!Value {
+    const a = try interp.pop();
+
+    const av = interp.heap.getFloatValue(a);
+    if (av != null) {
+        const floored = @floor(av.?);
+        const max: f64 = @floatFromInt(std.math.maxInt(i61));
+        const min: f64 = @floatFromInt(std.math.minInt(i61));
+        if (floored >= min and floored <= max) {
+            return Value.fromSmallInt(@intFromFloat(floored));
+        }
+    }
+
+    try interp.push(a);
+    return InterpreterError.PrimitiveFailed;
+}
+
+fn primFloatCeiling(interp: *Interpreter) InterpreterError!Value {
+    const a = try interp.pop();
+
+    const av = interp.heap.getFloatValue(a);
+    if (av != null) {
+        const ceiled = @ceil(av.?);
+        const max: f64 = @floatFromInt(std.math.maxInt(i61));
+        const min: f64 = @floatFromInt(std.math.minInt(i61));
+        if (ceiled >= min and ceiled <= max) {
+            return Value.fromSmallInt(@intFromFloat(ceiled));
+        }
+    }
+
+    try interp.push(a);
+    return InterpreterError.PrimitiveFailed;
+}
+
+fn primFloatRounded(interp: *Interpreter) InterpreterError!Value {
+    const a = try interp.pop();
+
+    const av = interp.heap.getFloatValue(a);
+    if (av != null) {
+        const rounded = @round(av.?);
+        const max: f64 = @floatFromInt(std.math.maxInt(i61));
+        const min: f64 = @floatFromInt(std.math.minInt(i61));
+        if (rounded >= min and rounded <= max) {
+            return Value.fromSmallInt(@intFromFloat(rounded));
+        }
+    }
+
+    try interp.push(a);
+    return InterpreterError.PrimitiveFailed;
+}
+
+fn primFloatArcSin(interp: *Interpreter) InterpreterError!Value {
+    const a = try interp.pop();
+
+    const av = interp.heap.getFloatValue(a);
+    if (av != null) {
+        const v = av.?;
+        if (v >= -1 and v <= 1) {
+            return interp.heap.allocateFloat(std.math.asin(v)) catch {
+                try interp.push(a);
+                return InterpreterError.OutOfMemory;
+            };
+        }
+    }
+
+    try interp.push(a);
+    return InterpreterError.PrimitiveFailed;
+}
+
+fn primFloatArcCos(interp: *Interpreter) InterpreterError!Value {
+    const a = try interp.pop();
+
+    const av = interp.heap.getFloatValue(a);
+    if (av != null) {
+        const v = av.?;
+        if (v >= -1 and v <= 1) {
+            return interp.heap.allocateFloat(std.math.acos(v)) catch {
+                try interp.push(a);
+                return InterpreterError.OutOfMemory;
+            };
+        }
+    }
+
+    try interp.push(a);
+    return InterpreterError.PrimitiveFailed;
+}
+
+fn primFloatArcTan(interp: *Interpreter) InterpreterError!Value {
+    const a = try interp.pop();
+
+    const av = interp.heap.getFloatValue(a);
+    if (av != null) {
+        return interp.heap.allocateFloat(std.math.atan(av.?)) catch {
             try interp.push(a);
             return InterpreterError.OutOfMemory;
         };
@@ -12323,6 +12748,36 @@ fn primAllClasses(interp: *Interpreter) InterpreterError!Value {
 
     std.debug.print("DEBUG: primAllClasses returning array with {d} classes\n", .{num_classes});
     return Value.fromObject(array);
+}
+
+/// Object >> respondsTo: aSymbol
+/// Answer true if the receiver's class (or any superclass) has a method for aSymbol
+fn primRespondsTo(interp: *Interpreter) InterpreterError!Value {
+    const selector_val = try interp.pop(); // The symbol argument
+    const receiver = try interp.pop(); // The receiver object
+
+    // Validate that selector is a symbol
+    if (!selector_val.isObject()) {
+        try interp.push(receiver);
+        try interp.push(selector_val);
+        return InterpreterError.PrimitiveFailed;
+    }
+    const sel_obj = selector_val.asObject();
+    if (sel_obj.header.class_index != Heap.CLASS_SYMBOL) {
+        try interp.push(receiver);
+        try interp.push(selector_val);
+        return InterpreterError.PrimitiveFailed;
+    }
+
+    // Get the receiver's class
+    const recv_class = interp.heap.classOf(receiver);
+
+    // Look up the method (this searches up the hierarchy)
+    if (interp.lookupMethod(recv_class, selector_val)) |_| {
+        return Value.@"true";
+    } else {
+        return Value.@"false";
+    }
 }
 
 // ============================================================================

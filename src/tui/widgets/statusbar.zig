@@ -79,7 +79,7 @@ pub const StatusBar = struct {
 
             // Draw separator
             if (i > 0 and x > rect.x + 1) {
-                screen.setCell(x - 1, rect.y, style_mod.box.vertical[0], style_mod.styles.status);
+                screen.setCell(x - 1, rect.y, style_mod.box.vertical, style_mod.styles.status);
             }
         }
     }

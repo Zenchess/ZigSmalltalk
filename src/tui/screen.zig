@@ -163,23 +163,23 @@ pub const Screen = struct {
         const box = style_mod.box;
 
         // Corners
-        self.drawText(x, y, box.top_left, s);
-        self.drawText(x + w - 1, y, box.top_right, s);
-        self.drawText(x, y + h - 1, box.bottom_left, s);
-        self.drawText(x + w - 1, y + h - 1, box.bottom_right, s);
+        self.setCell(x, y, box.top_left, s);
+        self.setCell(x + w - 1, y, box.top_right, s);
+        self.setCell(x, y + h - 1, box.bottom_left, s);
+        self.setCell(x + w - 1, y + h - 1, box.bottom_right, s);
 
         // Horizontal lines
         var col: u16 = x + 1;
         while (col < x + w - 1) : (col += 1) {
-            self.drawText(col, y, box.horizontal, s);
-            self.drawText(col, y + h - 1, box.horizontal, s);
+            self.setCell(col, y, box.horizontal, s);
+            self.setCell(col, y + h - 1, box.horizontal, s);
         }
 
         // Vertical lines
         var row: u16 = y + 1;
         while (row < y + h - 1) : (row += 1) {
-            self.drawText(x, row, box.vertical, s);
-            self.drawText(x + w - 1, row, box.vertical, s);
+            self.setCell(x, row, box.vertical, s);
+            self.setCell(x + w - 1, row, box.vertical, s);
         }
     }
 
@@ -189,23 +189,23 @@ pub const Screen = struct {
         const box = style_mod.box;
 
         // Rounded corners
-        self.drawText(x, y, box.round_top_left, s);
-        self.drawText(x + w - 1, y, box.round_top_right, s);
-        self.drawText(x, y + h - 1, box.round_bottom_left, s);
-        self.drawText(x + w - 1, y + h - 1, box.round_bottom_right, s);
+        self.setCell(x, y, box.round_top_left, s);
+        self.setCell(x + w - 1, y, box.round_top_right, s);
+        self.setCell(x, y + h - 1, box.round_bottom_left, s);
+        self.setCell(x + w - 1, y + h - 1, box.round_bottom_right, s);
 
         // Horizontal lines
         var col: u16 = x + 1;
         while (col < x + w - 1) : (col += 1) {
-            self.drawText(col, y, box.horizontal, s);
-            self.drawText(col, y + h - 1, box.horizontal, s);
+            self.setCell(col, y, box.horizontal, s);
+            self.setCell(col, y + h - 1, box.horizontal, s);
         }
 
         // Vertical lines
         var row: u16 = y + 1;
         while (row < y + h - 1) : (row += 1) {
-            self.drawText(x, row, box.vertical, s);
-            self.drawText(x + w - 1, row, box.vertical, s);
+            self.setCell(x, row, box.vertical, s);
+            self.setCell(x + w - 1, row, box.vertical, s);
         }
     }
 
