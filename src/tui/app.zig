@@ -1646,14 +1646,14 @@ pub const App = struct {
         const msg = std.fmt.bufPrint(&self.status_message_buf, "Saved: {s} >> {s}", .{ class_name, selector }) catch "Saved";
         self.statusbar.setMessage(msg);
 
-        // Update the selected method name if it changed
-        if (filein.extractSelector(source)) |sel| {
-            // Find or create an owned copy - for now just update if same
-            self.browser.selected_method_name = sel;
-        }
-
-        // Reload methods to reflect any changes
+        // Reload methods to reflect any changes, then re-select the saved method
         self.loadMethodsForClass(class_name);
+
+        // Re-select the method we just saved
+        self.browser.selectMethodByName(selector);
+
+        // Reload the source to show the saved version
+        self.loadMethodSource(class_name, selector, class_side);
     }
 
     fn compileAndInstallMethod(self: *App, class_name: []const u8, source: []const u8, class_side: bool) !void {

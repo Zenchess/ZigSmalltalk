@@ -396,6 +396,22 @@ pub const BrowserTab = struct {
         }
     }
 
+    /// Select a method by name in the appropriate method list
+    pub fn selectMethodByName(self: *BrowserTab, method_name: []const u8) void {
+        if (method_name.len == 0) return;
+
+        const list = if (self.show_class_side) &self.class_method_list else &self.instance_method_list;
+
+        // Find the method in the list
+        for (list.items.items, 0..) |item, i| {
+            if (std.mem.eql(u8, item.text, method_name)) {
+                list.selectIndex(i);
+                self.selected_method_name = item.text;
+                return;
+            }
+        }
+    }
+
     // Legacy compatibility
     pub fn setMethods(self: *BrowserTab, methods: []const []const u8) !void {
         try self.setInstanceMethods(methods);
