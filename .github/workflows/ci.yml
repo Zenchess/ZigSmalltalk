@@ -6,9 +6,6 @@ on:
   pull_request:
     branches: [master, main]
 
-env:
-  ZIG_VERSION: "0.15.2"
-
 jobs:
   build-linux:
     runs-on: ubuntu-latest
@@ -23,9 +20,9 @@ jobs:
           sudo apt-get install -y libgl-dev
 
       - name: Setup Zig
-        run: |
-          curl -L "https://ziglang.org/download/${{ env.ZIG_VERSION }}/zig-x86_64-linux-${{ env.ZIG_VERSION }}.tar.xz" | tar -xJ
-          echo "$PWD/zig-x86_64-linux-${{ env.ZIG_VERSION }}" >> $GITHUB_PATH
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.14.0
 
       - name: Verify Zig
         run: zig version
@@ -47,9 +44,9 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Setup Zig
-        run: |
-          curl -L "https://ziglang.org/download/${{ env.ZIG_VERSION }}/zig-macos-aarch64-${{ env.ZIG_VERSION }}.tar.xz" | tar -xJ
-          echo "$PWD/zig-macos-aarch64-${{ env.ZIG_VERSION }}" >> $GITHUB_PATH
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.14.0
 
       - name: Verify Zig
         run: zig version
@@ -72,10 +69,9 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Setup Zig
-        run: |
-          curl -L "https://ziglang.org/download/${{ env.ZIG_VERSION }}/zig-windows-x86_64-${{ env.ZIG_VERSION }}.zip" -o zig.zip
-          7z x zig.zip
-          echo "$PWD/zig-windows-x86_64-${{ env.ZIG_VERSION }}" >> $env:GITHUB_PATH
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.14.0
 
       - name: Verify Zig
         run: zig version
@@ -105,9 +101,9 @@ jobs:
           sudo apt-get install -y libgl-dev
 
       - name: Setup Zig
-        run: |
-          curl -L "https://ziglang.org/download/${{ env.ZIG_VERSION }}/zig-x86_64-linux-${{ env.ZIG_VERSION }}.tar.xz" | tar -xJ
-          echo "$PWD/zig-x86_64-linux-${{ env.ZIG_VERSION }}" >> $GITHUB_PATH
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.14.0
 
       - name: Build VM
         run: zig build
@@ -127,9 +123,9 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Setup Zig
-        run: |
-          curl -L "https://ziglang.org/download/${{ env.ZIG_VERSION }}/zig-x86_64-linux-${{ env.ZIG_VERSION }}.tar.xz" | tar -xJ
-          echo "$PWD/zig-x86_64-linux-${{ env.ZIG_VERSION }}" >> $GITHUB_PATH
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.14.0
 
       - name: Check Formatting
         run: |
