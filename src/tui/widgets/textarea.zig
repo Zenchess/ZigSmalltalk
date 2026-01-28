@@ -38,6 +38,7 @@ pub const TextArea = struct {
     readonly: bool = false,
     syntax_highlight: bool = true,
     wrap: bool = false,
+    highlight_line: ?usize = null, // Line to highlight (0-indexed), used by debugger
 
     // Mouse selection state
     mouse_selecting: bool = false,
@@ -847,6 +848,14 @@ pub const TextArea = struct {
                 // Apply syntax highlighting if enabled
                 if (self.syntax_highlight and byte_idx < highlight_tokens.len) {
                     char_style = syntax.styleForToken(highlight_tokens[byte_idx]);
+                }
+
+                // Apply highlight line style (used by debugger to show current execution line)
+                if (self.highlight_line) |hl| {
+                    if (line_idx == hl) {
+                        // Invert the style for the highlighted line
+                        char_style = style.styles.highlight_line;
+                    }
                 }
 
                 // Check if character is selected (using display column for selection)

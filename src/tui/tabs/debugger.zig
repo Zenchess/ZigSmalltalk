@@ -143,6 +143,7 @@ pub const DebuggerTab = struct {
     /// Called when execution continues
     pub fn onContinue(self: *DebuggerTab) void {
         self.is_halted = false;
+        self.source_view.highlight_line = null;
         self.setStatus("Running...");
     }
 
@@ -254,13 +255,49 @@ pub const DebuggerTab = struct {
                 self.source_view.setText("") catch {};
                 if (source.len > 0) {
                     self.source_view.setText(source) catch {};
-                    // TODO: Highlight current line based on IP
-                    // For now just show source
+
+                    // Estimate current line from IP
+                    // For now, use a simple heuristic: line = IP / average_bytecodes_per_line
+                    // A more accurate mapping would require storing line info during compilation
+                    const estimated_line = estimateLineFromIP(source, frame.ip);
+                    self.source_view.highlight_line = estimated_line;
+                    self.current_line = estimated_line;
+
+                    // Scroll to show the highlighted line
+                    if (estimated_line > 0) {
+                        self.source_view.scroll_y = if (estimated_line > 3) estimated_line - 3 else 0;
+                    }
                 } else {
                     self.source_view.setText("(no source available)") catch {};
+                    self.source_view.highlight_line = null;
                 }
+            } else {
+                self.source_view.highlight_line = null;
             }
+        } else {
+            self.source_view.highlight_line = null;
         }
+    }
+
+    /// Estimate source line from bytecode IP using a simple heuristic
+    fn estimateLineFromIP(source: []const u8, ip: usize) usize {
+        // Count lines in source
+        var line_count: usize = 1;
+        for (source) |c| {
+            if (c == '\n') line_count += 1;
+        }
+
+        if (line_count <= 1) return 0;
+
+        // Simple heuristic: assume bytecodes are roughly evenly distributed
+        // Most methods have ~10-20 bytecodes per line on average
+        // Start at line 1 (after method signature) and estimate from there
+        const bytecodes_per_line: usize = 8; // rough estimate
+        const estimated = ip / bytecodes_per_line;
+
+        // Clamp to valid range, but skip line 0 (method signature)
+        if (estimated == 0) return 1; // Start at first statement line
+        return @min(estimated, line_count - 1);
     }
 
     fn formatValue(self: *DebuggerTab, value: Value) []const u8 {

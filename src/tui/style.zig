@@ -174,6 +174,7 @@ pub const styles = struct {
     pub const normal = Style{ .fg = ui.foreground, .bg = ui.background };
     pub const dim = Style{ .fg = ui.foreground_dim, .bg = ui.background };
     pub const selected = Style{ .fg = ui.foreground, .bg = ui.selection };
+    pub const highlight_line = Style{ .fg = theme.base, .bg = theme.yellow }; // Debugger current line
     pub const tab_active_style = Style{ .fg = theme.base, .bg = ui.tab_active, .bold = true };
     pub const tab_inactive_style = Style{ .fg = ui.foreground_dim, .bg = ui.tab_inactive };
     pub const status = Style{ .fg = ui.status_text, .bg = ui.status_bar };
