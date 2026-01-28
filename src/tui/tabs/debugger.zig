@@ -36,9 +36,11 @@ pub const DebuggerTab = struct {
     is_halted: bool = false,
     selected_frame: usize = 0,
 
-    // Cached data
+    // Cached data (owned slices - must be freed)
     stack_frames: []StackFrameInfo = &[_]StackFrameInfo{},
+    stack_frames_owned: bool = false,
     current_vars: []LocalVariable = &[_]LocalVariable{},
+    current_vars_owned: bool = false,
     current_source: []const u8 = "",
     current_line: usize = 0,
 
@@ -102,10 +104,10 @@ pub const DebuggerTab = struct {
         self.stack_list.deinit();
         self.var_list.deinit();
         self.source_view.deinit();
-        if (self.stack_frames.len > 0) {
+        if (self.stack_frames_owned) {
             self.allocator.free(self.stack_frames);
         }
-        if (self.current_vars.len > 0) {
+        if (self.current_vars_owned) {
             self.allocator.free(self.current_vars);
         }
     }
@@ -147,11 +149,23 @@ pub const DebuggerTab = struct {
     /// Refresh all debugger display from VM state
     pub fn refresh(self: *DebuggerTab) void {
         if (debugger_mod.globalDebugger) |dbg| {
-            // Get stack frames
-            if (self.stack_frames.len > 0) {
+            // Get stack frames - free previous if owned
+            if (self.stack_frames_owned) {
                 self.allocator.free(self.stack_frames);
+                self.stack_frames_owned = false;
             }
-            self.stack_frames = dbg.getStackFrames(self.allocator) catch &[_]StackFrameInfo{};
+            if (dbg.getStackFrames(self.allocator)) |frames| {
+                self.stack_frames = frames;
+                self.stack_frames_owned = true;
+            } else |_| {
+                self.stack_frames = &[_]StackFrameInfo{};
+                self.stack_frames_owned = false;
+            }
+
+            // Ensure selected_frame is in bounds
+            if (self.selected_frame >= self.stack_frames.len) {
+                self.selected_frame = 0;
+            }
 
             // Update stack list
             self.stack_list.clear();
@@ -190,11 +204,18 @@ pub const DebuggerTab = struct {
                 }) catch "<error>";
                 self.var_list.addItem(self_str, null) catch {};
 
-                // Get locals
-                if (self.current_vars.len > 0) {
+                // Get locals - free previous if owned
+                if (self.current_vars_owned) {
                     self.allocator.free(self.current_vars);
+                    self.current_vars_owned = false;
                 }
-                self.current_vars = dbg.getLocals(frame, self.allocator) catch &[_]LocalVariable{};
+                if (dbg.getLocals(frame, self.allocator)) |vars| {
+                    self.current_vars = vars;
+                    self.current_vars_owned = true;
+                } else |_| {
+                    self.current_vars = &[_]LocalVariable{};
+                    self.current_vars_owned = false;
+                }
 
                 for (self.current_vars) |local| {
                     const kind: []const u8 = if (local.is_argument) "arg" else "temp";
