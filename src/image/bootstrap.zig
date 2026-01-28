@@ -1066,6 +1066,7 @@ pub fn installCoreMethods(heap: *Heap) !void {
     try installMethod(heap, behavior_class, "superclass", try createPrimitiveMethod(heap, 0, @intFromEnum(Primitive.class_superclass)));
     try installMethod(heap, behavior_class, "name", try createPrimitiveMethod(heap, 0, @intFromEnum(Primitive.class_name)));
     try installMethod(heap, behavior_class, "instSize", try createPrimitiveMethod(heap, 0, @intFromEnum(Primitive.class_inst_size)));
+    try installMethod(heap, behavior_class, "browse", try createPrimitiveMethod(heap, 0, @intFromEnum(Primitive.browse)));
 
     // Exception methods
     const exception_class = heap.getClass(Heap.CLASS_EXCEPTION).asObject();

@@ -206,7 +206,7 @@ pub const Debugger = struct {
 
     /// Get method source code
     pub fn getMethodSource(self: *Debugger, method: *CompiledMethod) []const u8 {
-        _ = self;
+        // First try the method's literals
         const lits = method.getLiterals();
         if (lits.len > 0) {
             const last = lits[lits.len - 1];
@@ -217,6 +217,29 @@ pub const Debugger = struct {
                 }
             }
         }
+        
+        // If no source in method, check if current receiver is a BlockClosure
+        // and try to get source from the block's parent method
+        if (self.interp.receiver.isObject()) {
+            const recv_obj = self.interp.receiver.asObject();
+            if (recv_obj.header.class_index == Heap.CLASS_BLOCK_CLOSURE) {
+                const parent_method_val = recv_obj.getField(Heap.BLOCK_FIELD_METHOD, recv_obj.header.size);
+                if (parent_method_val.isObject()) {
+                    const parent_method: *CompiledMethod = @ptrCast(@alignCast(parent_method_val.asObject()));
+                    const parent_lits = parent_method.getLiterals();
+                    if (parent_lits.len > 0) {
+                        const parent_last = parent_lits[parent_lits.len - 1];
+                        if (parent_last.isObject()) {
+                            const parent_src_obj = parent_last.asObject();
+                            if (parent_src_obj.header.class_index == Heap.CLASS_STRING) {
+                                return parent_src_obj.bytes(parent_src_obj.header.size);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
         return "";
     }
 

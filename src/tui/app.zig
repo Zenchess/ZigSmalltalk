@@ -1140,6 +1140,13 @@ pub const App = struct {
             return;
         };
 
+        // Check if a browse request was made during execution
+        if (!self.interpreter.browse_class.isNil()) {
+            const class_to_browse = self.interpreter.browse_class;
+            self.interpreter.browse_class = Value.nil; // Clear the request
+            self.browseClass(class_to_browse);
+        }
+
         if (print_result) {
             // Format and display result
             var buf: [512]u8 = undefined;
@@ -1180,6 +1187,49 @@ pub const App = struct {
         };
         self.switchToTab(4); // Switch to inspector tab
         self.transcript.addSuccess("Inspecting object") catch {};
+    }
+
+    /// Open the browser tab with the given class
+    pub fn browseClass(self: *App, class_value: Value) void {
+        // Get the class name
+        if (!class_value.isObject()) {
+            self.transcript.addError("Cannot browse non-class value") catch {};
+            return;
+        }
+        
+        const class_obj = class_value.asObject();
+        const name_val = class_obj.getField(Heap.CLASS_FIELD_NAME, class_obj.header.size);
+        
+        if (!name_val.isObject()) {
+            self.transcript.addError("Class has no name") catch {};
+            return;
+        }
+        
+        const name_obj = name_val.asObject();
+        if (name_obj.header.class_index != Heap.CLASS_SYMBOL) {
+            self.transcript.addError("Class name is not a symbol") catch {};
+            return;
+        }
+        
+        const class_name = name_obj.bytes(name_obj.header.size);
+        
+        // Switch to browser tab
+        self.switchToTab(2); // Browser is tab 2
+        
+        // Select the class in the browser
+        if (!self.browser.selectClassByName(class_name)) {
+            var buf: [256]u8 = undefined;
+            const msg = std.fmt.bufPrint(&buf, "Class '{s}' not found in browser", .{class_name}) catch "Class not found";
+            self.transcript.addError(msg) catch {};
+            return;
+        }
+        
+        // Load methods for the selected class
+        self.loadMethodsForClass(class_name);
+        
+        var buf: [256]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "Browsing class: {s}", .{class_name}) catch "Browsing class";
+        self.transcript.addSuccess(msg) catch {};
     }
 
     /// Load a .st file using filein
@@ -1229,6 +1279,10 @@ pub const App = struct {
         // Compile
         var gen = CodeGenerator.init(temp_alloc, self.heap, temp_alloc);
         defer gen.deinit();
+        
+        // Store source code so it's included in the compiled method
+        // This allows the debugger to display TUI expression source
+        gen.source_code = source;
 
         const method = try gen.compileDoIt(ast);
 

@@ -749,6 +749,10 @@ fn compileAndExecute(allocator: std.mem.Allocator, interp: *Interpreter, source:
     // Compile to bytecode
     var gen = CodeGenerator.init(temp_alloc, interp.heap, temp_alloc);
     defer gen.deinit();
+    
+    // Store source code so it's included in the compiled method
+    // This allows the debugger to display REPL expression source
+    gen.source_code = source;
 
     const method = try gen.compileDoIt(ast);
 

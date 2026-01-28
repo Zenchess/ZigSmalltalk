@@ -147,6 +147,9 @@ pub const Interpreter = struct {
 
     // Transcript output callback - if set, transcript primitives call this instead of stdout
     transcript_callback: ?*const fn ([]const u8) void,
+    
+    // Browser request - if set to a class value, TUI should browse that class
+    browse_class: Value,
 
     // Process scheduler for green thread support
     process_scheduler: Scheduler,
@@ -250,6 +253,7 @@ pub const Interpreter = struct {
             .primitive_block_bases = [_]usize{0} ** 64,
             .non_local_return_target = 0,
             .transcript_callback = null,
+            .browse_class = Value.nil,
             .process_scheduler = Scheduler.init(allocator),
             .overlapped_pool = OverlappedPool.init(allocator),
             .callback_registry = if (build_options.ffi_enabled) null else {},

@@ -471,6 +471,7 @@ pub fn executePrimitive(interp: *Interpreter, prim_index: u16) InterpreterError!
         .all_classes => primAllClasses(interp),
         .responds_to => primRespondsTo(interp),
         .inspect => primInspect(interp),
+        .browse => primBrowse(interp),
 
         else => InterpreterError.PrimitiveFailed,
     };
@@ -12976,6 +12977,16 @@ fn primInspect(interp: *Interpreter) InterpreterError!Value {
         app.openInspector(receiver);
     }
 
+    // Return self
+    return receiver;
+}
+
+fn primBrowse(interp: *Interpreter) InterpreterError!Value {
+    const receiver = try interp.pop();
+    
+    // Store the class to browse - TUI will check this after execution
+    interp.browse_class = receiver;
+    
     // Return self
     return receiver;
 }

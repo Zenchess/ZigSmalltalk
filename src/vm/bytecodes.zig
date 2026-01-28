@@ -755,6 +755,7 @@ pub const Primitive = enum(u16) {
     all_classes = 964, // Smalltalk >> allClasses - return array of all classes
     responds_to = 965, // Object >> respondsTo: aSymbol - check if object understands selector
     inspect = 966, // Object >> inspect - open inspector on object (TUI mode)
+    browse = 967, // Behavior >> browse - open browser on class (TUI mode)
 
     _,
 };
