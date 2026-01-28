@@ -144,6 +144,7 @@ pub const DebuggerTab = struct {
     pub fn onContinue(self: *DebuggerTab) void {
         self.is_halted = false;
         self.source_view.highlight_line = null;
+        self.source_view.highlight_range = null;
         self.setStatus("Running...");
     }
 
@@ -256,48 +257,119 @@ pub const DebuggerTab = struct {
                 if (source.len > 0) {
                     self.source_view.setText(source) catch {};
 
-                    // Estimate current line from IP
-                    // For now, use a simple heuristic: line = IP / average_bytecodes_per_line
-                    // A more accurate mapping would require storing line info during compilation
-                    const estimated_line = estimateLineFromIP(source, frame.ip);
-                    self.source_view.highlight_line = estimated_line;
-                    self.current_line = estimated_line;
+                    // Find the source range for the current IP
+                    const range = findSourceRangeForIP(source, frame.ip, frame.method);
+                    self.source_view.highlight_range = range;
+                    self.source_view.highlight_line = null;
 
-                    // Scroll to show the highlighted line
-                    if (estimated_line > 0) {
-                        self.source_view.scroll_y = if (estimated_line > 3) estimated_line - 3 else 0;
+                    // Scroll to show the highlighted region
+                    if (range) |r| {
+                        const line = countLinesUpTo(source, r.start);
+                        self.current_line = line;
+                        self.source_view.scroll_y = if (line > 3) line - 3 else 0;
                     }
                 } else {
                     self.source_view.setText("(no source available)") catch {};
+                    self.source_view.highlight_range = null;
                     self.source_view.highlight_line = null;
                 }
             } else {
+                self.source_view.highlight_range = null;
                 self.source_view.highlight_line = null;
             }
         } else {
+            self.source_view.highlight_range = null;
             self.source_view.highlight_line = null;
         }
     }
 
-    /// Estimate source line from bytecode IP using a simple heuristic
-    fn estimateLineFromIP(source: []const u8, ip: usize) usize {
-        // Count lines in source
-        var line_count: usize = 1;
-        for (source) |c| {
-            if (c == '\n') line_count += 1;
+    /// Count lines up to a byte offset
+    fn countLinesUpTo(source: []const u8, offset: usize) usize {
+        var lines: usize = 0;
+        const limit = @min(offset, source.len);
+        for (source[0..limit]) |c| {
+            if (c == '\n') lines += 1;
+        }
+        return lines;
+    }
+
+    /// Find the source range (start, end) for a given bytecode IP
+    /// This uses a heuristic based on parsing the source structure
+    fn findSourceRangeForIP(source: []const u8, ip: usize, method: *const @import("../../vm/object.zig").CompiledMethod) ?TextArea.HighlightRange {
+        // Get bytecode size to estimate position ratio
+        const bytecode_size = method.header.bytecode_size;
+        if (bytecode_size == 0) return null;
+
+        // Find statements in the source (split by '.' or newlines)
+        // Skip the method signature (first line usually)
+        var statements: [64]TextArea.HighlightRange = undefined;
+        var stmt_count: usize = 0;
+
+        var i: usize = 0;
+        var stmt_start: usize = 0;
+        var in_string: bool = false;
+        var found_body: bool = false;
+
+        // Skip to method body (after first newline or opening statements)
+        while (i < source.len and !found_body) : (i += 1) {
+            if (source[i] == '\n' or source[i] == '|') {
+                if (source[i] == '|') {
+                    // Skip temp declarations
+                    i += 1;
+                    while (i < source.len and source[i] != '|') : (i += 1) {}
+                    if (i < source.len) i += 1;
+                }
+                found_body = true;
+                stmt_start = i;
+            }
         }
 
-        if (line_count <= 1) return 0;
+        // Parse statements
+        while (i < source.len and stmt_count < statements.len) : (i += 1) {
+            const c = source[i];
 
-        // Simple heuristic: assume bytecodes are roughly evenly distributed
-        // Most methods have ~10-20 bytecodes per line on average
-        // Start at line 1 (after method signature) and estimate from there
-        const bytecodes_per_line: usize = 8; // rough estimate
-        const estimated = ip / bytecodes_per_line;
+            if (c == '\'') {
+                in_string = !in_string;
+            } else if (!in_string) {
+                if (c == '.' or c == '\n') {
+                    // End of statement
+                    if (i > stmt_start) {
+                        // Trim whitespace
+                        var s = stmt_start;
+                        var e = i;
+                        while (s < e and (source[s] == ' ' or source[s] == '\t' or source[s] == '\n')) s += 1;
+                        while (e > s and (source[e - 1] == ' ' or source[e - 1] == '\t' or source[e - 1] == '\n' or source[e - 1] == '.')) e -= 1;
 
-        // Clamp to valid range, but skip line 0 (method signature)
-        if (estimated == 0) return 1; // Start at first statement line
-        return @min(estimated, line_count - 1);
+                        if (e > s) {
+                            statements[stmt_count] = .{ .start = s, .end = e };
+                            stmt_count += 1;
+                        }
+                    }
+                    stmt_start = i + 1;
+                }
+            }
+        }
+
+        // Add final statement if any
+        if (stmt_start < source.len and stmt_count < statements.len) {
+            var s = stmt_start;
+            var e = source.len;
+            while (s < e and (source[s] == ' ' or source[s] == '\t' or source[s] == '\n')) s += 1;
+            while (e > s and (source[e - 1] == ' ' or source[e - 1] == '\t' or source[e - 1] == '\n' or source[e - 1] == '.')) e -= 1;
+            if (e > s) {
+                statements[stmt_count] = .{ .start = s, .end = e };
+                stmt_count += 1;
+            }
+        }
+
+        if (stmt_count == 0) return null;
+
+        // Estimate which statement we're in based on IP ratio
+        const ratio = @as(f32, @floatFromInt(ip)) / @as(f32, @floatFromInt(bytecode_size));
+        var stmt_idx = @as(usize, @intFromFloat(ratio * @as(f32, @floatFromInt(stmt_count))));
+        if (stmt_idx >= stmt_count) stmt_idx = stmt_count - 1;
+
+        return statements[stmt_idx];
     }
 
     fn formatValue(self: *DebuggerTab, value: Value) []const u8 {

@@ -13,6 +13,9 @@ const EventResult = widget.EventResult;
 const SmalltalkHighlighter = syntax.SmalltalkHighlighter;
 
 pub const TextArea = struct {
+    // Type declarations must come before fields
+    pub const HighlightRange = struct { start: usize, end: usize };
+
     allocator: std.mem.Allocator,
     state: widget.WidgetState,
 
@@ -39,6 +42,7 @@ pub const TextArea = struct {
     syntax_highlight: bool = true,
     wrap: bool = false,
     highlight_line: ?usize = null, // Line to highlight (0-indexed), used by debugger
+    highlight_range: ?HighlightRange = null, // Character range to highlight (byte offsets)
 
     // Mouse selection state
     mouse_selecting: bool = false,
@@ -786,6 +790,16 @@ pub const TextArea = struct {
 
         // Draw content
         const text_rect = self.contentRect();
+
+        // Calculate byte offset at the start of the first visible line (for highlight_range)
+        var line_start_offset: usize = 0;
+        if (self.highlight_range != null) {
+            var i: usize = 0;
+            while (i < self.scroll_y and i < self.lines.items.len) : (i += 1) {
+                line_start_offset += self.lines.items[i].items.len + 1; // +1 for newline
+            }
+        }
+
         var row: u16 = 0;
         while (row < text_rect.height) : (row += 1) {
             const line_idx = self.scroll_y + row;
@@ -853,7 +867,14 @@ pub const TextArea = struct {
                 // Apply highlight line style (used by debugger to show current execution line)
                 if (self.highlight_line) |hl| {
                     if (line_idx == hl) {
-                        // Invert the style for the highlighted line
+                        char_style = style.styles.highlight_line;
+                    }
+                }
+
+                // Apply highlight range style (for precise expression highlighting)
+                if (self.highlight_range) |hr| {
+                    const global_offset = line_start_offset + byte_idx;
+                    if (global_offset >= hr.start and global_offset < hr.end) {
                         char_style = style.styles.highlight_line;
                     }
                 }
@@ -882,6 +903,9 @@ pub const TextArea = struct {
                 display_col += 1;
                 screen_col += 1;
             }
+
+            // Update line start offset for next line (line length + newline)
+            line_start_offset += line.len + 1;
         }
 
         // Position cursor
