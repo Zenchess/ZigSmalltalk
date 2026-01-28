@@ -12910,25 +12910,20 @@ fn primTerminalFillRect(interp: *Interpreter) InterpreterError!Value {
 /// Smalltalk >> allClasses
 /// Answer an Array containing all classes in the system
 fn primAllClasses(interp: *Interpreter) InterpreterError!Value {
-    std.debug.print("DEBUG: primAllClasses called\n", .{});
-
     _ = try interp.pop(); // pop receiver (Smalltalk dictionary)
 
     // Get number of classes in the class table
     const num_classes: u32 = @intCast(interp.heap.class_table.items.len);
-    std.debug.print("DEBUG: class_table has {d} classes\n", .{num_classes});
 
     // Allocate an Array to hold all classes
     const array = try interp.heap.allocateObject(Heap.CLASS_ARRAY, num_classes, .variable);
     const fields = array.fields(num_classes);
-    std.debug.print("DEBUG: allocated array, copying classes...\n", .{});
 
     // Copy all class objects from class_table into the array
     for (interp.heap.class_table.items, 0..) |class_obj, i| {
         fields[i] = class_obj;
     }
 
-    std.debug.print("DEBUG: primAllClasses returning array with {d} classes\n", .{num_classes});
     return Value.fromObject(array);
 }
 
