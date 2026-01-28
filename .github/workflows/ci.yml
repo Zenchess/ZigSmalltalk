@@ -6,6 +6,11 @@ on:
   pull_request:
     branches: [master, main]
 
+env:
+  # Zig 0.15.x dev version - x86_64-linux only for now
+  # macOS/Windows builds disabled until 0.15.x is officially released
+  ZIG_VERSION: "0.15.0-dev.654+6156612f4"
+
 jobs:
   build-linux:
     runs-on: ubuntu-latest
@@ -20,9 +25,9 @@ jobs:
           sudo apt-get install -y libgl-dev
 
       - name: Setup Zig
-        uses: mlugg/setup-zig@v2
-        with:
-          version: master
+        run: |
+          curl -L "https://ziglang.org/builds/zig-linux-x86_64-${{ env.ZIG_VERSION }}.tar.xz" | tar -xJ
+          echo "$PWD/zig-linux-x86_64-${{ env.ZIG_VERSION }}" >> $GITHUB_PATH
 
       - name: Verify Zig
         run: zig version
@@ -35,56 +40,6 @@ jobs:
 
       - name: Build Release
         run: zig build -Doptimize=ReleaseFast
-
-  build-macos:
-    runs-on: macos-latest
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Zig
-        uses: mlugg/setup-zig@v2
-        with:
-          version: master
-
-      - name: Verify Zig
-        run: zig version
-
-      - name: Build (without FFI)
-        run: zig build -Dno-ffi
-        # FFI disabled on macOS CI due to cross-compilation issues with libffi
-
-      - name: Run Zig Tests
-        run: zig build test -Dno-ffi
-
-      - name: Build Release
-        run: zig build -Doptimize=ReleaseFast -Dno-ffi
-
-  build-windows:
-    runs-on: windows-latest
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Zig
-        uses: mlugg/setup-zig@v2
-        with:
-          version: master
-
-      - name: Verify Zig
-        run: zig version
-
-      - name: Build (without FFI)
-        run: zig build -Dno-ffi
-        # FFI disabled on Windows CI due to OpenGL/linking issues
-
-      - name: Run Zig Tests
-        run: zig build test -Dno-ffi
-
-      - name: Build Release
-        run: zig build -Doptimize=ReleaseFast -Dno-ffi
 
   # Run ANSI Smalltalk tests on Linux
   ansi-tests:
@@ -101,9 +56,9 @@ jobs:
           sudo apt-get install -y libgl-dev
 
       - name: Setup Zig
-        uses: mlugg/setup-zig@v2
-        with:
-          version: master
+        run: |
+          curl -L "https://ziglang.org/builds/zig-linux-x86_64-${{ env.ZIG_VERSION }}.tar.xz" | tar -xJ
+          echo "$PWD/zig-linux-x86_64-${{ env.ZIG_VERSION }}" >> $GITHUB_PATH
 
       - name: Build VM
         run: zig build
@@ -123,9 +78,9 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Setup Zig
-        uses: mlugg/setup-zig@v2
-        with:
-          version: master
+        run: |
+          curl -L "https://ziglang.org/builds/zig-linux-x86_64-${{ env.ZIG_VERSION }}.tar.xz" | tar -xJ
+          echo "$PWD/zig-linux-x86_64-${{ env.ZIG_VERSION }}" >> $GITHUB_PATH
 
       - name: Check Formatting
         run: |
