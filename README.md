@@ -25,7 +25,20 @@ Linux, Windows (could run on mac maybe but haven't tested)
 
 ## Building
 
-Requires Zig 0.15+ and a C compiler.
+### Zig Version Requirements
+
+**This project requires Zig 0.15.x** (development version).
+
+- **Zig 0.14.0** (current stable) will **not** work - missing required language features
+- **Zig 0.16.0-dev** (master) will **not** work - has breaking build API changes
+
+Since Zig 0.15.x is not yet officially released, you may need to:
+1. Build Zig from source from a 0.15.x tag/commit, or
+2. Use a pre-built 0.15.x binary if available from your package manager
+
+You can check your version with `zig version`. The project is developed with Zig 0.15.2.
+
+### Build Commands
 
 ```bash
 # Build the project (FFI bindings generated automatically)
