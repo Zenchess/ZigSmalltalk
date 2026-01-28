@@ -12,7 +12,6 @@ const Heap = memory.Heap;
 /// Very small, portable-ish snapshot format.
 /// We encode Values so that heap pointers become offsets and compiled methods
 /// are stored separately and referenced by index.
-
 const magic: [4]u8 = .{ 'Z', 'S', 'N', 'P' }; // Zig Snapshot
 
 pub const SnapshotError = error{

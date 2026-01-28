@@ -22,7 +22,7 @@ jobs:
       - name: Setup Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.14.0
+          version: master
 
       - name: Verify Zig
         run: zig version
@@ -46,7 +46,7 @@ jobs:
       - name: Setup Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.14.0
+          version: master
 
       - name: Verify Zig
         run: zig version
@@ -71,7 +71,7 @@ jobs:
       - name: Setup Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.14.0
+          version: master
 
       - name: Verify Zig
         run: zig version
@@ -103,7 +103,7 @@ jobs:
       - name: Setup Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.14.0
+          version: master
 
       - name: Build VM
         run: zig build
@@ -125,7 +125,7 @@ jobs:
       - name: Setup Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.14.0
+          version: master
 
       - name: Check Formatting
         run: |

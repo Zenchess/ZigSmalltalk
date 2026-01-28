@@ -205,7 +205,7 @@ pub const Debugger = struct {
 
         std.debug.print("\n=== Debugger ===\n", .{});
         std.debug.print("Method: {s}>>{s}\n", .{ class_name, method_name[0..@min(method_name.len, 50)] });
-                std.debug.print("IP: {d}/{d}  Context: {d}  SP: {d}\n", .{ self.interp.ip, bcs.len, self.interp.context_ptr, self.interp.sp });
+        std.debug.print("IP: {d}/{d}  Context: {d}  SP: {d}\n", .{ self.interp.ip, bcs.len, self.interp.context_ptr, self.interp.sp });
 
         self.printMethodSourceSnippet();
 

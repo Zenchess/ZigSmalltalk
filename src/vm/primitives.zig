@@ -24,7 +24,6 @@ const Primitive = bytecodes.Primitive;
 // Debug flag - set to false to disable verbose debug output
 const DEBUG_VERBOSE = false;
 
-
 /// Execute a primitive by index
 pub fn executePrimitive(interp: *Interpreter, prim_index: u16) InterpreterError!Value {
     const prim: Primitive = @enumFromInt(prim_index);
@@ -4080,9 +4079,9 @@ fn primBooleanNot(interp: *Interpreter) InterpreterError!Value {
     const recv = try interp.pop();
 
     if (recv.isTrue()) {
-        return Value.@"false";
+        return Value.false;
     } else if (recv.isFalse()) {
-        return Value.@"true";
+        return Value.true;
     }
 
     try interp.push(recv);
@@ -4103,7 +4102,7 @@ fn primTrueOr(interp: *Interpreter) InterpreterError!Value {
     _ = try interp.pop(); // block (not evaluated)
     _ = try interp.pop(); // recv (true)
 
-    return Value.@"true";
+    return Value.true;
 }
 
 // False >> and: aBlock - return false without evaluating block
@@ -4111,7 +4110,7 @@ fn primFalseAnd(interp: *Interpreter) InterpreterError!Value {
     _ = try interp.pop(); // block (not evaluated)
     _ = try interp.pop(); // recv (false)
 
-    return Value.@"false";
+    return Value.false;
 }
 
 // False >> or: aBlock - evaluate block and return result
@@ -4134,14 +4133,14 @@ fn primTrueAmp(interp: *Interpreter) InterpreterError!Value {
 fn primTruePipe(interp: *Interpreter) InterpreterError!Value {
     _ = try interp.pop(); // arg (not needed)
     _ = try interp.pop(); // recv (true)
-    return Value.@"true";
+    return Value.true;
 }
 
 // False >> & aBoolean - eager and, return false
 fn primFalseAmp(interp: *Interpreter) InterpreterError!Value {
     _ = try interp.pop(); // arg (not needed)
     _ = try interp.pop(); // recv (false)
-    return Value.@"false";
+    return Value.false;
 }
 
 // False >> | aBoolean - eager or, return the argument
@@ -4745,7 +4744,7 @@ fn primToByDo(interp: *Interpreter) InterpreterError!Value {
             const saved_outer_temp_base = interp.outer_temp_base;
             const saved_receiver = interp.receiver;
             const saved_context_ptr = interp.context_ptr;
-            
+
             interp.method = @ptrCast(@alignCast(method_val.asObject()));
             interp.ip = @intCast(start_pc.asSmallInt());
             interp.receiver = block_receiver;
@@ -4789,7 +4788,7 @@ fn primToByDo(interp: *Interpreter) InterpreterError!Value {
             };
 
             interp.primitive_block_depth -= 1;
-                        // Restore interpreter state
+            // Restore interpreter state
             interp.ip = saved_ip;
             interp.method = saved_method;
             interp.sp = saved_sp;
@@ -4808,7 +4807,7 @@ fn primToByDo(interp: *Interpreter) InterpreterError!Value {
             const saved_outer_temp_base = interp.outer_temp_base;
             const saved_receiver = interp.receiver;
             const saved_context_ptr = interp.context_ptr;
-            
+
             interp.method = @ptrCast(@alignCast(method_val.asObject()));
             interp.ip = @intCast(start_pc.asSmallInt());
             interp.receiver = block_receiver;
@@ -4852,7 +4851,7 @@ fn primToByDo(interp: *Interpreter) InterpreterError!Value {
             };
 
             interp.primitive_block_depth -= 1;
-                        // Restore interpreter state
+            // Restore interpreter state
             interp.ip = saved_ip;
             interp.method = saved_method;
             interp.sp = saved_sp;
@@ -5527,17 +5526,17 @@ fn primArrayIncludes(interp: *Interpreter) InterpreterError!Value {
         const elem = array_obj.getField(i, size);
         // Use identity for primitives, equality check for objects
         if (elem.bits == target.bits) {
-            return Value.@"true";
+            return Value.true;
         }
         // For objects, check equals
         if (elem.isObject() and target.isObject()) {
             if (try primEqualsHelper(interp, elem, target)) {
-                return Value.@"true";
+                return Value.true;
             }
         }
     }
 
-    return Value.@"false";
+    return Value.false;
 }
 
 // Helper for equality check that returns bool instead of modifying stack
@@ -5978,7 +5977,7 @@ fn primProcessTerminate(interp: *Interpreter) InterpreterError!Value {
         }
     }
 
-    return Value.@"true";
+    return Value.true;
 }
 
 /// Primitive 92: Process >> priority:
@@ -7369,14 +7368,14 @@ fn primDictIncludesKey(interp: *Interpreter) InterpreterError!Value {
     const dict = try interp.pop();
 
     if (!dict.isObject()) {
-        return Value.@"false";
+        return Value.false;
     }
 
     const dict_obj = dict.asObject();
     const array_val = dict_obj.getField(1, 2);
 
     if (!array_val.isObject()) {
-        return Value.@"false";
+        return Value.false;
     }
 
     const array = array_val.asObject();
@@ -7390,13 +7389,13 @@ fn primDictIncludesKey(interp: *Interpreter) InterpreterError!Value {
             if (assoc.header.class_index == Heap.CLASS_ASSOCIATION) {
                 const assoc_key = assoc.getField(0, 2);
                 if (valuesEqual(assoc_key, key)) {
-                    return Value.@"true";
+                    return Value.true;
                 }
             }
         }
     }
 
-    return Value.@"false";
+    return Value.false;
 }
 
 fn primDictRemoveKey(interp: *Interpreter) InterpreterError!Value {
@@ -7610,14 +7609,14 @@ fn primSetIncludes(interp: *Interpreter) InterpreterError!Value {
     const set = try interp.pop();
 
     if (!set.isObject()) {
-        return Value.@"false";
+        return Value.false;
     }
 
     const set_obj = set.asObject();
     const array_val = set_obj.getField(1, 2);
 
     if (!array_val.isObject()) {
-        return Value.@"false";
+        return Value.false;
     }
 
     const array = array_val.asObject();
@@ -7627,11 +7626,11 @@ fn primSetIncludes(interp: *Interpreter) InterpreterError!Value {
     while (i < array_size) : (i += 1) {
         const existing = array.getField(i, array_size);
         if (valuesEqual(existing, element)) {
-            return Value.@"true";
+            return Value.true;
         }
     }
 
-    return Value.@"false";
+    return Value.false;
 }
 
 fn primSetRemove(interp: *Interpreter) InterpreterError!Value {
@@ -8203,7 +8202,7 @@ fn primStreamAtEnd(interp: *Interpreter) InterpreterError!Value {
     const stream = try interp.pop();
 
     if (!stream.isObject()) {
-        return Value.@"true";
+        return Value.true;
     }
 
     const stream_obj = stream.asObject();
@@ -8211,14 +8210,14 @@ fn primStreamAtEnd(interp: *Interpreter) InterpreterError!Value {
     const readLimit = stream_obj.getField(2, 4);
 
     if (!position.isSmallInt() or !readLimit.isSmallInt()) {
-        return Value.@"true";
+        return Value.true;
     }
 
     if (position.asSmallInt() >= readLimit.asSmallInt()) {
-        return Value.@"true";
+        return Value.true;
     }
 
-    return Value.@"false";
+    return Value.false;
 }
 
 fn primStreamPosition(interp: *Interpreter) InterpreterError!Value {
@@ -8551,12 +8550,12 @@ fn primStringIncludes(interp: *Interpreter) InterpreterError!Value {
     const str = try interp.pop();
 
     if (!str.isObject()) {
-        return Value.@"false";
+        return Value.false;
     }
 
     const str_obj = str.asObject();
     if (str_obj.header.getFormat() != .bytes) {
-        return Value.@"false";
+        return Value.false;
     }
 
     const str_bytes = str_obj.bytes(str_obj.header.size);
@@ -8576,11 +8575,11 @@ fn primStringIncludes(interp: *Interpreter) InterpreterError!Value {
 
     for (str_bytes) |b| {
         if (b == search_char) {
-            return Value.@"true";
+            return Value.true;
         }
     }
 
-    return Value.@"false";
+    return Value.false;
 }
 
 fn primStringSplit(interp: *Interpreter) InterpreterError!Value {
@@ -9159,7 +9158,7 @@ fn primFileAtEnd(interp: *Interpreter) InterpreterError!Value {
         return InterpreterError.PrimitiveFailed;
     };
 
-    return if (pos >= stat.size) Value.@"true" else Value.@"false";
+    return if (pos >= stat.size) Value.true else Value.false;
 }
 
 fn primFileDelete(interp: *Interpreter) InterpreterError!Value {
@@ -9187,7 +9186,7 @@ fn primFileDelete(interp: *Interpreter) InterpreterError!Value {
         return InterpreterError.PrimitiveFailed;
     };
 
-    return Value.@"true";
+    return Value.true;
 }
 
 fn primFileExists(interp: *Interpreter) InterpreterError!Value {
@@ -9195,22 +9194,22 @@ fn primFileExists(interp: *Interpreter) InterpreterError!Value {
     _ = try interp.pop(); // receiver
 
     if (!filename.isObject()) {
-        return Value.@"false";
+        return Value.false;
     }
 
     const filename_obj = filename.asObject();
     if (filename_obj.header.getFormat() != .bytes) {
-        return Value.@"false";
+        return Value.false;
     }
 
     const filename_bytes = filename_obj.bytes(filename_obj.header.size);
 
     const stat = std.fs.cwd().statFile(filename_bytes) catch {
-        return Value.@"false";
+        return Value.false;
     };
     _ = stat;
 
-    return Value.@"true";
+    return Value.true;
 }
 
 fn primFileRename(interp: *Interpreter) InterpreterError!Value {
@@ -9245,7 +9244,7 @@ fn primFileRename(interp: *Interpreter) InterpreterError!Value {
         return InterpreterError.PrimitiveFailed;
     };
 
-    return Value.@"true";
+    return Value.true;
 }
 
 fn primStdoutWrite(interp: *Interpreter) InterpreterError!Value {
@@ -9635,7 +9634,7 @@ fn primIsKindOf(interp: *Interpreter) InterpreterError!Value {
     // Walk up the inheritance chain
     while (!current_class.isNil()) {
         if (current_class.eql(a_class)) {
-            return Value.@"true";
+            return Value.true;
         }
 
         if (current_class.isObject()) {
@@ -9646,7 +9645,7 @@ fn primIsKindOf(interp: *Interpreter) InterpreterError!Value {
         }
     }
 
-    return Value.@"false";
+    return Value.false;
 }
 
 fn primInheritsFrom(interp: *Interpreter) InterpreterError!Value {
@@ -9666,7 +9665,7 @@ fn primInheritsFrom(interp: *Interpreter) InterpreterError!Value {
 
     while (!current_class.isNil()) {
         if (current_class.eql(a_class)) {
-            return Value.@"true";
+            return Value.true;
         }
 
         if (current_class.isObject()) {
@@ -9677,7 +9676,7 @@ fn primInheritsFrom(interp: *Interpreter) InterpreterError!Value {
         }
     }
 
-    return Value.@"false";
+    return Value.false;
 }
 
 fn primLookupMethod(interp: *Interpreter) InterpreterError!Value {
@@ -10561,9 +10560,9 @@ fn primFFIWriteFloat64(interp: *Interpreter) InterpreterError!Value {
 fn primFFIGenericCall(interp: *Interpreter) InterpreterError!Value {
     // Stack for 'LibMath' ffiCall: #sin with: { 1.0 }
     // Pop in reverse order of how they were pushed
-    const args_val = try interp.pop();      // { 1.0 } - second keyword arg
+    const args_val = try interp.pop(); // { 1.0 } - second keyword arg
     const func_name_val = try interp.pop(); // #sin - first keyword arg
-    const receiver = try interp.pop();      // 'LibMath' - receiver
+    const receiver = try interp.pop(); // 'LibMath' - receiver
 
     if (!ffi_enabled) {
         try interp.push(receiver);
@@ -11315,8 +11314,8 @@ fn primBytesAddress(interp: *Interpreter) InterpreterError!Value {
 /// Returns array of struct names available in the library
 fn primFFIStructNames(interp: *Interpreter) InterpreterError!Value {
     // Stack order for structNamesFor: is: receiver, libraryName
-    const lib_name_val = try interp.pop();  // libraryName (arg1)
-    _ = try interp.pop();                    // receiver (FFILibrary class)
+    const lib_name_val = try interp.pop(); // libraryName (arg1)
+    _ = try interp.pop(); // receiver (FFILibrary class)
 
     if (!ffi_enabled) {
         // Return empty array when FFI is disabled
@@ -11359,9 +11358,9 @@ fn primFFIStructNames(interp: *Interpreter) InterpreterError!Value {
 /// Returns struct metadata as an Array: #(size #(field1Name field1Offset field1Size field1Type) ...)
 fn primFFIStructInfo(interp: *Interpreter) InterpreterError!Value {
     // Stack order for structInfo:for: is: receiver, structName, libraryName
-    const lib_name_val = try interp.pop();      // libraryName (arg2)
-    const struct_name_val = try interp.pop();   // structName (arg1)
-    _ = try interp.pop();                        // receiver (FFILibrary class)
+    const lib_name_val = try interp.pop(); // libraryName (arg2)
+    const struct_name_val = try interp.pop(); // structName (arg1)
+    _ = try interp.pop(); // receiver (FFILibrary class)
 
     if (!ffi_enabled) {
         return Value.nil;
@@ -11934,7 +11933,7 @@ fn primUIProcessIteration(interp: *Interpreter) InterpreterError!Value {
         return Value.fromBool(should_continue);
     } else {
         // No TUI running - always return true (keep going)
-        return Value.@"true";
+        return Value.true;
     }
 }
 
@@ -11946,7 +11945,7 @@ fn primUIIsRunning(interp: *Interpreter) InterpreterError!Value {
     if (app_mod.g_app) |app| {
         return Value.fromBool(app.isRunning());
     } else {
-        return Value.@"false";
+        return Value.false;
     }
 }
 
@@ -12774,9 +12773,9 @@ fn primRespondsTo(interp: *Interpreter) InterpreterError!Value {
 
     // Look up the method (this searches up the hierarchy)
     if (interp.lookupMethod(recv_class, selector_val)) |_| {
-        return Value.@"true";
+        return Value.true;
     } else {
-        return Value.@"false";
+        return Value.false;
     }
 }
 

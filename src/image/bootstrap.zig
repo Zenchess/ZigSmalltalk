@@ -669,7 +669,6 @@ pub fn bootstrap(heap: *Heap) !void {
 
     // Phase 6: Install core methods
     try installCoreMethods(heap);
-
 }
 
 fn createClassObject(heap: *Heap, class_index: u32) !*Object {

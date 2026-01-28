@@ -95,7 +95,7 @@ pub const Value = packed struct {
 
     /// Create a boolean Value from a Zig bool
     pub fn fromBool(b: bool) Value {
-        return if (b) Value.@"true" else Value.@"false";
+        return if (b) Value.true else Value.false;
     }
 
     /// Convert a boolean Value to Zig bool
@@ -311,11 +311,11 @@ test "Value - Special objects" {
     try std.testing.expect(Value.nil.isSpecial());
     try std.testing.expect(!Value.nil.isSmallInt());
 
-    try std.testing.expect(Value.@"true".isTrue());
-    try std.testing.expect(Value.@"true".isBoolean());
+    try std.testing.expect(Value.true.isTrue());
+    try std.testing.expect(Value.true.isBoolean());
 
-    try std.testing.expect(Value.@"false".isFalse());
-    try std.testing.expect(Value.@"false".isBoolean());
+    try std.testing.expect(Value.false.isFalse());
+    try std.testing.expect(Value.false.isBoolean());
 }
 
 test "Value - Character" {

@@ -288,7 +288,7 @@ fn cTypeToValue(comptime T: type, val: T, heap: *Heap) FFIError!Value {
 
     // Handle bool
     if (T == bool) {
-        return if (val) Value.@"true" else Value.@"false";
+        return if (val) Value.true else Value.false;
     }
 
     // Handle pointers - return as integer address

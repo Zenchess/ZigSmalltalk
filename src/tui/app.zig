@@ -1455,17 +1455,11 @@ pub const App = struct {
         var buf: [512]u8 = undefined;
         if (cm.header.primitive_index != 0) {
             // Primitive method - show primitive info
-            const info = std.fmt.bufPrint(&buf,
-                "{s}\n    \"Primitive method\"\n    <primitive: {d}>\n    ^ self primitiveFailed",
-                .{ method_name, cm.header.primitive_index }
-            ) catch method_name;
+            const info = std.fmt.bufPrint(&buf, "{s}\n    \"Primitive method\"\n    <primitive: {d}>\n    ^ self primitiveFailed", .{ method_name, cm.header.primitive_index }) catch method_name;
             self.browser.setSource(info) catch {};
         } else {
             // Regular method without stored source
-            const info = std.fmt.bufPrint(&buf,
-                "{s}\n    \"Source not stored\"\n    \"Bytecodes: {d}, Literals: {d}\"\n    ^ self",
-                .{ method_name, cm.header.bytecode_size, cm.header.num_literals }
-            ) catch method_name;
+            const info = std.fmt.bufPrint(&buf, "{s}\n    \"Source not stored\"\n    \"Bytecodes: {d}, Literals: {d}\"\n    ^ self", .{ method_name, cm.header.bytecode_size, cm.header.num_literals }) catch method_name;
             self.browser.setSource(info) catch {};
         }
     }
@@ -1697,7 +1691,7 @@ pub const App = struct {
                         if (j > 0) writer.writeAll(". ") catch {};
                         writer.print(" arg{d}", .{j + 1}) catch {};
                     }
-                    writer.writeAll(" }" ) catch {};
+                    writer.writeAll(" }") catch {};
 
                     self.browser.setSource(fbs.getWritten()) catch {};
                     return;

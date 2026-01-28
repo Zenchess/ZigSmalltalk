@@ -8,7 +8,6 @@
 ///    - A native thread is spawned to execute the FFI call
 ///    - When complete, a semaphore is signaled to wake the process
 /// 2. This allows other Smalltalk processes to run during blocking FFI calls
-
 const std = @import("std");
 const object = @import("object.zig");
 const scheduler = @import("scheduler.zig");

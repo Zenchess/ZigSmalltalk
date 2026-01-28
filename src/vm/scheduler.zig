@@ -6,7 +6,6 @@
 /// - Priority-based scheduling with 10 priority levels
 /// - Semaphores for synchronization
 /// - Timer support for Delay class
-
 const std = @import("std");
 const object = @import("object.zig");
 const memory = @import("memory.zig");

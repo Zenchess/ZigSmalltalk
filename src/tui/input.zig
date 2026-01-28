@@ -770,30 +770,30 @@ pub const InputReader = struct {
 
         return switch (self.buf[1]) {
             // Function keys
-            59 => .f1,  // 0x3B
-            60 => .f2,  // 0x3C
-            61 => .f3,  // 0x3D
-            62 => .f4,  // 0x3E
-            63 => .f5,  // 0x3F
-            64 => .f6,  // 0x40
-            65 => .f7,  // 0x41
-            66 => .f8,  // 0x42
-            67 => .f9,  // 0x43
+            59 => .f1, // 0x3B
+            60 => .f2, // 0x3C
+            61 => .f3, // 0x3D
+            62 => .f4, // 0x3E
+            63 => .f5, // 0x3F
+            64 => .f6, // 0x40
+            65 => .f7, // 0x41
+            66 => .f8, // 0x42
+            67 => .f9, // 0x43
             68 => .f10, // 0x44
             133 => .f11, // 0x85
             134 => .f12, // 0x86
             // Arrow keys (with 0xE0 prefix)
-            72 => .up,    // 0x48
-            80 => .down,  // 0x50
-            75 => .left,  // 0x4B
+            72 => .up, // 0x48
+            80 => .down, // 0x50
+            75 => .left, // 0x4B
             77 => .right, // 0x4D
             // Navigation keys
-            71 => .home,     // 0x47
-            79 => .end,      // 0x4F
-            73 => .page_up,  // 0x49
+            71 => .home, // 0x47
+            79 => .end, // 0x4F
+            73 => .page_up, // 0x49
             81 => .page_down, // 0x51
-            82 => .insert,   // 0x52
-            83 => .delete,   // 0x53
+            82 => .insert, // 0x52
+            83 => .delete, // 0x53
             else => null,
         };
     }

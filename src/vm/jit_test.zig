@@ -56,7 +56,7 @@ pub fn main() !void {
 
         buf.pushReg(.rbp);
         buf.movRegReg(.rbp, .rsp);
-        buf.movRegImm64(.rax, Value.@"true".bits);
+        buf.movRegImm64(.rax, Value.true.bits);
         buf.popReg(.rbp);
         buf.ret();
 
@@ -66,8 +66,8 @@ pub fn main() !void {
         const func: *const fn () callconv(.c) u64 = @ptrCast(code.ptr);
         const result = func();
 
-        std.debug.print("  Result: 0x{x}, Expected: 0x{x}\n", .{result, Value.@"true".bits});
-        if (result == Value.@"true".bits) {
+        std.debug.print("  Result: 0x{x}, Expected: 0x{x}\n", .{ result, Value.true.bits });
+        if (result == Value.true.bits) {
             std.debug.print("  PASS!\n\n", .{});
         } else {
             std.debug.print("  FAIL!\n\n", .{});
@@ -151,8 +151,8 @@ pub fn main() !void {
         buf.movRegReg(.rbp, .rsp);
 
         // counter in rcx, limit in rdx
-        buf.movRegImm64(.rcx, 0);         // counter = 0
-        buf.movRegImm64(.rdx, 1000000);   // limit = 1000000
+        buf.movRegImm64(.rcx, 0); // counter = 0
+        buf.movRegImm64(.rdx, 1000000); // limit = 1000000
 
         const loop_start = buf.currentPos();
 
@@ -193,7 +193,7 @@ pub fn main() !void {
         const result = func();
         const end = std.time.milliTimestamp();
 
-        std.debug.print("  Result: {}, Time: {}ms\n", .{result, end - start});
+        std.debug.print("  Result: {}, Time: {}ms\n", .{ result, end - start });
         if (result == 1000000) {
             std.debug.print("  PASS!\n\n", .{});
         } else {
@@ -210,8 +210,8 @@ pub fn main() !void {
         buf.pushReg(.rbp);
         buf.movRegReg(.rbp, .rsp);
 
-        buf.movRegImm64(.rcx, 0);           // counter = 0
-        buf.movRegImm64(.rdx, 100000000);   // limit = 100M
+        buf.movRegImm64(.rcx, 0); // counter = 0
+        buf.movRegImm64(.rdx, 100000000); // limit = 100M
 
         const loop_start = buf.currentPos();
         buf.cmpRegReg(.rcx, .rdx);

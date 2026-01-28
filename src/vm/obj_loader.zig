@@ -170,9 +170,14 @@ pub fn loadOBJ(path: []const u8, allocator: std.mem.Allocator) !MeshData {
                         } else {
                             // Create new vertex
                             var vertex = Vertex{
-                                .x = 0, .y = 0, .z = 0,
-                                .nx = 0, .ny = 1, .nz = 0,
-                                .u = 0, .v = 0,
+                                .x = 0,
+                                .y = 0,
+                                .z = 0,
+                                .nx = 0,
+                                .ny = 1,
+                                .nz = 0,
+                                .u = 0,
+                                .v = 0,
                             };
 
                             if (v_idx > 0 and v_idx <= @as(i32, @intCast(positions.items.len))) {

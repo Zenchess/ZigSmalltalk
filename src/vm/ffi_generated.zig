@@ -5,16 +5,13 @@
 const std = @import("std");
 
 /// LibC library imports
-pub const LibC = @cImport({
-});
+pub const LibC = @cImport({});
 
 /// LibMath library imports
-pub const LibMath = @cImport({
-});
+pub const LibMath = @cImport({});
 
 /// OpenGL library imports
-pub const OpenGL = @cImport({
-});
+pub const OpenGL = @cImport({});
 
 /// Combined C imports (for backwards compatibility)
 pub const c = @cImport({
@@ -33,12 +30,9 @@ pub const library_names = [_][]const u8{
 
 /// Function lists for each library (empty = auto-discover)
 pub const library_functions = struct {
-    pub const LibC = [_][]const u8{
-    };
-    pub const LibMath = [_][]const u8{
-    };
-    pub const OpenGL = [_][]const u8{
-    };
+    pub const LibC = [_][]const u8{};
+    pub const LibMath = [_][]const u8{};
+    pub const OpenGL = [_][]const u8{};
 };
 
 /// Auto-discovery flags (true = discover all functions at compile time)
@@ -50,12 +44,9 @@ pub const library_auto = struct {
 
 /// Struct lists for each library (explicit list of structs to export)
 pub const library_structs = struct {
-    pub const LibC = [_][]const u8{
-    };
-    pub const LibMath = [_][]const u8{
-    };
-    pub const OpenGL = [_][]const u8{
-    };
+    pub const LibC = [_][]const u8{};
+    pub const LibMath = [_][]const u8{};
+    pub const OpenGL = [_][]const u8{};
 };
 
 // ============================================================================

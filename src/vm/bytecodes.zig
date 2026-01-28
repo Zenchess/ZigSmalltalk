@@ -1,6 +1,5 @@
 /// Bytecode definitions for Zig Smalltalk VM
 /// Simple stack-based bytecode, similar to Squeak/Pharo but simplified
-
 pub const Opcode = enum(u8) {
     // PUSH OPERATIONS (0x00-0x0F): Push receiver instance variable
     push_receiver_variable_0 = 0x00,

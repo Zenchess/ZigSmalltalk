@@ -706,8 +706,8 @@ pub fn main() !void {
                 _ = try stdout.write(" in method: ");
                 const meth = interp.method;
                 const lits = meth.getLiterals();
-                if (lits.len > 0 and lits[lits.len-1].isObject()) {
-                    const obj = lits[lits.len-1].asObject();
+                if (lits.len > 0 and lits[lits.len - 1].isObject()) {
+                    const obj = lits[lits.len - 1].asObject();
                     if (obj.header.class_index == Heap.CLASS_STRING) {
                         _ = try stdout.write(obj.bytes(obj.header.size));
                     }

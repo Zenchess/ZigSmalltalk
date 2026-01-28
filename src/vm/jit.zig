@@ -6,7 +6,6 @@
 /// - Stack kept in memory (not register-mapped)
 /// - Complex operations (sends) call back to runtime
 /// - Inline cache stubs for monomorphic sends
-
 const std = @import("std");
 const builtin = @import("builtin");
 const object = @import("object.zig");
@@ -612,7 +611,6 @@ const Reg = enum(u4) {
 /// - r13: Temp base cached
 /// - rbp: Frame pointer
 /// - rsp: Native stack pointer
-
 /// Code buffer for generated machine code
 pub const CodeBuffer = struct {
     code: []u8,
@@ -980,7 +978,7 @@ fn allocateExecutableMemory(size: usize) ![]align(PAGE_SIZE) u8 {
             windows.MEM_COMMIT | windows.MEM_RESERVE,
             windows.PAGE_EXECUTE_READWRITE,
         );
-        const aligned_ptr: [*]align(PAGE_SIZE) u8 = @alignCast(@ptrCast(ptr));
+        const aligned_ptr: [*]align(PAGE_SIZE) u8 = @ptrCast(@alignCast(ptr));
         return aligned_ptr[0..size];
     } else {
         return std.posix.mmap(
@@ -1133,8 +1131,7 @@ pub const JIT = struct {
             const op: Opcode = @enumFromInt(opcode);
             switch (op) {
                 // Simple ops - OK
-                .push_receiver, .push_nil, .push_true, .push_false,
-                .pop, .dup, .return_top, .return_receiver, .return_nil => {},
+                .push_receiver, .push_nil, .push_true, .push_false, .pop, .dup, .return_top, .return_receiver, .return_nil => {},
 
                 // Push with index - OK
                 .push_literal => ip += 1,
@@ -1147,10 +1144,7 @@ pub const JIT = struct {
                 .super_send => return false,
 
                 // Specialized binary sends - OK (no operands)
-                .send_plus, .send_minus, .send_times, .send_divide,
-                .send_less_than, .send_greater_than,
-                .send_less_or_equal, .send_greater_or_equal,
-                .send_equal, .send_not_equal => {},
+                .send_plus, .send_minus, .send_times, .send_divide, .send_less_than, .send_greater_than, .send_less_or_equal, .send_greater_or_equal, .send_equal, .send_not_equal => {},
 
                 // Jumps - now supported with backpatching
                 .jump, .jump_if_true, .jump_if_false, .jump_if_nil, .jump_if_not_nil => {
@@ -1158,8 +1152,7 @@ pub const JIT = struct {
                 },
 
                 // Short jumps (offset in opcode, forward only)
-                .short_jump_0, .short_jump_1, .short_jump_2, .short_jump_3,
-                .short_jump_4, .short_jump_5, .short_jump_6, .short_jump_7 => {},
+                .short_jump_0, .short_jump_1, .short_jump_2, .short_jump_3, .short_jump_4, .short_jump_5, .short_jump_6, .short_jump_7 => {},
 
                 // Block creation - now supported with runtime helper
                 .push_closure => {
@@ -1383,7 +1376,7 @@ pub const JIT = struct {
 
                     // Pop TOS and compare with true
                     self.emitPopToRax(&buffer);
-                    buffer.cmpRegImm64(.rax, Value.@"true".bits);
+                    buffer.cmpRegImm64(.rax, Value.true.bits);
 
                     if (target_bc_ip < ip and bc_to_native[target_bc_ip] != 0) {
                         const target_native = bc_to_native[target_bc_ip];
@@ -1406,7 +1399,7 @@ pub const JIT = struct {
 
                     // Pop TOS and compare with false
                     self.emitPopToRax(&buffer);
-                    buffer.cmpRegImm64(.rax, Value.@"false".bits);
+                    buffer.cmpRegImm64(.rax, Value.false.bits);
 
                     if (target_bc_ip < ip and bc_to_native[target_bc_ip] != 0) {
                         const target_native = bc_to_native[target_bc_ip];
@@ -1467,8 +1460,7 @@ pub const JIT = struct {
                     }
                 },
                 // Short jumps (0xB8-0xBF) - forward only, offset in opcode
-                .short_jump_0, .short_jump_1, .short_jump_2, .short_jump_3,
-                .short_jump_4, .short_jump_5, .short_jump_6, .short_jump_7 => {
+                .short_jump_0, .short_jump_1, .short_jump_2, .short_jump_3, .short_jump_4, .short_jump_5, .short_jump_6, .short_jump_7 => {
                     const short_offset = Opcode.getShortJumpOffset(opcode);
                     const target_bc_ip = ip + short_offset;
 
@@ -1633,7 +1625,7 @@ pub const JIT = struct {
     /// Push true onto Smalltalk stack (uses cached r12=sp, r13=stack base)
     fn emitPushTrue(self: *JIT, buf: *CodeBuffer) void {
         _ = self;
-        buf.movRegImm64(.rax, Value.@"true".bits);
+        buf.movRegImm64(.rax, Value.true.bits);
         // Store at stack[r12]: mov [r13 + r12*8 + 0], rax
         buf.rex(true, false, true, true);
         buf.emit8(0x89);
@@ -1646,7 +1638,7 @@ pub const JIT = struct {
     /// Push false onto Smalltalk stack (uses cached r12=sp, r13=stack base)
     fn emitPushFalse(self: *JIT, buf: *CodeBuffer) void {
         _ = self;
-        buf.movRegImm64(.rax, Value.@"false".bits);
+        buf.movRegImm64(.rax, Value.false.bits);
         // Store at stack[r12]: mov [r13 + r12*8 + 0], rax
         buf.rex(true, false, true, true);
         buf.emit8(0x89);
@@ -2255,8 +2247,8 @@ pub const JIT = struct {
         // SmallInteger tag constants
         const SMALLINT_TAG: u8 = 1;
         const TAG_MASK: u8 = 7;
-        const TRUE_BITS: u64 = Value.@"true".bits;
-        const FALSE_BITS: u64 = Value.@"false".bits;
+        const TRUE_BITS: u64 = Value.true.bits;
+        const FALSE_BITS: u64 = Value.false.bits;
 
         // Load arg (TOS) into rax: mov rax, [r13 + r12*8 - 8]
         buf.rex(true, false, true, true); // REX.W + REX.X (r12) + REX.B (r13)

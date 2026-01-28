@@ -64,47 +64,50 @@ pub const Package = struct {
 /// System package definitions - maps package names to class name patterns
 pub const SystemPackageDefinitions = struct {
     pub const Kernel = [_][]const u8{
-        "Object", "UndefinedObject", "Boolean", "True", "False",
-        "Behavior", "Class", "Metaclass", "ClassDescription",
-        "CompiledMethod", "BlockClosure", "Context", "MethodContext",
-        "Process", "ProcessorScheduler", "Semaphore", "Delay",
-        "Message", "MessageSend", "Symbol", "Pragma",
+        "Object",       "UndefinedObject", "Boolean",       "True",             "False",
+        "Behavior",     "Class",           "Metaclass",     "ClassDescription", "CompiledMethod",
+        "BlockClosure", "Context",         "MethodContext", "Process",          "ProcessorScheduler",
+        "Semaphore",    "Delay",           "Message",       "MessageSend",      "Symbol",
+        "Pragma",
     };
 
     pub const Collections = [_][]const u8{
-        "Collection", "SequenceableCollection", "ArrayedCollection",
-        "Array", "ByteArray", "String", "WordArray",
-        "OrderedCollection", "SortedCollection", "LinkedList", "Interval",
-        "Set", "IdentitySet", "Dictionary", "IdentityDictionary",
-        "Bag", "Association", "Link", "HashedCollection",
+        "Collection",       "SequenceableCollection", "ArrayedCollection",
+        "Array",            "ByteArray",              "String",
+        "WordArray",        "OrderedCollection",      "SortedCollection",
+        "LinkedList",       "Interval",               "Set",
+        "IdentitySet",      "Dictionary",             "IdentityDictionary",
+        "Bag",              "Association",            "Link",
+        "HashedCollection",
     };
 
     pub const Magnitude = [_][]const u8{
-        "Magnitude", "Number", "Integer", "SmallInteger", "LargeInteger",
-        "Float", "Fraction", "Character", "Date", "Time", "Duration",
-        "DateAndTime", "Timestamp", "Point", "Rectangle",
+        "Magnitude", "Number",      "Integer",   "SmallInteger", "LargeInteger",
+        "Float",     "Fraction",    "Character", "Date",         "Time",
+        "Duration",  "DateAndTime", "Timestamp", "Point",        "Rectangle",
     };
 
     pub const Streams = [_][]const u8{
-        "Stream", "PositionableStream", "ReadStream", "WriteStream",
-        "ReadWriteStream", "FileStream", "ExternalStream",
-        "TextStream", "TranscriptStream", "NullStream",
+        "Stream",           "PositionableStream", "ReadStream",     "WriteStream",
+        "ReadWriteStream",  "FileStream",         "ExternalStream", "TextStream",
+        "TranscriptStream", "NullStream",
     };
 
     pub const Exceptions = [_][]const u8{
-        "Exception", "Error", "Notification", "Warning",
-        "MessageNotUnderstood", "ZeroDivide", "SubscriptOutOfBounds",
-        "KeyNotFound", "NotFound", "Halt", "AssertionFailure",
+        "Exception",            "Error",      "Notification",         "Warning",
+        "MessageNotUnderstood", "ZeroDivide", "SubscriptOutOfBounds", "KeyNotFound",
+        "NotFound",             "Halt",       "AssertionFailure",
     };
 
     pub const FFI = [_][]const u8{
-        "FFILibrary", "ExternalStructure", "ExternalAddress",
-        "ExternalData", "ExternalFunction", "ExternalType",
-        "ExternalPointer", "ExternalLibrary", "LibC", "LibMath", "GL",
+        "FFILibrary",      "ExternalStructure", "ExternalAddress",
+        "ExternalData",    "ExternalFunction",  "ExternalType",
+        "ExternalPointer", "ExternalLibrary",   "LibC",
+        "LibMath",         "GL",
     };
 
     pub const Testing = [_][]const u8{
-        "TestCase", "TestSuite", "TestResult", "TestResource",
+        "TestCase",   "TestSuite", "TestResult", "TestResource",
         "TestRunner", "SUnitTest",
     };
 

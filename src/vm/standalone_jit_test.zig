@@ -187,7 +187,7 @@ fn makeExecutable(allocator: std.mem.Allocator, code: []const u8) ![]u8 {
 }
 
 fn freeExecutable(mem: []u8) void {
-    const aligned_ptr: [*]align(PAGE_SIZE) u8 = @alignCast(@ptrCast(mem.ptr));
+    const aligned_ptr: [*]align(PAGE_SIZE) u8 = @ptrCast(@alignCast(mem.ptr));
     std.posix.munmap(@alignCast(aligned_ptr[0..mem.len]));
 }
 

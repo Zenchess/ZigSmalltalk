@@ -7,7 +7,6 @@ const posix = if (!is_windows) std.posix else undefined;
 /// Cross-platform clipboard support
 /// Uses OSC 52 escape sequences (works with most modern terminals)
 /// Falls back to system utilities (wl-copy/xclip/xsel) if OSC 52 fails
-
 fn getStdout() std.fs.File {
     if (is_windows) {
         const handle = std.os.windows.GetStdHandle(std.os.windows.STD_OUTPUT_HANDLE) catch unreachable;

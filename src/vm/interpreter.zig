@@ -206,10 +206,10 @@ pub const Interpreter = struct {
 
     // Stack caching - keep top values in "registers" (struct fields)
     // This reduces memory access for common operations
-    stack_cache_tos: Value,      // Top of stack (cached)
-    stack_cache_nos: Value,      // Next on stack (cached)
-    stack_cache_count: u2,       // Number of cached values (0, 1, or 2)
-    stack_cache_enabled: bool,   // Whether to use stack caching
+    stack_cache_tos: Value, // Top of stack (cached)
+    stack_cache_nos: Value, // Next on stack (cached)
+    stack_cache_count: u2, // Number of cached values (0, 1, or 2)
+    stack_cache_enabled: bool, // Whether to use stack caching
 
     pub fn init(heap: *Heap, allocator: std.mem.Allocator) !Interpreter {
         // Allocate stack and contexts on the heap to avoid stack overflow with large sizes
@@ -787,11 +787,8 @@ pub const Interpreter = struct {
         // Create a Process Smalltalk object
         // Process has 7 fields: nextLink (from Link), suspendedFrame, priority, myList, exceptionEnvironment, name, processId
         const process_class = self.heap.globals.get("Process") orelse self.heap.getClass(Heap.CLASS_OBJECT);
-        const process_obj = try self.heap.allocateObject(
-            if (process_class.isObject()) process_class.asObject().header.class_index else Heap.CLASS_OBJECT,
-            7, // nextLink, suspendedFrame, priority, myList, exceptionEnvironment, name, processId
-            .normal
-        );
+        const process_obj = try self.heap.allocateObject(if (process_class.isObject()) process_class.asObject().header.class_index else Heap.CLASS_OBJECT, 7, // nextLink, suspendedFrame, priority, myList, exceptionEnvironment, name, processId
+            .normal);
 
         // Set priority to user scheduling priority (5) - priority is at index 2
         process_obj.setField(scheduler.ProcessFields.priority, Value.fromSmallInt(5), 7);
@@ -1215,7 +1212,7 @@ pub const Interpreter = struct {
                             if (byte == @intFromEnum(Opcode.send)) {
                                 const lit_idx = self.fetchByte();
                                 const arg_count = self.fetchByte();
-                                var lit_info: []const u8 = "<?>"; 
+                                var lit_info: []const u8 = "<?>";
                                 if (lit_idx < lits.len) {
                                     const l = lits[lit_idx];
                                     if (l.isObject()) {
@@ -1251,7 +1248,7 @@ pub const Interpreter = struct {
             }
             if (Opcode.isStoreReceiverVariable(byte)) {
                 const index = byte - 0x40;
-                if (DEBUG_VERBOSE) std.debug.print("DEBUG storeRecVar before idx={} ip={} sp={}\n", .{index, self.ip - 1, self.sp});
+                if (DEBUG_VERBOSE) std.debug.print("DEBUG storeRecVar before idx={} ip={} sp={}\n", .{ index, self.ip - 1, self.sp });
                 try self.storeReceiverVariable(index);
                 if (DEBUG_VERBOSE) std.debug.print("DEBUG storeRecVar after\n", .{});
                 continue;
@@ -1306,12 +1303,12 @@ pub const Interpreter = struct {
                             if (!self.receiver.isNil()) {
                                 found_val = self.lookupClassVariable(name_bytes);
                             }
-                            
+
                             // If not found as class variable, try globals
                             if (found_val == null) {
                                 found_val = self.heap.getGlobal(name_bytes);
                             }
-                            
+
                             if (found_val) |val| {
                                 try self.push(val);
                             } else {
@@ -1331,8 +1328,8 @@ pub const Interpreter = struct {
                 },
                 .push_receiver => try self.push(self.receiver),
                 .push_nil => try self.push(Value.nil),
-                .push_true => try self.push(Value.@"true"),
-                .push_false => try self.push(Value.@"false"),
+                .push_true => try self.push(Value.true),
+                .push_false => try self.push(Value.false),
                 .push_context => {
                     // thisContext - for now push nil since we don't have full context objects
                     // This allows exception signaling code to run without crashing
@@ -1473,12 +1470,12 @@ pub const Interpreter = struct {
                     }
                 },
                 .return_true => {
-                    if (try self.returnFromMethod(Value.@"true")) |final_result| {
+                    if (try self.returnFromMethod(Value.true)) |final_result| {
                         return final_result;
                     }
                 },
                 .return_false => {
-                    if (try self.returnFromMethod(Value.@"false")) |final_result| {
+                    if (try self.returnFromMethod(Value.false)) |final_result| {
                         return final_result;
                     }
                 },
@@ -2043,9 +2040,9 @@ pub const Interpreter = struct {
             }
         }
         if (selector.isSmallInt()) {
-            if (DEBUG_VERBOSE) std.debug.print("DEBUG sendMessage selector smallInt={} literal index={}\n", .{selector.asSmallInt(), selector_index});
+            if (DEBUG_VERBOSE) std.debug.print("DEBUG sendMessage selector smallInt={} literal index={}\n", .{ selector.asSmallInt(), selector_index });
         } else {
-            if (DEBUG_VERBOSE) std.debug.print("DEBUG sendMessage selector non-object bits=0x{x} literal index={}\n", .{selector.bits, selector_index});
+            if (DEBUG_VERBOSE) std.debug.print("DEBUG sendMessage selector non-object bits=0x{x} literal index={}\n", .{ selector.bits, selector_index });
         }
         self.last_send_selector = selector_name;
 
@@ -2115,27 +2112,27 @@ pub const Interpreter = struct {
                 }
                 // Comparison operations
                 else if (selector.bits == self.selector_less.bits) {
-                    self.stack[recv_pos] = if (a < b) Value.@"true" else Value.@"false";
+                    self.stack[recv_pos] = if (a < b) Value.true else Value.false;
                     self.sp = recv_pos + 1;
                     return;
                 } else if (selector.bits == self.selector_greater.bits) {
-                    self.stack[recv_pos] = if (a > b) Value.@"true" else Value.@"false";
+                    self.stack[recv_pos] = if (a > b) Value.true else Value.false;
                     self.sp = recv_pos + 1;
                     return;
                 } else if (selector.bits == self.selector_less_equal.bits) {
-                    self.stack[recv_pos] = if (a <= b) Value.@"true" else Value.@"false";
+                    self.stack[recv_pos] = if (a <= b) Value.true else Value.false;
                     self.sp = recv_pos + 1;
                     return;
                 } else if (selector.bits == self.selector_greater_equal.bits) {
-                    self.stack[recv_pos] = if (a >= b) Value.@"true" else Value.@"false";
+                    self.stack[recv_pos] = if (a >= b) Value.true else Value.false;
                     self.sp = recv_pos + 1;
                     return;
                 } else if (selector.bits == self.selector_equal.bits) {
-                    self.stack[recv_pos] = if (a == b) Value.@"true" else Value.@"false";
+                    self.stack[recv_pos] = if (a == b) Value.true else Value.false;
                     self.sp = recv_pos + 1;
                     return;
                 } else if (selector.bits == self.selector_not_equal.bits) {
-                    self.stack[recv_pos] = if (a != b) Value.@"true" else Value.@"false";
+                    self.stack[recv_pos] = if (a != b) Value.true else Value.false;
                     self.sp = recv_pos + 1;
                     return;
                 }
@@ -2644,8 +2641,8 @@ pub const Interpreter = struct {
                     // Most primitives pop all args then fail immediately without pushing,
                     // so the original values are still in the stack array at their positions.
                     // We restore recv+args by reading from those positions.
-                    self.sp = recv_pos;  // Reset sp to before recv
-                    try self.push(self.stack[recv_pos]);  // Push recv
+                    self.sp = recv_pos; // Reset sp to before recv
+                    try self.push(self.stack[recv_pos]); // Push recv
                     var arg_idx: usize = 0;
                     while (arg_idx < num_args) : (arg_idx += 1) {
                         try self.push(self.stack[recv_pos + 1 + arg_idx]);
@@ -2708,9 +2705,9 @@ pub const Interpreter = struct {
             // Execute the method bytecode
             // Save current context
             if (self.context_ptr >= self.contexts.len) {
-            if (DEBUG_STACK) {
-                std.debug.print("STACK OVERFLOW at context_ptr={} method={s}\n", .{self.context_ptr, self.currentMethodSource()});
-            }
+                if (DEBUG_STACK) {
+                    std.debug.print("STACK OVERFLOW at context_ptr={} method={s}\n", .{ self.context_ptr, self.currentMethodSource() });
+                }
                 return InterpreterError.StackOverflow;
             }
 
@@ -2727,17 +2724,17 @@ pub const Interpreter = struct {
                 }
             }
             if (DEBUG_VERBOSE) std.debug.print("DEBUG push context ip={} ctx_ptr={} temp_base={} method={s}\n", .{ self.ip, self.context_ptr, self.temp_base, method_name });
-                self.contexts[self.context_ptr] = .{
-                    .method = self.method,
-                    .method_class = self.method_class,
-                    .ip = self.ip,
-                    .receiver = self.receiver,
-                    .temp_base = self.temp_base,
-                    .outer_temp_base = self.outer_temp_base,
-                    .home_temp_base = self.home_temp_base,
-                    .heap_context = self.heap_context,
-                    .home_heap_context = self.home_heap_context,
-                };
+            self.contexts[self.context_ptr] = .{
+                .method = self.method,
+                .method_class = self.method_class,
+                .ip = self.ip,
+                .receiver = self.receiver,
+                .temp_base = self.temp_base,
+                .outer_temp_base = self.outer_temp_base,
+                .home_temp_base = self.home_temp_base,
+                .heap_context = self.heap_context,
+                .home_heap_context = self.home_heap_context,
+            };
             self.context_ptr += 1;
 
             // Set up new context for the called method
@@ -2794,7 +2791,7 @@ pub const Interpreter = struct {
             self.last_mnu_selector = sel_name_dbg;
             self.last_mnu_receiver = recv;
             self.last_mnu_method = self.currentMethodSource();
-            if (DEBUG_VERBOSE) std.debug.print("DEBUG lookup miss selector={s} class={s}\n", .{sel_name_dbg, class_name_dbg});
+            if (DEBUG_VERBOSE) std.debug.print("DEBUG lookup miss selector={s} class={s}\n", .{ sel_name_dbg, class_name_dbg });
             // Create a Message object to pass to doesNotUnderstand:
             const dnu_selector = self.heap.internSymbol("doesNotUnderstand:") catch {
                 return InterpreterError.MessageNotUnderstood;
@@ -2882,14 +2879,14 @@ pub const Interpreter = struct {
                 }
             } else {
                 // No doesNotUnderstand: method - raise error
-                var sel_name: []const u8 = "<?>"; 
-                if (selector.isObject()) { 
-                    const sel_obj = selector.asObject(); 
-                    if (sel_obj.header.class_index == Heap.CLASS_SYMBOL) { 
-                        sel_name = sel_obj.bytes(sel_obj.header.size); 
+                var sel_name: []const u8 = "<?>";
+                if (selector.isObject()) {
+                    const sel_obj = selector.asObject();
+                    if (sel_obj.header.class_index == Heap.CLASS_SYMBOL) {
+                        sel_name = sel_obj.bytes(sel_obj.header.size);
                     } else {
                         if (DEBUG_VERBOSE) std.debug.print("DEBUG MNU selector class_idx={}\n", .{sel_obj.header.class_index});
-                    } 
+                    }
                 }
                 var recv_name: []const u8 = "<?>";
                 const recv_class = self.heap.classOf(recv);
@@ -2932,8 +2929,8 @@ pub const Interpreter = struct {
     /// Return from a method, restoring the previous context.
     /// Returns the final value if this was the outermost call, or null to continue execution.
     fn returnFromMethod(self: *Interpreter, result: Value) InterpreterError!?Value {
-        const is_true = result.bits == Value.@"true".bits;
-        const is_false = result.bits == Value.@"false".bits;
+        const is_true = result.bits == Value.true.bits;
+        const is_false = result.bits == Value.false.bits;
         const is_nil = result.bits == Value.nil.bits;
         if (DEBUG_VERBOSE) std.debug.print("DEBUG returnFromMethod ctx_ptr={} result: is_obj={} is_true={} is_false={} is_nil={}\n", .{ self.context_ptr, result.isObject(), is_true, is_false, is_nil });
         if (self.context_ptr == 0) {
@@ -3380,7 +3377,7 @@ pub const Interpreter = struct {
                 }
             }
             const src = self.currentMethodSource();
-            if (DEBUG_VERBOSE) std.debug.print("DEBUG binary lookup miss selector={s} recv={s} arg={s} in {s}\n", .{selector, recv_name, arg_name, src});
+            if (DEBUG_VERBOSE) std.debug.print("DEBUG binary lookup miss selector={s} recv={s} arg={s} in {s}\n", .{ selector, recv_name, arg_name, src });
             if (std.mem.eql(u8, selector, "+")) {
                 const base = self.outer_temp_base;
                 if (base + 2 < self.stack.len) {
@@ -3703,13 +3700,13 @@ pub const Interpreter = struct {
     }
 
     fn handlePushTrue(self: *Interpreter) DispatchResult {
-        self.stack[self.sp] = Value.@"true";
+        self.stack[self.sp] = Value.true;
         self.sp += 1;
         return .continue_dispatch;
     }
 
     fn handlePushFalse(self: *Interpreter) DispatchResult {
-        self.stack[self.sp] = Value.@"false";
+        self.stack[self.sp] = Value.false;
         self.sp += 1;
         return .continue_dispatch;
     }
@@ -3989,7 +3986,7 @@ pub const Interpreter = struct {
     }
 
     fn handleReturnTrue(self: *Interpreter) DispatchResult {
-        const maybe_result = self.returnFromMethod(Value.@"true") catch |err| {
+        const maybe_result = self.returnFromMethod(Value.true) catch |err| {
             self.dispatch_error = err;
             return .return_error;
         };
@@ -4001,7 +3998,7 @@ pub const Interpreter = struct {
     }
 
     fn handleReturnFalse(self: *Interpreter) DispatchResult {
-        const maybe_result = self.returnFromMethod(Value.@"false") catch |err| {
+        const maybe_result = self.returnFromMethod(Value.false) catch |err| {
             self.dispatch_error = err;
             return .return_error;
         };
@@ -4276,7 +4273,7 @@ pub const Interpreter = struct {
             const b = self.stack[self.sp - 1];
             const a = self.stack[self.sp - 2];
             if (a.isSmallInt() and b.isSmallInt()) {
-                const result = if (a.asSmallInt() < b.asSmallInt()) Value.@"true" else Value.@"false";
+                const result = if (a.asSmallInt() < b.asSmallInt()) Value.true else Value.false;
                 self.stack[self.sp - 2] = result;
                 self.sp -= 1;
                 return .continue_dispatch;
@@ -4296,7 +4293,7 @@ pub const Interpreter = struct {
             const b = self.stack[self.sp - 1];
             const a = self.stack[self.sp - 2];
             if (a.isSmallInt() and b.isSmallInt()) {
-                const result = if (a.asSmallInt() > b.asSmallInt()) Value.@"true" else Value.@"false";
+                const result = if (a.asSmallInt() > b.asSmallInt()) Value.true else Value.false;
                 self.stack[self.sp - 2] = result;
                 self.sp -= 1;
                 return .continue_dispatch;
@@ -4316,7 +4313,7 @@ pub const Interpreter = struct {
             const b = self.stack[self.sp - 1];
             const a = self.stack[self.sp - 2];
             if (a.isSmallInt() and b.isSmallInt()) {
-                const result = if (a.asSmallInt() <= b.asSmallInt()) Value.@"true" else Value.@"false";
+                const result = if (a.asSmallInt() <= b.asSmallInt()) Value.true else Value.false;
                 self.stack[self.sp - 2] = result;
                 self.sp -= 1;
                 return .continue_dispatch;
@@ -4336,7 +4333,7 @@ pub const Interpreter = struct {
             const b = self.stack[self.sp - 1];
             const a = self.stack[self.sp - 2];
             if (a.isSmallInt() and b.isSmallInt()) {
-                const result = if (a.asSmallInt() >= b.asSmallInt()) Value.@"true" else Value.@"false";
+                const result = if (a.asSmallInt() >= b.asSmallInt()) Value.true else Value.false;
                 self.stack[self.sp - 2] = result;
                 self.sp -= 1;
                 return .continue_dispatch;
@@ -4356,7 +4353,7 @@ pub const Interpreter = struct {
             const b = self.stack[self.sp - 1];
             const a = self.stack[self.sp - 2];
             if (a.isSmallInt() and b.isSmallInt()) {
-                const result = if (a.asSmallInt() == b.asSmallInt()) Value.@"true" else Value.@"false";
+                const result = if (a.asSmallInt() == b.asSmallInt()) Value.true else Value.false;
                 self.stack[self.sp - 2] = result;
                 self.sp -= 1;
                 return .continue_dispatch;
@@ -4376,7 +4373,7 @@ pub const Interpreter = struct {
             const b = self.stack[self.sp - 1];
             const a = self.stack[self.sp - 2];
             if (a.isSmallInt() and b.isSmallInt()) {
-                const result = if (a.asSmallInt() != b.asSmallInt()) Value.@"true" else Value.@"false";
+                const result = if (a.asSmallInt() != b.asSmallInt()) Value.true else Value.false;
                 self.stack[self.sp - 2] = result;
                 self.sp -= 1;
                 return .continue_dispatch;
