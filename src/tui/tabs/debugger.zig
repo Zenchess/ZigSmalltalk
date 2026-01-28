@@ -437,7 +437,13 @@ pub const DebuggerTab = struct {
                         }
                     },
                     .source => {
-                        self.source_view.scroll_y += 1;
+                        const max_scroll = if (self.source_view.lines.items.len > 0)
+                            self.source_view.lines.items.len - 1
+                        else
+                            0;
+                        if (self.source_view.scroll_y < max_scroll) {
+                            self.source_view.scroll_y += 1;
+                        }
                     },
                 }
                 return true;
