@@ -91,6 +91,8 @@ pub const App = struct {
 
     // Debugger state
     debugger_active: bool = false, // True when debugger has halted
+    execution_paused: bool = false, // True when execution is paused in debugger
+    should_resume: bool = false, // True when step/continue button was pressed
 
     // Package management
     package_registry: PackageRegistry,
@@ -198,8 +200,8 @@ pub const App = struct {
             .browser_items = &[_]StatusItem{
                 .{ .text = "Save", .key = "Ctrl+S" },
                 .{ .text = "Export", .key = "Ctrl+E" },
+                .{ .text = "Load", .key = "Ctrl+L" },
                 .{ .text = "New Pkg", .key = "Ctrl+N" },
-                .{ .text = "New Class", .key = "Ctrl+A" },
                 .{ .text = "Quit", .key = "Ctrl+Q" },
             },
             .default_items = &[_]StatusItem{
@@ -230,6 +232,7 @@ pub const App = struct {
         try app.transcript.addLine("", .normal);
         try app.transcript.addLine("  Ctrl+S  Save method", .normal);
         try app.transcript.addLine("  Ctrl+E  Export package to file", .normal);
+        try app.transcript.addLine("  Ctrl+L  Load package from file", .normal);
         try app.transcript.addLine("  Ctrl+N  Create new package", .normal);
         try app.transcript.addLine("  Ctrl+A  Create new class", .normal);
         try app.transcript.addLine("", .normal);
@@ -254,6 +257,7 @@ pub const App = struct {
         app.browser.on_select_package = &browserSelectPackage;
         app.browser.on_save_package = &browserSavePackage;
         app.browser.on_create_package = &browserCreatePackage;
+        app.browser.on_load_package = &browserLoadPackage;
 
         // Set up transcript send-to-workspace callback
         app.transcript.on_send_to_workspace = &transcriptSendToWorkspace;
@@ -370,6 +374,38 @@ pub const App = struct {
 
             // Run a small batch of Smalltalk processes
             _ = self.interpreter.runPendingProcesses(200);
+
+            // If execution is paused in debugger, check if we should resume
+            if (self.execution_paused and self.should_resume) {
+                self.should_resume = false; // Clear the flag
+                
+                // Try to resume execution
+                if (self.interpreter.resumeExecution()) |result| {
+                    // Execution completed successfully
+                    self.execution_paused = false;
+                    self.debugger_active = false;
+                    self.debugger_tab.onContinue();
+                    
+                    // Show result
+                    var buf: [512]u8 = undefined;
+                    const result_str = self.formatValue(&buf, result);
+                    self.transcript.addSuccess(result_str) catch {};
+                } else |err| {
+                    if (err == error.DebuggerPaused) {
+                        // Still paused (e.g., after one step) - stay in loop
+                        // Refresh debugger display
+                        self.debugger_tab.refresh();
+                        self.needs_full_redraw = true;
+                    } else {
+                        // Real error - show it and stop execution
+                        var buf: [256]u8 = undefined;
+                        const err_msg = std.fmt.bufPrint(&buf, "Error: {s}", .{@errorName(err)}) catch "Error";
+                        self.transcript.addError(err_msg) catch {};
+                        self.execution_paused = false;
+                        self.debugger_active = false;
+                    }
+                }
+            }
 
             // Flush transcript output
             self.flushTranscriptBuffer();
@@ -562,8 +598,14 @@ pub const App = struct {
                 return;
             },
             .escape => {
-                // Escape - already shown in status bar, just return
-                return;
+                // Let escape through if browser has a dialog open
+                if (self.active_tab == 2 and (self.browser.show_load_package_dialog or
+                    self.browser.show_new_package_dialog or self.browser.show_new_class_dialog))
+                {
+                    // Fall through to browser handling
+                } else {
+                    return;
+                }
             },
             else => {},
         }
@@ -609,6 +651,10 @@ pub const App = struct {
                     },
                     14 => { // Ctrl+N - New package
                         self.browser.showNewPackageDialog();
+                        return;
+                    },
+                    12 => { // Ctrl+L - Load package
+                        self.browser.showLoadPackageDialog();
                         return;
                     },
                     else => {},
@@ -1134,6 +1180,11 @@ pub const App = struct {
 
         // Compile and execute
         const result = self.compileAndExecute(code) catch |err| {
+            // DebuggerPaused means we're halted - execution will resume via runWithScheduler
+            if (err == error.DebuggerPaused) {
+                self.execution_paused = true;
+                return;
+            }
             var buf: [256]u8 = undefined;
             const err_msg = std.fmt.bufPrint(&buf, "Error: {s}", .{@errorName(err)}) catch "Error";
             self.transcript.addError(err_msg) catch {};
@@ -2334,6 +2385,59 @@ fn browserSavePackage(browser: *BrowserTab, package_name: []const u8) void {
     // Success message
     var msg_buf: [64]u8 = undefined;
     const msg = std.fmt.bufPrint(&msg_buf, "Saved package: {s}", .{package_name}) catch "Package saved";
+    browser.setStatus(msg, false);
+
+    // Also add to transcript
+    app.transcript.addSuccess(msg) catch {};
+}
+
+fn browserLoadPackage(browser: *BrowserTab, file_path: []const u8) void {
+    const app = g_app orelse return;
+
+    // Extract package name from file path (basename without extension)
+    var package_name: []const u8 = file_path;
+
+    // Find last path separator
+    if (std.mem.lastIndexOf(u8, file_path, "/")) |idx| {
+        package_name = file_path[idx + 1 ..];
+    }
+    if (std.mem.lastIndexOf(u8, file_path, "\\")) |idx| {
+        if (idx + 1 < file_path.len) {
+            const after_sep = file_path[idx + 1 ..];
+            if (after_sep.len < package_name.len) {
+                package_name = after_sep;
+            }
+        }
+    }
+
+    // Remove .st extension if present
+    if (std.mem.endsWith(u8, package_name, ".st")) {
+        package_name = package_name[0 .. package_name.len - 3];
+    }
+
+    // Determine if this is a system package
+    const is_system = std.mem.startsWith(u8, file_path, "system-packages/");
+
+    // Load the package - pass interpreter so transcript output goes to TUI
+    const pkg = app.package_registry.loadPackageFromPath(file_path, package_name, is_system, app.heap, app.interpreter) catch |err| {
+        const err_msg = switch (err) {
+            error.FileNotFound => "File not found",
+            error.IoError => "I/O error loading package",
+            error.OutOfMemory => "Out of memory",
+        };
+        browser.setStatus(err_msg, true);
+        return;
+    };
+
+    // Add package to browser if not already there
+    browser.addPackage(pkg.name) catch {};
+
+    // Refresh class list (new classes may have been loaded)
+    app.loadClasses() catch {};
+
+    // Success message
+    var msg_buf: [128]u8 = undefined;
+    const msg = std.fmt.bufPrint(&msg_buf, "Loaded package: {s} from {s}", .{ package_name, file_path }) catch "Package loaded";
     browser.setStatus(msg, false);
 
     // Also add to transcript

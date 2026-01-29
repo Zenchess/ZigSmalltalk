@@ -907,7 +907,7 @@ pub const FileIn = struct {
         // Validate the class pointer is within heap range
         const class_ptr = @intFromPtr(class_value.asObject());
         if (class_ptr < heap_base or class_ptr >= heap_end) {
-            std.debug.print("ERROR: Class pointer 0x{x} outside heap [0x{x}-0x{x}] for class '{s}'\n", .{ class_ptr, heap_base, heap_end, class_name });
+            if (DEBUG_VERBOSE) std.debug.print("ERROR: Class pointer 0x{x} outside heap [0x{x}-0x{x}] for class '{s}'\n", .{ class_ptr, heap_base, heap_end, class_name });
             return FileInError.ClassNotFound;
         }
 
@@ -923,7 +923,7 @@ pub const FileIn = struct {
         // Validate the target pointer is within heap range
         const target_ptr = @intFromPtr(target_class_val.asObject());
         if (target_ptr < heap_base or target_ptr >= heap_end) {
-            std.debug.print("ERROR: Target class pointer 0x{x} outside heap [0x{x}-0x{x}] for class '{s}' (class_side={})\n", .{ target_ptr, heap_base, heap_end, class_name, self.current_is_class_side });
+            if (DEBUG_VERBOSE) std.debug.print("ERROR: Target class pointer 0x{x} outside heap [0x{x}-0x{x}] for class '{s}' (class_side={})\n", .{ target_ptr, heap_base, heap_end, class_name, self.current_is_class_side });
             return FileInError.ClassNotFound;
         }
 
@@ -1821,7 +1821,7 @@ pub fn createDynamicClass(heap: *Heap, name: []const u8, superclass: ?*object.Ob
             idx += 2;
         }
         class.setField(Heap.CLASS_FIELD_CLASS_VARS, Value.fromObject(class_vars_dict), num_fields);
-        std.debug.print("  Class variables: {s}\n", .{class_var_names});
+        if (DEBUG_VERBOSE) std.debug.print("  Class variables: {s}\n", .{class_var_names});
     } else {
         class.setField(Heap.CLASS_FIELD_CLASS_VARS, Value.nil, num_fields);
     }
@@ -1853,7 +1853,7 @@ pub fn createDynamicClass(heap: *Heap, name: []const u8, superclass: ?*object.Ob
             idx += 1;
         }
         class.setField(Heap.CLASS_FIELD_POOL_DICTS, Value.fromObject(pool_dicts_array), num_fields);
-        std.debug.print("  Pool dictionaries: {s}\n", .{pool_dict_names});
+        if (DEBUG_VERBOSE) std.debug.print("  Pool dictionaries: {s}\n", .{pool_dict_names});
     } else {
         class.setField(Heap.CLASS_FIELD_POOL_DICTS, Value.nil, num_fields);
     }
@@ -1927,7 +1927,7 @@ fn createDynamicMetaclass(heap: *Heap, class: *object.Object, name: []const u8, 
             idx += 1;
         }
         class.setField(Heap.CLASS_FIELD_CLASS_INST_VARS, Value.fromObject(names_array), num_fields);
-        std.debug.print("  Class instance variables: {s}\n", .{class_inst_var_names});
+        if (DEBUG_VERBOSE) std.debug.print("  Class instance variables: {s}\n", .{class_inst_var_names});
     } else {
         class.setField(Heap.CLASS_FIELD_CLASS_INST_VARS, Value.nil, num_fields);
     }

@@ -1,5 +1,7 @@
 const std = @import("std");
 const Heap = @import("../vm/memory.zig").Heap;
+const FileIn = @import("../image/filein.zig").FileIn;
+const Interpreter = @import("../vm/interpreter.zig").Interpreter;
 
 /// Package - a collection of classes that can be saved/loaded together
 pub const Package = struct {
@@ -310,22 +312,45 @@ pub const PackageRegistry = struct {
         package.modified = false;
     }
 
-    /// Load a package from file
-    pub fn loadPackageFromFile(self: *PackageRegistry, package_name: []const u8, is_system: bool) !*Package {
+    /// Load a package from file by package name
+    pub fn loadPackageFromFile(self: *PackageRegistry, package_name: []const u8, is_system: bool, heap: *Heap, interp: ?*Interpreter) !*Package {
         const base_dir = if (is_system) "system-packages" else "packages";
         var path_buf: [256]u8 = undefined;
         const full_path = std.fmt.bufPrint(&path_buf, "{s}/{s}.st", .{ base_dir, package_name }) catch return error.PathTooLong;
 
+        return self.loadPackageFromPath(full_path, package_name, is_system, heap, interp);
+    }
+
+    /// Load a package from an arbitrary file path
+    pub fn loadPackageFromPath(self: *PackageRegistry, path: []const u8, package_name: []const u8, is_system: bool, heap: *Heap, interp: ?*Interpreter) !*Package {
         // Check if file exists
-        _ = std.fs.cwd().statFile(full_path) catch return error.FileNotFound;
+        _ = std.fs.cwd().statFile(path) catch return error.FileNotFound;
+
+        // Load the file using FileIn - use provided interpreter if available
+        // This ensures transcript output goes to the TUI instead of stdout
+        var filein = if (interp) |i|
+            FileIn.initWithInterpreter(self.allocator, heap, i)
+        else
+            FileIn.init(self.allocator, heap);
+        defer filein.deinit();
+
+        filein.loadFile(path) catch |err| {
+            return switch (err) {
+                error.FileNotFound => error.FileNotFound,
+                error.OutOfMemory => error.OutOfMemory,
+                else => error.IoError,
+            };
+        };
 
         // Create or get the package
         const pkg = try self.createPackage(package_name);
         pkg.is_system = is_system;
         pkg.loaded = true;
 
-        // Note: Actual file loading would require the FileIn module
-        // For now, just mark as loaded
+        // Track classes that were loaded (by checking what FileIn created)
+        // Note: FileIn doesn't expose which classes it created, so we rely on
+        // the user to categorize classes later. The package is marked as loaded.
+
         return pkg;
     }
 

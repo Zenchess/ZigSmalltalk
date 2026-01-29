@@ -14,6 +14,16 @@ const Style = style_mod.Style;
 const Rect = widget.Rect;
 const EventResult = widget.EventResult;
 
+pub const FileEntry = struct {
+    name: [256]u8,
+    name_len: usize,
+    is_dir: bool,
+
+    pub fn getName(self: *const FileEntry) []const u8 {
+        return self.name[0..self.name_len];
+    }
+};
+
 pub const BrowserTab = struct {
     allocator: std.mem.Allocator,
     rect: Rect,
@@ -63,6 +73,14 @@ pub const BrowserTab = struct {
     dialog_package_name: [64]u8 = [_]u8{0} ** 64,
     dialog_package_name_len: usize = 0,
 
+    // Load package dialog state (file browser)
+    show_load_package_dialog: bool = false,
+    file_browser_dir: [512]u8 = [_]u8{0} ** 512,
+    file_browser_dir_len: usize = 0,
+    file_browser_entries: std.ArrayList(FileEntry),
+    file_browser_selected: usize = 0,
+    file_browser_scroll: usize = 0,
+
     // Status message
     status_message: [128]u8 = undefined,
     status_len: usize = 0,
@@ -82,6 +100,7 @@ pub const BrowserTab = struct {
     on_new_method: ?*const fn (*BrowserTab, bool) void = null, // Called when user wants to create new method (bool = class_side)
     on_save_package: ?*const fn (*BrowserTab, []const u8) void = null, // Called to save package to file
     on_create_package: ?*const fn (*BrowserTab, []const u8) void = null, // Called to create new package
+    on_load_package: ?*const fn (*BrowserTab, []const u8) void = null, // Called to load package from file
 
     pub const DialogField = enum {
         class_name,
@@ -135,6 +154,7 @@ pub const BrowserTab = struct {
             .class_method_list = class_method_list,
             .source_editor = source_editor,
             .all_class_roots = std.ArrayList(*TreeNode).empty,
+            .file_browser_entries = std.ArrayList(FileEntry).empty,
         };
 
         // Initialize dialog superclass default
@@ -151,6 +171,7 @@ pub const BrowserTab = struct {
         self.instance_method_list.deinit();
         self.class_method_list.deinit();
         self.source_editor.deinit();
+        self.file_browser_entries.deinit(self.allocator);
         if (self.pending_source) |ps| {
             self.allocator.free(ps);
         }
@@ -379,6 +400,12 @@ pub const BrowserTab = struct {
     }
 
     pub fn addPackage(self: *BrowserTab, name: []const u8) !void {
+        // Check if package already exists in list
+        for (self.package_list.items.items) |item| {
+            if (std.mem.eql(u8, item.text, name)) {
+                return; // Already exists, don't add duplicate
+            }
+        }
         try self.package_list.addItem(name, null);
     }
 
@@ -543,7 +570,12 @@ pub const BrowserTab = struct {
     }
 
     pub fn handleKey(self: *BrowserTab, key: Key) EventResult {
-        // Handle new package dialog first
+        // Handle load package dialog first
+        if (self.show_load_package_dialog) {
+            return self.handleLoadPackageDialogKey(key);
+        }
+
+        // Handle new package dialog
         if (self.show_new_package_dialog) {
             return self.handlePackageDialogKey(key);
         }
@@ -593,6 +625,10 @@ pub const BrowserTab = struct {
                                 cb(self, self.selected_package_name);
                             }
                         }
+                        return .consumed;
+                    },
+                    12 => { // Ctrl+L - Load package from file
+                        self.showLoadPackageDialog();
                         return .consumed;
                     },
                     19 => { // Ctrl+S - Save
@@ -718,6 +754,171 @@ pub const BrowserTab = struct {
     pub fn showNewPackageDialog(self: *BrowserTab) void {
         self.show_new_package_dialog = true;
         self.dialog_package_name_len = 0;
+    }
+
+    pub fn showLoadPackageDialog(self: *BrowserTab) void {
+        self.show_load_package_dialog = true;
+        self.file_browser_selected = 0;
+        self.file_browser_scroll = 0;
+
+        // Start in packages/ directory if it exists, otherwise current directory
+        const packages_dir = "packages";
+        if (std.fs.cwd().openDir(packages_dir, .{ .iterate = true })) |_| {
+            @memcpy(self.file_browser_dir[0..packages_dir.len], packages_dir);
+            self.file_browser_dir_len = packages_dir.len;
+        } else |_| {
+            // Use current directory
+            self.file_browser_dir[0] = '.';
+            self.file_browser_dir_len = 1;
+        }
+
+        self.refreshFileBrowser();
+    }
+
+    fn refreshFileBrowser(self: *BrowserTab) void {
+        self.file_browser_entries.clearRetainingCapacity();
+
+        const dir_path = self.file_browser_dir[0..self.file_browser_dir_len];
+        var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch return;
+        defer dir.close();
+
+        // Add parent directory entry if not at root
+        if (self.file_browser_dir_len > 1 or self.file_browser_dir[0] != '/') {
+            var entry: FileEntry = .{
+                .name = undefined,
+                .name_len = 2,
+                .is_dir = true,
+            };
+            entry.name[0] = '.';
+            entry.name[1] = '.';
+            self.file_browser_entries.append(self.allocator, entry) catch {};
+        }
+
+        // Read directory entries
+        var iter = dir.iterate();
+        while (iter.next() catch null) |item| {
+            // Only show directories and .st files
+            const is_st_file = std.mem.endsWith(u8, item.name, ".st");
+            if (item.kind != .directory and !is_st_file) continue;
+
+            var entry: FileEntry = .{
+                .name = undefined,
+                .name_len = @min(item.name.len, 255),
+                .is_dir = item.kind == .directory,
+            };
+            @memcpy(entry.name[0..entry.name_len], item.name[0..entry.name_len]);
+            self.file_browser_entries.append(self.allocator, entry) catch {};
+        }
+
+        // Sort entries: directories first, then alphabetically
+        std.mem.sort(FileEntry, self.file_browser_entries.items, {}, struct {
+            fn lessThan(_: void, a: FileEntry, b: FileEntry) bool {
+                // ".." always first
+                if (a.name_len == 2 and a.name[0] == '.' and a.name[1] == '.') return true;
+                if (b.name_len == 2 and b.name[0] == '.' and b.name[1] == '.') return false;
+                // Directories before files
+                if (a.is_dir and !b.is_dir) return true;
+                if (!a.is_dir and b.is_dir) return false;
+                // Alphabetical
+                return std.mem.lessThan(u8, a.name[0..a.name_len], b.name[0..b.name_len]);
+            }
+        }.lessThan);
+
+        self.file_browser_selected = 0;
+        self.file_browser_scroll = 0;
+    }
+
+    fn handleLoadPackageDialogKey(self: *BrowserTab, key: Key) EventResult {
+        switch (key) {
+            .escape => {
+                self.show_load_package_dialog = false;
+                return .consumed;
+            },
+            .enter => {
+                if (self.file_browser_entries.items.len == 0) return .consumed;
+
+                const entry = &self.file_browser_entries.items[self.file_browser_selected];
+                if (entry.is_dir) {
+                    // Navigate into directory
+                    const entry_name = entry.getName();
+                    if (entry_name.len == 2 and entry_name[0] == '.' and entry_name[1] == '.') {
+                        // Go up to parent
+                        if (std.mem.lastIndexOf(u8, self.file_browser_dir[0..self.file_browser_dir_len], "/")) |idx| {
+                            if (idx > 0) {
+                                self.file_browser_dir_len = idx;
+                            } else {
+                                self.file_browser_dir_len = 1; // Keep the leading /
+                            }
+                        } else {
+                            // No slash found, go to parent relative path
+                            const parent = std.fs.path.dirname(self.file_browser_dir[0..self.file_browser_dir_len]) orelse ".";
+                            @memcpy(self.file_browser_dir[0..parent.len], parent);
+                            self.file_browser_dir_len = parent.len;
+                        }
+                    } else {
+                        // Append directory name
+                        if (self.file_browser_dir_len + 1 + entry_name.len < self.file_browser_dir.len) {
+                            self.file_browser_dir[self.file_browser_dir_len] = '/';
+                            @memcpy(self.file_browser_dir[self.file_browser_dir_len + 1 ..][0..entry_name.len], entry_name);
+                            self.file_browser_dir_len += 1 + entry_name.len;
+                        }
+                    }
+                    self.refreshFileBrowser();
+                } else {
+                    // Select file - build full path and call callback
+                    const entry_name = entry.getName();
+                    var full_path: [768]u8 = undefined;
+                    const path_len = self.file_browser_dir_len + 1 + entry_name.len;
+                    if (path_len < full_path.len) {
+                        @memcpy(full_path[0..self.file_browser_dir_len], self.file_browser_dir[0..self.file_browser_dir_len]);
+                        full_path[self.file_browser_dir_len] = '/';
+                        @memcpy(full_path[self.file_browser_dir_len + 1 ..][0..entry_name.len], entry_name);
+
+                        if (self.on_load_package) |cb| {
+                            cb(self, full_path[0..path_len]);
+                        }
+                        self.show_load_package_dialog = false;
+                    }
+                }
+                return .consumed;
+            },
+            .up => {
+                if (self.file_browser_selected > 0) {
+                    self.file_browser_selected -= 1;
+                    if (self.file_browser_selected < self.file_browser_scroll) {
+                        self.file_browser_scroll = self.file_browser_selected;
+                    }
+                }
+                return .consumed;
+            },
+            .down => {
+                if (self.file_browser_selected + 1 < self.file_browser_entries.items.len) {
+                    self.file_browser_selected += 1;
+                    // Scroll if needed (assuming 10 visible rows)
+                    if (self.file_browser_selected >= self.file_browser_scroll + 10) {
+                        self.file_browser_scroll = self.file_browser_selected - 9;
+                    }
+                }
+                return .consumed;
+            },
+            .backspace => {
+                // Go to parent directory
+                if (std.mem.lastIndexOf(u8, self.file_browser_dir[0..self.file_browser_dir_len], "/")) |idx| {
+                    if (idx > 0) {
+                        self.file_browser_dir_len = idx;
+                    } else {
+                        self.file_browser_dir_len = 1;
+                    }
+                    self.refreshFileBrowser();
+                } else if (self.file_browser_dir_len > 1 or self.file_browser_dir[0] != '.') {
+                    self.file_browser_dir[0] = '.';
+                    self.file_browser_dir_len = 1;
+                    self.refreshFileBrowser();
+                }
+                return .consumed;
+            },
+            else => return .consumed,
+        }
     }
 
     fn handlePackageDialogKey(self: *BrowserTab, key: Key) EventResult {
@@ -1330,6 +1531,11 @@ pub const BrowserTab = struct {
         if (self.show_new_package_dialog) {
             self.drawNewPackageDialog(screen);
         }
+
+        // Draw load package dialog if visible
+        if (self.show_load_package_dialog) {
+            self.drawLoadPackageDialog(screen);
+        }
     }
 
     fn drawNewPackageDialog(self: *BrowserTab, screen: *Screen) void {
@@ -1408,5 +1614,65 @@ pub const BrowserTab = struct {
             .superclass => screen.setCursor(dialog_x + 14 + @as(u16, @intCast(self.dialog_superclass_len)), dialog_y + 4),
             .inst_vars => screen.setCursor(dialog_x + 14 + @as(u16, @intCast(self.dialog_inst_vars_len)), dialog_y + 6),
         }
+    }
+
+    fn drawLoadPackageDialog(self: *BrowserTab, screen: *Screen) void {
+        const dialog_width: u16 = 50;
+        const dialog_height: u16 = 16;
+        const dialog_x = (self.rect.width -| dialog_width) / 2 + self.rect.x;
+        const dialog_y = (self.rect.height -| dialog_height) / 2 + self.rect.y;
+
+        const dialog_rect = Rect.init(dialog_x, dialog_y, dialog_width, dialog_height);
+
+        // Draw dialog background
+        screen.fillRect(dialog_rect.x, dialog_rect.y, dialog_rect.width, dialog_rect.height, ' ', style_mod.styles.normal);
+        widget.drawBorderRounded(screen, dialog_rect, true);
+        widget.drawTitle(screen, dialog_rect, "Load Package", true);
+
+        const normal_style = style_mod.styles.normal;
+        const selected_style = Style{ .fg = style_mod.theme.base, .bg = style_mod.theme.blue, .bold = true };
+        const dir_style = Style{ .fg = style_mod.theme.blue, .bold = true };
+        const file_style = style_mod.styles.normal;
+
+        // Current directory path
+        screen.drawTextClipped(dialog_x + 2, dialog_y + 1, self.file_browser_dir[0..self.file_browser_dir_len], dialog_width - 4, style_mod.styles.dim);
+
+        // File list area
+        const list_y = dialog_y + 2;
+        const list_height: usize = 10;
+        const content_width = dialog_width - 4;
+
+        // Draw file entries
+        var y: usize = 0;
+        while (y < list_height) : (y += 1) {
+            const idx = self.file_browser_scroll + y;
+            if (idx >= self.file_browser_entries.items.len) break;
+
+            const entry = &self.file_browser_entries.items[idx];
+            const name = entry.getName();
+            const is_selected = idx == self.file_browser_selected;
+
+            // Choose style
+            const style = if (is_selected) selected_style else if (entry.is_dir) dir_style else file_style;
+
+            // Clear the line
+            screen.fillRect(dialog_x + 2, list_y + @as(u16, @intCast(y)), content_width, 1, ' ', if (is_selected) selected_style else normal_style);
+
+            // Draw prefix for directories
+            if (entry.is_dir) {
+                screen.drawText(dialog_x + 2, list_y + @as(u16, @intCast(y)), "[", style);
+                screen.drawTextClipped(dialog_x + 3, list_y + @as(u16, @intCast(y)), name, content_width - 4, style);
+                const name_end = @min(name.len, content_width - 4);
+                screen.drawText(dialog_x + 3 + @as(u16, @intCast(name_end)), list_y + @as(u16, @intCast(y)), "]", style);
+            } else {
+                screen.drawTextClipped(dialog_x + 2, list_y + @as(u16, @intCast(y)), name, content_width, style);
+            }
+        }
+
+        // Help text
+        screen.drawText(dialog_x + 2, dialog_y + 13, "Up/Down: navigate", style_mod.styles.dim);
+        screen.drawText(dialog_x + 2, dialog_y + 14, "Enter: open | Backspace: up | Esc: cancel", style_mod.styles.dim);
+
+        screen.cursor_visible = false;
     }
 };
