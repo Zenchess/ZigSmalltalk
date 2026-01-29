@@ -257,17 +257,24 @@ pub const DebuggerTab = struct {
                 if (source.len > 0) {
                     self.source_view.setText(source) catch {};
 
-                    // Find the source range for the current IP
-                    const range = findSourceRangeForIP(source, frame.ip, frame.method);
-                    self.source_view.highlight_range = range;
-                    self.source_view.highlight_line = null;
-
-                    // Scroll to show the highlighted region
-                    if (range) |r| {
-                        const line = countLinesUpTo(source, r.start);
-                        self.current_line = line;
-                        self.source_view.scroll_y = if (line > 3) line - 3 else 0;
+                    // Use line-based highlighting for now (expression-level needs compiler support)
+                    // Calculate which line we're on based on bytecode ratio
+                    const bytecode_size = frame.method.header.bytecode_size;
+                    const lines_in_source = countLines(source);
+                    
+                    var current_line: usize = 0;
+                    if (bytecode_size > 0 and lines_in_source > 0) {
+                        const ratio = @as(f32, @floatFromInt(frame.ip)) / @as(f32, @floatFromInt(bytecode_size));
+                        current_line = @as(usize, @intFromFloat(ratio * @as(f32, @floatFromInt(lines_in_source))));
+                        if (current_line >= lines_in_source) current_line = lines_in_source - 1;
                     }
+                    
+                    self.source_view.highlight_line = current_line;
+                    self.source_view.highlight_range = null;
+                    self.current_line = current_line;
+                    
+                    // Scroll to show the highlighted line
+                    self.source_view.scroll_y = if (current_line > 3) current_line - 3 else 0;
                 } else {
                     self.source_view.setText("(no source available)") catch {};
                     self.source_view.highlight_range = null;
@@ -288,6 +295,15 @@ pub const DebuggerTab = struct {
         var lines: usize = 0;
         const limit = @min(offset, source.len);
         for (source[0..limit]) |c| {
+            if (c == '\n') lines += 1;
+        }
+        return lines;
+    }
+    
+    /// Count total lines in source
+    fn countLines(source: []const u8) usize {
+        var lines: usize = 1; // At least one line
+        for (source) |c| {
             if (c == '\n') lines += 1;
         }
         return lines;
@@ -451,6 +467,11 @@ pub const DebuggerTab = struct {
                     if (debugger_mod.globalDebugger) |dbg| {
                         dbg.stepInto();
                         self.setStatus("Stepping...");
+                        // Signal app to resume execution
+                        const app_mod = @import("../app.zig");
+                        if (app_mod.g_app) |app| {
+                            app.should_resume = true;
+                        }
                     }
                 }
                 return true;
@@ -461,6 +482,11 @@ pub const DebuggerTab = struct {
                     if (debugger_mod.globalDebugger) |dbg| {
                         dbg.stepOver();
                         self.setStatus("Stepping over...");
+                        // Signal app to resume execution
+                        const app_mod = @import("../app.zig");
+                        if (app_mod.g_app) |app| {
+                            app.should_resume = true;
+                        }
                     }
                 }
                 return true;
@@ -470,6 +496,11 @@ pub const DebuggerTab = struct {
                 if (self.is_halted) {
                     if (debugger_mod.globalDebugger) |dbg| {
                         dbg.continueExecution();
+                        // Signal app to resume execution
+                        const app_mod = @import("../app.zig");
+                        if (app_mod.g_app) |app| {
+                            app.should_resume = true;
+                        }
                         self.onContinue();
                     }
                 }
@@ -481,6 +512,11 @@ pub const DebuggerTab = struct {
                     if (self.is_halted) {
                         if (debugger_mod.globalDebugger) |dbg| {
                             dbg.continueExecution();
+                            // Signal app to resume execution
+                            const app_mod = @import("../app.zig");
+                            if (app_mod.g_app) |app| {
+                                app.should_resume = true;
+                            }
                             self.onContinue();
                         }
                     }

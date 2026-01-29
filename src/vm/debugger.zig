@@ -1168,13 +1168,13 @@ pub fn shouldBreak() bool {
     return false;
 }
 
-/// Enter debugger prompt
-pub fn enterDebugger() void {
+/// Enter debugger prompt - returns error to signal TUI to yield control
+pub fn enterDebugger() @import("interpreter.zig").InterpreterError!void {
     if (globalDebugger) |dbg| {
         if (dbg.tui_mode) {
-            // In TUI mode, just stay paused - TUI handles interaction
-            // The halt callback already notified the TUI
-            return;
+            // In TUI mode, return error to yield control to event loop
+            // TUI will handle stepping/continuing via key events
+            return error.DebuggerPaused;
         }
         dbg.prompt();
     }

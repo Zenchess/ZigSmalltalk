@@ -7027,8 +7027,8 @@ fn primHalt(interp: *Interpreter) InterpreterError!Value {
     const debugger = @import("debugger.zig");
     if (debugger.globalDebugger) |dbg| {
         dbg.triggerHalt();
-        // Return receiver to allow continuation after stepping
-        return interp.receiver;
+        // Throw DebuggerPaused to stop execution and yield to event loop
+        return error.DebuggerPaused;
     }
 
     // No debugger - just print and continue

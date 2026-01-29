@@ -41,6 +41,7 @@ pub const InterpreterError = error{
     BlockNonLocalReturn, // Non-local return from block - result is on stack
     SmalltalkException, // Exception signaled by Smalltalk code
     ContinueExecution, // Primitive set up new context - continue main loop
+    DebuggerPaused, // Debugger paused - yield control to event loop
 };
 
 /// Exception handler entry for on:do: handling
@@ -1086,6 +1087,11 @@ pub const Interpreter = struct {
     }
 
     /// Execute a compiled method and return the result
+    /// Resume execution from current state (used after debugger pause)
+    pub fn resumeExecution(self: *Interpreter) InterpreterError!Value {
+        return try self.interpretLoop();
+    }
+
     pub fn execute(self: *Interpreter, method: *CompiledMethod, recv: Value, args: []const Value) InterpreterError!Value {
         // Initialize common selectors for fast arithmetic dispatch (once)
         if (self.selector_plus.isNil()) {
@@ -1213,7 +1219,7 @@ pub const Interpreter = struct {
         while (true) {
             // Check debugger before each bytecode
             if (debugger.debugEnabled and debugger.shouldBreak()) {
-                debugger.enterDebugger();
+                try debugger.enterDebugger();
             }
 
             // Periodic preemption check (every 1000 instructions)
@@ -3559,7 +3565,7 @@ pub const Interpreter = struct {
         while (true) {
             // Debugger check (keep for compatibility)
             if (debugger.debugEnabled and debugger.shouldBreak()) {
-                debugger.enterDebugger();
+                try debugger.enterDebugger();
             }
 
             // Periodic preemption check (every 1000 instructions)
