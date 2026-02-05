@@ -97,6 +97,7 @@ ansi-tests/*-doit.st
 # Shell scripts for testing
 *.sh
 !tools/*.sh
+!native/mac/build-bridge.sh
 
 # Test input files
 test-input.txt

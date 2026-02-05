@@ -14,6 +14,7 @@ const FFIConfigTab = @import("tabs/ffi_config.zig").FFIConfigTab;
 const InspectorTab = @import("tabs/inspector.zig").InspectorTab;
 const DebuggerTab = @import("tabs/debugger.zig").DebuggerTab;
 const ProcessTab = @import("tabs/process.zig").ProcessTab;
+const ViewComposerTab = @import("tabs/view_composer.zig").ViewComposerTab;
 const transcript_mod = @import("tabs/transcript.zig");
 const inspector_mod = @import("tabs/inspector.zig");
 const debugger_mod = @import("../vm/debugger.zig");
@@ -88,6 +89,7 @@ pub const App = struct {
     inspector: InspectorTab,
     debugger_tab: DebuggerTab,
     process_tab: ProcessTab,
+    view_composer_tab: ViewComposerTab,
 
     // Debugger state
     debugger_active: bool = false, // True when debugger has halted
@@ -104,6 +106,7 @@ pub const App = struct {
     // Status items for different tabs
     workspace_items: []const StatusItem,
     browser_items: []const StatusItem,
+    composer_items: []const StatusItem,
     default_items: []const StatusItem,
 
     // Status message buffer (for dynamic messages)
@@ -146,6 +149,7 @@ pub const App = struct {
             .{ .title = "Inspector", .shortcut = '5' },
             .{ .title = "Debugger", .shortcut = '6' },
             .{ .title = "Processes", .shortcut = '7' },
+            .{ .title = "View Composer", .shortcut = '8' },
         };
         var tabbar = TabBar.init(tabbar_rect, &tabs);
         tabbar.active_tab = 1; // Start on Workspace tab
@@ -161,6 +165,7 @@ pub const App = struct {
         const inspector = try InspectorTab.init(allocator, content_rect, heap);
         const debugger_tab = try DebuggerTab.init(allocator, content_rect, heap);
         const process_tab = try ProcessTab.init(allocator, content_rect, heap);
+        const view_composer_tab = try ViewComposerTab.init(allocator, content_rect);
 
         // Create package registry with system packages
         var package_registry = PackageRegistry.init(allocator);
@@ -189,6 +194,7 @@ pub const App = struct {
             .inspector = inspector,
             .debugger_tab = debugger_tab,
             .process_tab = process_tab,
+            .view_composer_tab = view_composer_tab,
             .package_registry = package_registry,
             .workspace_items = &[_]StatusItem{
                 .{ .text = "Execute", .key = "Ctrl+D" },
@@ -204,6 +210,14 @@ pub const App = struct {
                 .{ .text = "New Pkg", .key = "Ctrl+N" },
                 .{ .text = "Quit", .key = "Ctrl+Q" },
             },
+            .composer_items = &[_]StatusItem{
+                .{ .text = "Add", .key = "A/Click" },
+                .{ .text = "Move", .key = "Arrows" },
+                .{ .text = "Resize", .key = "+/- []" },
+                .{ .text = "Edit", .key = "N/T/V/C/W" },
+                .{ .text = "Export", .key = "G/Ctrl+G" },
+                .{ .text = "Run", .key = "R/Ctrl+R" },
+            },
             .default_items = &[_]StatusItem{
                 .{ .text = "Workspace", .key = "F2" },
                 .{ .text = "Browser", .key = "F3" },
@@ -218,7 +232,7 @@ pub const App = struct {
         try app.transcript.addLine("", .normal);
         try app.transcript.addInfo("Keyboard Shortcuts");
         try app.transcript.addLine("", .normal);
-        try app.transcript.addLine("  Tabs:      F1 Transcript  F2 Workspace  F3 Browser  F4 FFI  F5 Debugger  F6 Processes", .normal);
+        try app.transcript.addLine("  Tabs:      F1 Transcript  F2 Workspace  F3 Browser  F4 FFI  F5 Inspector  F6 Debugger  F7 Processes  F8 Composer", .normal);
         try app.transcript.addLine("  Image:     F9 Save        F12 Save As", .normal);
         try app.transcript.addLine("  System:    Ctrl+Q Quit", .normal);
         try app.transcript.addLine("", .normal);
@@ -268,6 +282,8 @@ pub const App = struct {
         app.inspector.on_print_it = &inspectorPrintIt;
         app.inspector.on_inspect_it = &inspectorInspectIt;
         app.inspector.on_browse = &inspectorBrowse;
+        app.view_composer_tab.on_export_code = &composerExportCode;
+        app.view_composer_tab.on_run_code = &composerRunCode;
 
         // Set global app pointer for callbacks
         g_app = app;
@@ -300,6 +316,7 @@ pub const App = struct {
         self.inspector.deinit();
         self.debugger_tab.deinit();
         self.process_tab.deinit();
+        self.view_composer_tab.deinit();
         self.package_registry.deinit();
         self.screen.deinit();
         self.terminal.deinit();
@@ -535,12 +552,20 @@ pub const App = struct {
                 return;
             },
             .f5 => {
-                self.switchToTab(5); // Debugger
+                self.switchToTab(4); // Inspector
                 return;
             },
             .f6 => {
+                self.switchToTab(5); // Debugger
+                return;
+            },
+            .f7 => {
                 self.switchToTab(6); // Processes
                 self.process_tab.refresh();
+                return;
+            },
+            .f8 => {
+                self.switchToTab(7); // View Composer
                 return;
             },
             .ctrl_shift_s, .f9 => {
@@ -588,6 +613,10 @@ pub const App = struct {
                     '7' => {
                         self.switchToTab(6); // Processes
                         self.process_tab.refresh();
+                        return;
+                    },
+                    '8' => {
+                        self.switchToTab(7); // View Composer
                         return;
                     },
                     else => {},
@@ -711,6 +740,14 @@ pub const App = struct {
         if (self.active_tab == 6) {
             if (self.process_tab.handleKey(key)) return;
         }
+        if (self.active_tab == 7) {
+            const result = self.view_composer_tab.handleKey(key);
+            if (result == .consumed) return;
+            if (result == .quit) {
+                self.running = false;
+                return;
+            }
+        }
 
         // Handle tab bar input (for switching between main tabs)
         const tab_result = self.tabbar.handleKey(key);
@@ -778,6 +815,7 @@ pub const App = struct {
                 4 => self.inspector.handleMouse(mouse),
                 5 => self.debugger_tab.handleMouse(mouse),
                 6 => self.process_tab.handleMouse(mouse),
+                7 => self.view_composer_tab.handleMouse(mouse),
                 else => {},
             }
             return;
@@ -793,6 +831,7 @@ pub const App = struct {
                 4 => self.inspector.scroll(scroll_dir),
                 5 => self.debugger_tab.scroll(scroll_dir),
                 6 => self.process_tab.scroll(scroll_dir),
+                7 => self.view_composer_tab.scroll(scroll_dir),
                 else => {},
             }
         }
@@ -823,6 +862,7 @@ pub const App = struct {
         self.inspector.focused = self.active_tab == 4;
         self.debugger_tab.focused = self.active_tab == 5;
         self.process_tab.focused = self.active_tab == 6;
+        self.view_composer_tab.focused = self.active_tab == 7;
     }
 
     fn switchToTab(self: *App, tab: usize) void {
@@ -893,6 +933,11 @@ pub const App = struct {
                 self.process_tab.updateRect(content_rect);
                 self.process_tab.draw(&self.screen);
                 self.statusbar.setItems(self.default_items);
+            },
+            7 => {
+                self.view_composer_tab.updateRect(content_rect);
+                self.view_composer_tab.draw(&self.screen);
+                self.statusbar.setItems(self.composer_items);
             },
             else => {},
         }
@@ -2442,6 +2487,65 @@ fn browserLoadPackage(browser: *BrowserTab, file_path: []const u8) void {
 
     // Also add to transcript
     app.transcript.addSuccess(msg) catch {};
+}
+
+fn composerExportCode(tab: *ViewComposerTab, code: []const u8) void {
+    _ = tab;
+    const app = g_app orelse return;
+
+    app.workspace.setText(code) catch {
+        app.statusbar.setMessage("Composer export failed");
+        return;
+    };
+    app.switchToTab(1); // Workspace
+    app.statusbar.setMessage("Composer code sent to workspace");
+    app.transcript.addInfo("View composer code copied to workspace") catch {};
+}
+
+fn composerRunCode(tab: *ViewComposerTab, code: []const u8) void {
+    _ = tab;
+    const app = g_app orelse return;
+    var fi = filein.FileIn.initWithInterpreter(app.allocator, app.heap, app.interpreter);
+    defer fi.deinit();
+
+    fi.loadSource(code) catch {
+        app.statusbar.setMessage("Composer run failed: file-in error");
+        app.transcript.addError("View composer generated code failed to load") catch {};
+        return;
+    };
+
+    const class_name = extractComposerClassName(code) orelse {
+        app.statusbar.setMessage("Composer run failed: class name parse error");
+        return;
+    };
+    defer app.allocator.free(class_name);
+
+    const run_expr = std.fmt.allocPrint(app.allocator, "{s} run", .{class_name}) catch {
+        app.statusbar.setMessage("Composer run failed: allocation");
+        return;
+    };
+    defer app.allocator.free(run_expr);
+
+    app.executeCode(run_expr, false);
+    app.statusbar.setMessage("Composer code loaded and run");
+}
+
+fn extractComposerClassName(source: []const u8) ?[]u8 {
+    const app = g_app orelse return null;
+    const marker = "Object subclass: #";
+    const start = std.mem.indexOf(u8, source, marker) orelse return null;
+    const class_start = start + marker.len;
+    if (class_start >= source.len) return null;
+
+    var i = class_start;
+    while (i < source.len) : (i += 1) {
+        const c = source[i];
+        const ident = (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or (c >= '0' and c <= '9') or c == '_';
+        if (!ident) break;
+    }
+    if (i <= class_start) return null;
+
+    return app.allocator.dupe(u8, source[class_start..i]) catch null;
 }
 
 pub fn runTUI(allocator: std.mem.Allocator, heap: *Heap, interp: *Interpreter) !void {

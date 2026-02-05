@@ -18,6 +18,7 @@ Linux, Windows, macOS
 - **64-bit tagged pointer VM** with 61-bit SmallIntegers
 - **Semi-space copying garbage collector** with interpreter stack tracing
 - **Terminal UI (TUI)** with mouse support, multiple tabs, and syntax highlighting
+- **View Composer (MVP)** for graphical widget layout and code generation
 - **Compile-time C FFI generation** configurable through the TUI
 - **Automatic C struct bindings** with getter/setter method generation
 - **ANSI Smalltalk compliance** (~100% of ANSI test suite passing)
@@ -74,6 +75,7 @@ The TUI provides an integrated development environment in the terminal with full
 | `F2` | Workspace | Interactive code editor for evaluating expressions |
 | `F3` | Browser | Class and method browser with source editing |
 | `F4` | FFI Config | Configure external library bindings |
+| `F8` | View Composer | Graphical widget composition + generated Smalltalk code |
 
 You can also use `Ctrl+1` through `Ctrl+4` to switch tabs.
 
@@ -101,6 +103,38 @@ You can also use `Ctrl+1` through `Ctrl+4` to switch tabs.
 | `Tab` | Switch between panes (class list, method list, source) |
 | Arrow keys | Navigate lists |
 | `Escape` | Exit browser |
+
+### View Composer Shortcuts
+
+| Shortcut | Action |
+|----------|--------|
+| `A` or click canvas | Add selected widget |
+| `Arrow keys` | Move selected widget |
+| `+` / `-` | Resize selected widget width |
+| `[` / `]` | Resize selected widget height |
+| `N` / `T` / `V` | Edit name / label / event selector |
+| `C` / `W` | Edit generated class name / window title |
+| `G` or `Ctrl+G` | Export generated code to Workspace |
+| `R` or `Ctrl+R` | Execute generated code |
+
+### Native macOS Bridge (View Composer)
+
+The composer can optionally open native macOS windows through an Objective-C bridge library.
+
+Build the bridge on macOS:
+
+```bash
+./native/mac/build-bridge.sh
+```
+
+This produces:
+
+```bash
+native/mac/libzscocoa_bridge.dylib
+```
+
+If present, `ComposerShell>>open` will use native macOS controls.  
+Generated presenter classes also include `run`, which opens the shell and starts the native app loop.
 
 
 

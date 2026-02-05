@@ -85,6 +85,15 @@ pub fn build(b: *std.Build) void {
             // Add the generated headers to exe's include path for @cImport
             exe.addIncludePath(result.include_path);
         } else {
+            if (target.result.os.tag == .macos) {
+                // Homebrew libffi is keg-only on macOS; add explicit paths when present.
+                if (std.fs.cwd().access("/opt/homebrew/opt/libffi/include", .{})) |_| {
+                    exe.addIncludePath(.{ .cwd_relative = "/opt/homebrew/opt/libffi/include" });
+                } else |_| {}
+                if (std.fs.cwd().access("/opt/homebrew/opt/libffi/lib", .{})) |_| {
+                    exe.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/opt/libffi/lib" });
+                } else |_| {}
+            }
             exe.linkSystemLibrary("ffi");
         }
 
@@ -138,6 +147,14 @@ pub fn build(b: *std.Build) void {
             unit_tests.linkLibrary(result.lib);
             unit_tests.addIncludePath(result.include_path);
         } else {
+            if (target.result.os.tag == .macos) {
+                if (std.fs.cwd().access("/opt/homebrew/opt/libffi/include", .{})) |_| {
+                    unit_tests.addIncludePath(.{ .cwd_relative = "/opt/homebrew/opt/libffi/include" });
+                } else |_| {}
+                if (std.fs.cwd().access("/opt/homebrew/opt/libffi/lib", .{})) |_| {
+                    unit_tests.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/opt/libffi/lib" });
+                } else |_| {}
+            }
             unit_tests.linkSystemLibrary("ffi");
         }
         linkFFILibraries(b, unit_tests, target);
@@ -415,6 +432,12 @@ fn linkFFILibraries(b: *std.Build, exe: *std.Build.Step.Compile, target: std.Bui
 
         // Skip libc and libm - they're handled separately by linkLibC()
         if (std.mem.eql(u8, link.string, "c") or std.mem.eql(u8, link.string, "m")) continue;
+
+        // OpenGL linking in ffi-config.json uses Linux-style 'GL'; skip on macOS.
+        if (target.result.os.tag == .macos and std.mem.eql(u8, link.string, "GL")) {
+            std.debug.print("FFI: Skipping Linux OpenGL library 'GL' on macOS target\n", .{});
+            continue;
+        }
 
         // Skip platform-incompatible libraries
         // Note: .a files can be valid on both Unix and Windows (MinGW), so we check the path prefix

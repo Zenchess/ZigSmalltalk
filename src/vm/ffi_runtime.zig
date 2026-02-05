@@ -368,7 +368,7 @@ pub fn callFunction(
     // Call the function
     ffi.ffi_call(
         &cif,
-        @ptrCast(fn_ptr),
+        @ptrCast(@alignCast(fn_ptr)),
         @ptrCast(&ret_value),
         if (arg_types.len > 0) @ptrCast(&ctx.arg_pointers) else null,
     );

@@ -406,6 +406,11 @@ pub fn main() !void {
         core_file_in.loadFile("src/image/ffi.st") catch {
             core_file_in.loadFile("ffi.st") catch {};
         };
+
+        // Load view composer runtime classes (ComposerShell/ComposerWidget/etc.)
+        core_file_in.loadFile("src/image/composer-runtime.st") catch {
+            core_file_in.loadFile("composer-runtime.st") catch {};
+        };
     }
 
     // Process load-order file if specified (after core libraries are loaded)
