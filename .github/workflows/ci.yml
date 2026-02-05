@@ -1,28 +1,27 @@
 name: CI
 
-# CI temporarily disabled - requires Zig 0.15.x which is not yet officially released
-# The project uses Zig 0.15.x features (.empty ArrayList syntax) but:
-# - Zig 0.14.0 (stable) doesn't have these features
-# - Zig 0.16.0-dev (master) has breaking build.zig API changes
-# Re-enable when Zig 0.15.x is released
-
 on:
-  workflow_dispatch:  # Manual trigger only for now
-  # push:
-  #   branches: [master, main]
-  # pull_request:
-  #   branches: [master, main]
+  workflow_dispatch:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
 
 jobs:
-  build-linux:
-    runs-on: ubuntu-latest
+  build-macos:
+    runs-on: macos-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Notice
-        run: |
-          echo "CI is temporarily disabled pending Zig 0.15.x release"
-          echo "The project requires Zig 0.15.x features not available in 0.14.0 stable"
-          echo "Run locally with: zig build"
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - name: Build
+        run: zig build
+
+      - name: Test
+        run: zig build test

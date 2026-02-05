@@ -961,8 +961,8 @@ pub const CodeBuffer = struct {
 };
 
 /// Compiled native code for a method
-// Page size for memory allocation (4KB on most systems)
-const PAGE_SIZE: usize = 4096;
+// Use Zig's minimum page size for this target (e.g. 16KB on Apple Silicon).
+const PAGE_SIZE: usize = std.heap.page_size_min;
 
 // ============================================================================
 // Cross-Platform Executable Memory Allocation

@@ -150,6 +150,12 @@ pub fn build(b: *std.Build) void {
 
 /// Build libffi from vendored source
 fn buildLibffi(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) ?LibffiResult {
+    // The vendored libffi setup is currently Linux/Windows oriented.
+    // On macOS, prefer system libffi detection/linking.
+    if (target.result.os.tag == .macos) {
+        return null;
+    }
+
     // Get the libffi dependency from build.zig.zon
     const libffi_dep = b.lazyDependency("libffi", .{}) orelse return null;
 
@@ -320,8 +326,10 @@ fn detectFFILibraries() bool {
             "/usr/lib/x86_64-linux-gnu/libffi.so",
             "/usr/lib64/libffi.so",
             "/usr/local/lib/libffi.so",
+            "/opt/homebrew/opt/libffi/lib/libffi.dylib",
             "/opt/homebrew/lib/libffi.dylib",
             "/usr/local/lib/libffi.dylib",
+            "/usr/lib/libffi.tbd",
         };
         for (unix_paths) |path| {
             if (std.fs.cwd().access(path, .{})) |_| {

@@ -11,7 +11,7 @@ Currently working:  Terminal editor with workspace/transcript/ffi page/browser. 
 Benchmarks are around 20,000,000 message sends/second on some benchmarks, still slower than Cog/Visualworks but this is the current focus of development for more speed, utilizing more advanced Jit compilation techniques.
 
 ## Platforms
-Linux, Windows (could run on mac maybe but haven't tested)
+Linux, Windows, macOS
 
 ## Features
 
@@ -45,7 +45,7 @@ You can check your version with `zig version`. The project is developed with Zig
 zig build
 
 # Run the REPL
-./tui.bat (windows)  ./tui.sh (Linux)
+./tui.bat (windows)  ./tui.sh (Linux/macOS)
 
 
 
